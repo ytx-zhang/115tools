@@ -1,0 +1,10 @@
+token:
+    access_token: 
+    refresh_token: #必填,从openlist那边获取115的刷新token
+    expire_at: 
+sync_path: /strm媒体库 #需要同步的目录 跟compose文件里一致
+strm_path: /待刮削 #需要生成strm的目录 跟compose文件里一致
+temp_path: /Temp #同步时把不用的云端文件暂存的路径 需要先在115创建
+strm_url: http://115tools:8080 #本工具生成的strm文件里的地址
+emby_url: http://emby:8096 #emby地址
+fontinass_url: http://fontinass:8011 #如果有fontinass可以填写,程序会自动反代给他不需要用他的反代

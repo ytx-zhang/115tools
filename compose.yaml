@@ -1,20 +1,14 @@
 services:
   115tools:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      network: host
+    image: ghcr.io/ytx-zhang/115tools:latest
     container_name: 115tools
     volumes:
-      - ./data:/app/data
-      - /mnt/strm媒体库:/strm媒体库
-      - /mnt/待刮削:/待刮削
+      - ./data:/app/data #配置文件和数据库存放目录
+      - /mnt/strm媒体库:/strm媒体库 #左边是本地存放strm文件的目录 右边是云端的目录 必须一致
+      - /mnt/待刮削:/待刮削 #左边是本地生成strm文件的目录 右边是云端的目录 必须一致
     restart: always
-    networks:
-      l3_net:
-        ipv4_address: 10.10.10.10
+    port:
+      - 8080:8080 #strm文件里访问的端口
+      - 8095:8095 #emby302的端口
     environment:
       - TZ=Asia/Shanghai
-networks:
-  l3_net:
-    external: true
