@@ -1,0 +1,20 @@
+services:
+  115tools:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    container_name: 115tools
+    volumes:
+      - ./data:/app/data
+      - /mnt/strm媒体库:/strm媒体库
+      - /mnt/待刮削:/待刮削
+    restart: always
+    networks:
+      l3_net:
+        ipv4_address: 10.10.10.10
+    environment:
+      - TZ=Asia/Shanghai
+networks:
+  l3_net:
+    external: true

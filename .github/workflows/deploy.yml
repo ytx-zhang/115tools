@@ -1,0 +1,54 @@
+name: Auto Build and Push Image
+
+on:
+  push:
+    branches: [ "main" ]  # 只有向 main 分支推送代码时才触发
+  workflow_dispatch:      # 允许你在 GitHub 页面上手动点按钮触发
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # 必须开启此权限才能推送镜像到 GitHub Packages
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 设置 Docker Buildx（用于支持缓存优化）
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 登录 GitHub 镜像仓库
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 提取元数据（自动生成标签）
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      # 执行编译并推送
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ id.meta.outputs.tags }}
+          # 开启 GitHub Action 专用缓存，第二次构建只要几秒钟
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
