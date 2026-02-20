@@ -97,9 +97,6 @@ func StartEmby302() {
 					finalURL, err := getFinalLocation(media.Path, r.Header.Get("User-Agent"))
 					if err == nil && finalURL != "" {
 						log.Printf("[302 Success] %s", media.Name)
-						w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-						w.Header().Set("Pragma", "no-cache")
-						w.Header().Set("Expires", "0")
 						http.Redirect(w, r, finalURL, http.StatusFound)
 						return
 					} else {
