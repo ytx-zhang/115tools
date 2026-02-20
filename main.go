@@ -39,6 +39,7 @@ func main() {
 	// 状态查询接口（保留向后兼容）
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
 		syncRun, syncCount, syncFailed := syncFile.GetStatus()
 		strmRun, strmCount, strmFailed := addStrm.GetStatus()
 
@@ -56,15 +57,18 @@ func main() {
 	mux.HandleFunc("GET /download", strmServer.RedirectToRealURL)
 	mux.HandleFunc("GET /sync", func(w http.ResponseWriter, r *http.Request) {
 		syncFile.StartSync(mainCtx, &mainWg)
-		w.Write([]byte("开始同步"))
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusAccepted)
 	})
 	mux.HandleFunc("GET /stopsync", func(w http.ResponseWriter, r *http.Request) {
 		syncFile.StopSync()
-		w.Write([]byte(`停止同步`))
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusAccepted)
 	})
 	mux.HandleFunc("GET /strm", func(w http.ResponseWriter, r *http.Request) {
 		addStrm.StartAddStrm(mainCtx, &mainWg)
-		w.Write([]byte("生成strm"))
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusAccepted)
 	})
 
 	// 3. 配置 HTTP Server
@@ -104,3 +108,4 @@ func main() {
 	mainWg.Wait() // 阻塞，直到 syncFile 和 addStrm 彻底清理完数据库和文件
 	log.Printf("程序已安全退出。")
 }
+
