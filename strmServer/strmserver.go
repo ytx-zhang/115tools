@@ -46,6 +46,9 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 			close(notifier)
 		}()
 	}
+	//添加http头
+	w.Header().Set("Cache-Control", "public, max-age=600")
+    w.Header().Set("Vary", "User-Agent")
 	// 读取缓存
 	if val, ok := urlCache.Load(cacheKey); ok {
 		item := val.(cacheItem)
@@ -76,3 +79,4 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, url, http.StatusFound)
 	log.Printf("[strm请求:云端获取]:  %s | UA: %s", name, clientUA)
 }
+
