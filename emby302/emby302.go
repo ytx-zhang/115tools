@@ -22,20 +22,21 @@ const (
 var (
 	embyURL       string
 	fontInAssURL  string
+	strmUrl  string
 	itemIDRegex   = regexp.MustCompile(`/videos/(\w+)/original`)
 	subtitleRegex = regexp.MustCompile(`(?i)Subtitles/.*Stream\.`)
 )
 
 type embyMedia struct {
-	Path     string
-	Protocol string
-	Name     string
+    Path string `json:"Path"`
+    Name string `json:"Name"`
 }
 
 func StartEmby302() {
 	conf := open115.Conf.Load()
 	embyURL = conf.EmbyUrl
 	fontInAssURL = conf.FontInAssUrl
+	strmUrl = conf.StrmUrl
 	var subProxy *httputil.ReverseProxy
 	if fontInAssURL != "" {
 		subTarget, _ := url.Parse(fontInAssURL)
@@ -91,9 +92,7 @@ func StartEmby302() {
 				// 实时向 Emby 获取 MediaInfo
 				media, err := fetchMediaFromEmby(itemID, r.URL.Query())
 
-				if err == nil &&
-					media.Protocol == "Http" &&
-					strings.HasPrefix(media.Path, "http") {
+				if err == nil && strings.HasPrefix(media.Path, strmUrl) {
 
 					finalURL, err := getFinalLocation(media.Path, r.Header.Get("User-Agent"))
 					if err == nil && finalURL != "" {
@@ -139,24 +138,15 @@ func fetchMediaFromEmby(itemID string, query url.Values) (*embyMedia, error) {
 	defer resp.Body.Close()
 
 	var result struct {
-		MediaSources []struct {
-			Path     string `json:"Path"`
-			Protocol string `json:"Protocol"`
-			Name     string `json:"Name"`
-		} `json:"MediaSources"`
-	}
+        MediaSources []embyMedia `json:"MediaSources"`
+    }
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 
 	if len(result.MediaSources) > 0 {
-		source := result.MediaSources[0]
-		return &embyMedia{
-			Path:     source.Path,
-			Protocol: source.Protocol,
-			Name:     source.Name,
-		}, nil
+		return &result.MediaSources[0], nil
 	}
 	return nil, fmt.Errorf("no source found for this itemID")
 }
