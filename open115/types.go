@@ -29,7 +29,7 @@ type apiResponse[T any] struct {
 	State   bool   `json:"state"`
 	Message string `json:"message"`
 	Code    int    `json:"code"`
-	Data    T      `json:"data"` // 这里的 T 将匹配你传入的具体 Data 结构
+	Data    json.RawMessage `json:"data"`
 }
 
 // 获取下载地址

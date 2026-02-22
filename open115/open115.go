@@ -124,18 +124,27 @@ func request[T any](ctx context.Context, method, endpoint string, params any, ua
 		return nil, fmt.Errorf("read body failed: %w", err)
 	}
 	var res apiResponse[T]
-	err = json.Unmarshal(bodyBytes, &res)
 
-	if err != nil {
-		return nil, fmt.Errorf("115报错: %w (body: %s)", err, string(bodyBytes))
-	}
+	if err := json.Unmarshal(body, &res); err != nil {
+        return nil, fmt.Errorf("115报错: 接口响应格式非法: %w", err)
+    }
 
 	if !res.State {
 		mySafeTrans.PauseUntil.Store(time.Now().Add(10 * time.Second).UnixNano())
 		return nil, fmt.Errorf("115报错: %s (code: %d)", res.Message, res.Code)
 	}
+	var actualData T
 
-	return &res.Data, nil
+    dataStr := string(res.Data)
+    if dataStr == "" || dataStr == "null" || dataStr == "[]" {
+        return &actualData, nil
+    }
+
+	if err := json.Unmarshal(res.Data, &actualData); err != nil {
+        return nil, fmt.Errorf("115报错: 解析data出错: %w", err)
+    }
+
+	return &actualData, nil
 }
 
 type downloadInfo struct {
