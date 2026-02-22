@@ -286,7 +286,7 @@ func cloudScan(ctx context.Context, currentPath string) {
 		cancelFunc()
 		return
 	}
-	log.Printf("[同步] 获取云端[%s]成功", currentPath)
+	log.Printf("[同步] 获取云端成功:%s", currentPath)
 	for _, item := range list {
 		if ctx.Err() != nil {
 			return
@@ -338,10 +338,11 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 
 		var dbFid string
 		var dbSize int64 = -2 // -2 表示本地存在但数据库无记录
-		if val, exists := dbFileMap[name]; exists {
-			parts := strings.SplitN(val, "|", 2)
-			dbFid = parts[0]
-			dbSize, _ = strconv.ParseInt(parts[1], 10, 64)
+		if s, exists := dbFileMap[name]; exists {
+			if before, after, ok := strings.Cut(s, "|"); ok {
+				dbFid = before
+				dbSize, _ = strconv.ParseInt(after, 10, 64)
+			}
 		}
 
 		if entry.IsDir() { // 处理文件夹
@@ -349,7 +350,7 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 				// 本地存在云端不存在，创建云端文件夹
 				newFid, err := open115.AddFolder(ctx, currentCID, name)
 				if err != nil {
-					log.Printf("[同步] 创建云端文件夹失败: %v", err)
+					log.Printf("[同步] 创建云端文件夹[%s]失败: %v", fullPath, err)
 					cancelFunc()
 					return
 				}
@@ -362,8 +363,7 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 		} else { // 处理文件
 			// 逻辑判断是否需要处理文件
 			info, _ := entry.Info()
-			ext := strings.ToLower(filepath.Ext(name))
-			isStrm := (ext == ".strm")
+			isStrm := strings.EqualFold(filepath.Ext(name), ".strm")
 			size := info.Size()
 
 			shouldProcess := false
@@ -391,11 +391,9 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 	for dbFileName, dbVal := range dbFileMap {
 		if !localFound[dbFileName] {
 			fullPath := filepath.Join(currentLocalPath, dbFileName)
-			parts := strings.SplitN(dbVal, "|", 2)
-			fid := parts[0]
-			isDir := strings.HasSuffix(dbVal, "|-1")
-			ext := strings.ToLower(filepath.Ext(dbFileName))
-			isStrm := (ext == ".strm")
+			fid, size, _ := strings.Cut(dbVal, "|")
+			isDir := size == "-1"
+			isStrm := strings.EqualFold(filepath.Ext(dbFileName), ".strm")
 			var err error
 			if isDir || isStrm {
 				err = open115.MoveFile(ctx, fid, tempFid)
@@ -404,7 +402,6 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 			}
 			if err != nil {
 				log.Printf("[同步] 删除云端文件失败: %v", err)
-				cancelFunc()
 				return
 			}
 			dbClearPath(fullPath)
