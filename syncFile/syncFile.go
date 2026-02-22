@@ -305,7 +305,7 @@ func cloudScan(ctx context.Context, currentPath string) {
 			saveSize := item.Fs
 			// 视频文件特殊处理
 			if item.Isv == 1 {
-				savePath = strings.TrimSuffix(fullPath, filepath.Ext(fullPath)) + ".strm"
+				savePath = fullPath[:len(fullPath)-len(filepath.Ext(fullPath))] + ".strm"
 				saveSize = 0 // STRM 文件大小记为0
 			}
 			dbSaveRecord(savePath, item.Fid, saveSize)
@@ -325,7 +325,7 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 	}
 
 	dbFileMap := dbListChildren(currentLocalPath)
-	localFound := make(map[string]bool)
+	localFound := make(map[string]bool, len(entries))
 
 	// 遍历本地文件
 	for _, entry := range entries {
@@ -333,8 +333,8 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 			return
 		}
 		name := entry.Name()
-		fullPath := filepath.Join(currentLocalPath, name)
 		localFound[name] = true
+		fullPath := filepath.Join(currentLocalPath, name)
 
 		var dbFid string
 		var dbSize int64 = -2 // -2 表示本地存在但数据库无记录
@@ -361,29 +361,19 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 			// 继续递归
 			syncFile(ctx, fullPath, dbFid, allFileTasks)
 		} else { // 处理文件
-			// 逻辑判断是否需要处理文件
 			info, _ := entry.Info()
 			isStrm := strings.EqualFold(filepath.Ext(name), ".strm")
 			size := info.Size()
 
-			shouldProcess := false
 			if isStrm {
 				size = info.ModTime().Unix()
 			}
-			if dbSize == -2 || size != dbSize { // 新增或大小不符
-				shouldProcess = true
-			}
 
-			if shouldProcess {
-				task := task{
-					ctx:    ctx,
-					path:   fullPath,
-					cid:    currentCID,
-					name:   name,
-					size:   size,
-					isStrm: isStrm,
-				}
-				*allFileTasks = append(*allFileTasks, task)
+			if dbSize == -2 || size != dbSize {
+				*allFileTasks = append(*allFileTasks, task{
+					ctx: ctx, path: fullPath, cid: currentCID,
+					name: name, size: size, isStrm: isStrm,
+				})
 			}
 		}
 	}
@@ -415,10 +405,10 @@ func processFile(ctx context.Context, fPath, cid, name string, size int64, isStr
 	}
 	var err error
 	indexPath := fPath
-	ext := strings.ToLower(filepath.Ext(fPath))
-	isVideo := ext == ".mp4" || ext == ".mkv"
-	if isVideo && size < 1024*1024*10 { // 小于10MB的文件不变成strm
-		indexPath = strings.TrimSuffix(fPath, filepath.Ext(fPath)) + ".strm"
+	ext := filepath.Ext(fPath)
+	isVideo := checkVideo(ext, size)
+	if isVideo {
+		indexPath = fPath[:len(fPath)-len(ext)] + ".strm"
 	}
 	fid := dbGetFID(indexPath)
 	if fid != "" {
@@ -525,4 +515,16 @@ func extractPickcode(content string) (string, string) {
 		return "", ""
 	}
 	return u.Query().Get("pickcode"), u.Query().Get("fid")
+}
+
+func checkVideo(ext string, size int64) bool {
+	if size < 10*1024*1024 {
+		return false
+	}
+	switch strings.ToLower(ext) {
+	case ".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv":
+		return true
+	}
+
+	return false
 }
