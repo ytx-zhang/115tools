@@ -11,10 +11,6 @@ type tokenConfig struct {
 	ExpireAt     time.Time `yaml:"expire_at" json:"expire_at"`
 }
 
-// 导出类型供外部使用
-type TokenConfig = tokenConfig
-type Config = config
-
 type config struct {
 	Token        tokenConfig `yaml:"token" json:"token"`
 	SyncPath     string      `yaml:"sync_path" json:"sync_path"`

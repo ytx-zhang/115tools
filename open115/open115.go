@@ -33,11 +33,10 @@ var (
 	Conf        atomic.Pointer[config]
 	mySafeTrans = &SafeTransport{
 		BaseTransport: http.DefaultTransport,
-		RateLimiter:   rate.NewLimiter(rate.Limit(3), 5), // 每秒3次，突发5次
-		Concurrency:   make(chan struct{}, 2),            // 最多2个请求同时在跑
+		RateLimiter:   rate.NewLimiter(rate.Limit(2), 3),
+		Concurrency:   make(chan struct{}, 2),
 	}
 
-	// 让 httpClient 直接使用这个安全传输层
 	httpClient = &http.Client{
 		Timeout:   30 * time.Second,
 		Transport: mySafeTrans,
@@ -47,29 +46,24 @@ var (
 type SafeTransport struct {
 	BaseTransport http.RoundTripper
 	RateLimiter   *rate.Limiter
-	Concurrency   chan struct{} // 并发桶
-	PauseUntil    atomic.Int64  // 冷静期截止时间（纳秒时间戳）
+	Concurrency   chan struct{}
+	PauseUntil    atomic.Int64
 }
 
 func (t *SafeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// 1. 占用并发位置（如果桶满了就会阻塞，实现“最多2个在等待响应”）
 	t.Concurrency <- struct{}{}
-	defer func() { <-t.Concurrency }() // 请求结束释放位置
+	defer func() { <-t.Concurrency }()
 
-	// 2. 检查是否在“冷静期”：如果当前时间还没到截止时间，就直接睡过去
 	if sleepTime := time.Until(time.Unix(0, t.PauseUntil.Load())); sleepTime > 0 {
 		time.Sleep(sleepTime)
 	}
 
-	// 3. 频率限制：确保平均每秒不超过 3 次
 	if err := t.RateLimiter.Wait(req.Context()); err != nil {
 		return nil, err
 	}
 
-	// 4. 发出真正的网络请求
 	resp, err := t.BaseTransport.RoundTrip(req)
 
-	// 5. 如果网络报错或服务器返回 429 (太频繁)，拨动闹钟，让全场静默 10 秒
 	if err != nil || (resp != nil && resp.StatusCode == 429) {
 		t.PauseUntil.Store(time.Now().Add(10 * time.Second).UnixNano())
 	}
