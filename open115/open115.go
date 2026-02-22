@@ -1,7 +1,6 @@
 package open115
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
@@ -76,7 +75,7 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 	}
 
 	urlStr := baseDomain + endpoint
-	var bodyBytes []byte
+	var reqBody io.Reader
 	var ct string
 	queryString := params.Encode()
 
@@ -225,8 +224,8 @@ func FileList(ctx context.Context, cid string) ([]filelistData, error) {
 		}
 		params := url.Values{}
 		params.Set("cid", cid)
-		params.Set("offset", offset)
-		params.Set("limit", limit)
+		params.Set("offset", strconv.Itoa(offset))
+		params.Set("limit", strconv.Itoa(limit))
 		params.Set("show_dir", "1")
 		dataList, err := request[[]filelistData](ctx, "GET", "/open/ufile/files", params, "")
 		if err != nil {
@@ -271,8 +270,8 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (str
 	params.Set("pre_id", preSha1)
 	params.Set("topupload", "0")
 	if signKey != "" && signVal != "" {
-		params["sign_key"] = signKey
-		params["sign_val"] = signVal
+		params.Set("sign_key", signKey)
+		params.Set("sign_val", signVal)
 	}
 	initData, err := request[uploadInitData](ctx, "POST", "/open/upload/init", params, "")
 	if err != nil {
