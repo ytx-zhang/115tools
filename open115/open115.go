@@ -70,7 +70,7 @@ func (t *SafeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	return resp, err
 }
-func request[T any](ctx context.Context, method, endpoint string, params any, ua string) (*T, error) {
+func request[T any](ctx context.Context, method, endpoint string, params url.Values, ua string) (*T, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -78,25 +78,15 @@ func request[T any](ctx context.Context, method, endpoint string, params any, ua
 	urlStr := baseDomain + endpoint
 	var bodyBytes []byte
 	var ct string
+	queryString := params.Encode()
 
 	if method == "GET" {
-		if p, ok := params.(string); ok {
-			urlStr += "?" + p
+		if queryString != "" {
+			urlStr += "?" + queryString
 		}
 	} else {
-		form := url.Values{}
-		if p, ok := params.(map[string]string); ok {
-			for k, v := range p {
-				form.Set(k, v)
-			}
-		}
-		bodyBytes = []byte(form.Encode())
+		reqBody = strings.NewReader(queryString)
 		ct = "application/x-www-form-urlencoded"
-	}
-
-	var reqBody io.Reader
-	if method != "GET" {
-		reqBody = bytes.NewReader(bodyBytes)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
@@ -105,15 +95,18 @@ func request[T any](ctx context.Context, method, endpoint string, params any, ua
 	}
 
 	req.Header.Set("Authorization", "Bearer "+Conf.Load().Token.AccessToken)
-	req.Header.Set("Content-Type", ct)
+	if ct != "" {
+		req.Header.Set("Content-Type", ct)
+	}
 	req.Header.Set("User-Agent", ua)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	bodyBytes, err = io.ReadAll(resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read body failed: %w", err)
 	}
@@ -151,7 +144,8 @@ func GetDownloadUrl(ctx context.Context, pickCode, ua string) (*downloadInfo, er
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	params := map[string]string{"pick_code": pickCode}
+	params := url.Values{}
+	params.Set("pick_code", pickCode)
 	res, err := request[downloadUrlData](ctx, "POST", "/open/ufile/downurl", params, ua)
 	if err != nil {
 		return nil, err
@@ -170,7 +164,9 @@ func AddFolder(ctx context.Context, pid, name string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	params := map[string]string{"pid": pid, "file_name": name}
+	params := url.Values{}
+	params.Set("pid", pid)
+	params.Set("file_name", name)
 	res, err := request[addfolderData](ctx, "POST", "/open/folder/add", params, "")
 	if err != nil {
 		return "", err
@@ -182,7 +178,9 @@ func MoveFile(ctx context.Context, fid, cid string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	params := map[string]string{"file_ids": fid, "to_cid": cid}
+	params := url.Values{}
+	params.Set("file_ids", fid)
+	params.Set("to_cid", cid)
 	_, err := request[any](ctx, "POST", "/open/ufile/move", params, "")
 	return err
 }
@@ -191,7 +189,9 @@ func UpdataFile(ctx context.Context, fid, name string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	params := map[string]string{"file_id": fid, "file_name": name}
+	params := url.Values{}
+	params.Set("file_id", fid)
+	params.Set("file_name", name)
 	res, err := request[updatafileData](ctx, "POST", "/open/ufile/update", params, "")
 	if err != nil {
 		return "", err
@@ -199,13 +199,13 @@ func UpdataFile(ctx context.Context, fid, name string) (string, error) {
 	return res.FileName, nil
 }
 
-func FolderInfo(ctx context.Context, pathStr string) (string, error) {
+func FolderInfo(ctx context.Context, path string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	params := url.Values{}
-	params.Set("path", pathStr)
-	res, err := request[folderinfoData](ctx, "GET", "/open/folder/get_info", params.Encode(), "")
+	params.Set("path", path)
+	res, err := request[folderinfoData](ctx, "GET", "/open/folder/get_info", params, "")
 	if err != nil {
 		return "", err
 	}
@@ -223,7 +223,11 @@ func FileList(ctx context.Context, cid string) ([]filelistData, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		params := fmt.Sprintf("cid=%s&offset=%d&limit=%d&show_dir=1", cid, offset, limit)
+		params := url.Values{}
+		params.Set("cid", cid)
+		params.Set("offset", offset)
+		params.Set("limit", limit)
+		params.Set("show_dir", "1")
 		dataList, err := request[[]filelistData](ctx, "GET", "/open/ufile/files", params, "")
 		if err != nil {
 			return nil, err
@@ -259,14 +263,13 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (str
 	if err != nil {
 		return "", "", fmt.Errorf("计算文件前128位 SHA1 失败: %v", err)
 	}
-	params := map[string]string{
-		"file_name": fileName,
-		"file_size": fmt.Sprintf("%d", fileSize),
-		"target":    fmt.Sprintf("U_1_%s", cid),
-		"fileid":    fileSha1,
-		"pre_id":    preSha1,
-		"topupload": "0",
-	}
+	params := url.Values{}
+	params.Set("file_name", fileName)
+	params.Set("file_size", fmt.Sprintf("%d", fileSize))
+	params.Set("target", fmt.Sprintf("U_1_%s", cid))
+	params.Set("fileid", fileSha1)
+	params.Set("pre_id", preSha1)
+	params.Set("topupload", "0")
 	if signKey != "" && signVal != "" {
 		params["sign_key"] = signKey
 		params["sign_val"] = signVal
@@ -291,7 +294,7 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (str
 		signVal, _ := fileSHA1Partial(pathStr, offset, length)
 		return UploadFile(ctx, pathStr, cid, initData.SignKey, signVal)
 	case 1:
-		token, err := request[uploadtokenData](ctx, "GET", "/open/upload/get_token", "", "")
+		token, err := request[uploadtokenData](ctx, "GET", "/open/upload/get_token", url.Values{}, "")
 		if err != nil {
 			return "", "", err
 		}
@@ -306,12 +309,21 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (str
 		if err != nil {
 			return "", "", err
 		}
-		if m, ok := res["message"].(string); ok && m != "" {
-			return "", "", fmt.Errorf("OSS回调错误: %s", m)
+		var cbResp ossCallbackResp
+		resBytes, _ := json.Marshal(res)
+		if err := json.Unmarshal(resBytes, &cbResp); err != nil {
+			return "", "", fmt.Errorf("解析OSS回调数据失败: %w", err)
 		}
-		fid := res["data"].(map[string]any)["file_id"].(string)
-		pickcode := res["data"].(map[string]any)["pick_code"].(string)
-		return fid, pickcode, nil
+
+		if !cbResp.State {
+			return "", "", fmt.Errorf("OSS回调错误: %s", cbResp.Message)
+		}
+
+		if cbResp.Data.FileId == "" {
+			return "", "", fmt.Errorf("OSS回调成功但未获取到文件ID")
+		}
+
+		return cbResp.Data.FileId, cbResp.Data.PickCode, nil
 	}
 	return "", "", fmt.Errorf("未知上传状态: %d", initData.Status)
 }

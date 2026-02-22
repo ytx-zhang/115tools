@@ -88,3 +88,12 @@ type uploadtokenData struct {
 	Expiration      string `json:"Expiration"`
 	AccessKeyId     string `json:"AccessKeyId"`
 }
+// ossCallback
+type ossCallbackResp struct {
+	State   bool   `json:"state"`
+	Message string `json:"message"`
+	Data    struct {
+		FileId   string `json:"file_id"`
+		PickCode string `json:"pick_code"`
+	} `json:"data"`
+}
