@@ -2,6 +2,7 @@ package syncFile
 
 import (
 	"115tools/open115"
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -18,19 +19,25 @@ import (
 )
 
 var (
-	boltDB      *bbolt.DB
-	bucketName  = []byte("FileIndex")
-	dBPath      = `/app/data/files.db`
-	strmUrl     string
-	rootPath    string
-	tempFid     string
-	doneTasks   atomic.Int32
-	failedTasks atomic.Int32
-	isRunning   atomic.Bool
-	needRetry   atomic.Bool
-	wg          sync.WaitGroup
-	scanSem     = make(chan struct{}, 3)
-	cancelFunc  context.CancelFunc
+	boltDB       *bbolt.DB
+	bucketName   = []byte("FileIndex")
+	dBPath       = `/app/data/files.db`
+	strmUrl      string
+	rootPath     string
+	tempFid      string
+	doneTasks    atomic.Int32
+	failedTasks  atomic.Int32
+	isRunning    atomic.Bool
+	needRetry    atomic.Bool
+	wg           sync.WaitGroup
+	scanSem      = make(chan struct{}, 3)
+	cancelFunc   context.CancelFunc
+	localMapPool = sync.Pool{
+		New: func() any { return make(map[string]bool, 256) },
+	}
+	dbMapPool = sync.Pool{
+		New: func() any { return make(map[string]string, 256) },
+	}
 )
 
 type task struct {
@@ -75,10 +82,9 @@ func removeDB() {
 // 获取FID
 func dbGetFID(localPath string) string {
 	var fid string
-	p := filepath.ToSlash(localPath)
 	boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
-		v := b.Get([]byte(p))
+		v := b.Get([]byte(localPath))
 		if v == nil {
 			return nil
 		}
@@ -93,49 +99,42 @@ func dbGetFID(localPath string) string {
 
 // 更新记录
 func dbSaveRecord(localPath string, fid string, size int64) {
-	p := filepath.ToSlash(localPath)
 	val := fid + "|" + strconv.FormatInt(size, 10)
 
 	boltDB.Batch(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
-		return b.Put([]byte(p), []byte(val))
+		return b.Put([]byte(localPath), []byte(val))
 	})
 }
 
-// 获取直属子文件 Map
-func dbListChildren(currentLocalPath string) map[string]string {
-	res := make(map[string]string)
-	prefix := filepath.ToSlash(currentLocalPath)
-	if !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
+// 获取直属子文件
+func dbListChildren(currentLocalPath string, res map[string]string) {
+	prefix := currentLocalPath + "/"
+	prefixBytes := []byte(prefix)
 
 	boltDB.View(func(tx *bbolt.Tx) error {
 		c := tx.Bucket(bucketName).Cursor()
-		prefixBytes := []byte(prefix)
-		for k, v := c.Seek(prefixBytes); k != nil && strings.HasPrefix(string(k), prefix); k, v = c.Next() {
-			pathStr := string(k)
-			if !strings.Contains(pathStr[len(prefix):], "/") {
-				res[filepath.Base(pathStr)] = string(v)
+		for k, v := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, v = c.Next() {
+			remain := k[len(prefixBytes):]
+			if !bytes.Contains(remain, []byte("/")) {
+				res[string(remain)] = string(v)
 			}
 		}
 		return nil
 	})
-	return res
 }
 
 // 删除数据库记录
 func dbClearPath(fPath string) {
-	p := strings.TrimSuffix(filepath.ToSlash(fPath), "/")
+	prefix := fPath + "/"
+	prefixBytes := []byte(prefix)
 
 	err := boltDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
-		if err := b.Delete([]byte(p)); err != nil {
-			return err
-		}
-		prefix := p + "/"
+		b.Delete([]byte(fPath))
+
 		c := b.Cursor()
-		for k, _ := c.Seek([]byte(prefix)); k != nil && strings.HasPrefix(string(k), prefix); {
+		for k, _ := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); {
 			if err := c.Delete(); err != nil {
 				return err
 			}
@@ -145,7 +144,7 @@ func dbClearPath(fPath string) {
 	})
 
 	if err != nil {
-		log.Printf("[数据库] 清理路径失败 %s: %v", p, err)
+		log.Printf("[数据库] 清理路径失败 %s: %v", fPath, err)
 	}
 }
 
@@ -294,7 +293,7 @@ func cloudScan(ctx context.Context, currentPath string) {
 		if item.Aid != "1" { // 有效文件
 			continue
 		}
-		fullPath := filepath.Join(currentPath, item.Fn)
+		fullPath := currentPath + "/" + item.Fn
 		if item.Fc == "0" { // 目录
 			dbSaveRecord(fullPath, item.Fid, -1)
 			wg.Go(func() {
@@ -324,8 +323,14 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 		return
 	}
 
-	dbFileMap := dbListChildren(currentLocalPath)
-	localFound := make(map[string]bool, len(entries))
+	dbFileMap := dbMapPool.Get().(map[string]string)
+	clear(dbFileMap)
+	defer dbMapPool.Put(dbFileMap)
+	dbListChildren(currentLocalPath, dbFileMap)
+
+	localFound := localMapPool.Get().(map[string]bool)
+	clear(localFound)
+	defer localMapPool.Put(localFound)
 
 	// 遍历本地文件
 	for _, entry := range entries {
@@ -334,7 +339,7 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 		}
 		name := entry.Name()
 		localFound[name] = true
-		fullPath := filepath.Join(currentLocalPath, name)
+		fullPath := currentLocalPath + "/" + name
 
 		var dbFid string
 		var dbSize int64 = -2 // -2 表示本地存在但数据库无记录
@@ -380,7 +385,7 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 	// 遍历当前文件夹数据库 查找存在但本地已删除的项
 	for dbFileName, dbVal := range dbFileMap {
 		if !localFound[dbFileName] {
-			fullPath := filepath.Join(currentLocalPath, dbFileName)
+			fullPath := currentLocalPath + "/" + dbFileName
 			fid, size, _ := strings.Cut(dbVal, "|")
 			isDir := size == "-1"
 			isStrm := strings.EqualFold(filepath.Ext(dbFileName), ".strm")
