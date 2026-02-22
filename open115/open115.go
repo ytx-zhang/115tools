@@ -123,9 +123,9 @@ func request[T any](ctx context.Context, method, endpoint string, params any, ua
 	if err != nil {
 		return nil, fmt.Errorf("read body failed: %w", err)
 	}
-	var res apiResponse[T]
+	var res apiResponse
 
-	if err := json.Unmarshal(body, &res); err != nil {
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
         return nil, fmt.Errorf("115报错: 接口响应格式非法: %w", err)
     }
 

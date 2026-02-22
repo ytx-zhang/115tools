@@ -25,10 +25,10 @@ type config struct {
 	FontInAssUrl string      `yaml:"fontinass_url" json:"fontinass_url"`
 }
 
-type apiResponse[T any] struct {
-	State   bool   `json:"state"`
-	Message string `json:"message"`
-	Code    int    `json:"code"`
+type apiResponse struct {
+	State   bool            `json:"state"`
+	Message string          `json:"message"`
+	Code    int             `json:"code"`
 	Data    json.RawMessage `json:"data"`
 }
 
