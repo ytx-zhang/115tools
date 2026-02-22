@@ -48,7 +48,7 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	}
 	//添加http头
 	w.Header().Set("Cache-Control", "public, max-age=600")
-    w.Header().Set("Vary", "User-Agent")
+	w.Header().Set("Vary", "User-Agent")
 	// 读取缓存
 	if val, ok := urlCache.Load(cacheKey); ok {
 		item := val.(cacheItem)
@@ -57,8 +57,8 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 请求115
-	downloadInfo, err := open115.GetDownloadUrl(r.Context(), pickCode, clientUA)
-	if err != nil || downloadInfo.URL == "" {
+	_, url, name, err := open115.GetDownloadUrl(r.Context(), pickCode, clientUA)
+	if err != nil || url == "" {
 		errMsg := "获取下载地址失败"
 		if err != nil {
 			log.Printf("[strm请求] 接口报错: %v", err)
@@ -69,8 +69,6 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errMsg, http.StatusInternalServerError)
 		return
 	}
-	url := downloadInfo.URL
-	name := downloadInfo.FileName
 	urlCache.Store(cacheKey, cacheItem{
 		url:  url,
 		time: time.Now(),
@@ -79,4 +77,3 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, url, http.StatusFound)
 	log.Printf("[strm请求:云端获取]:  %s | UA: %s", name, clientUA)
 }
-

@@ -31,8 +31,6 @@ var (
 	wg          sync.WaitGroup
 	scanSem     = make(chan struct{}, 3)
 	cancelFunc  context.CancelFunc
-	logs        []string
-	logsMutex   sync.Mutex
 )
 
 type task struct {
@@ -74,18 +72,19 @@ func removeDB() {
 	}
 }
 
-// 获取云端文件/文件夹 ID
-func getCloudID(localPath string) string {
+// 获取FID
+func dbGetFID(localPath string) string {
 	var fid string
 	p := filepath.ToSlash(localPath)
 	boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		v := b.Get([]byte(p))
-		if v != nil {
-			parts := strings.SplitN(string(v), "|", 2)
-			if len(parts) > 0 {
-				fid = parts[0]
-			}
+		if v == nil {
+			return nil
+		}
+		s := string(v)
+		if before, _, ok := strings.Cut(s, "|"); ok {
+			fid = before
 		}
 		return nil
 	})
@@ -93,7 +92,7 @@ func getCloudID(localPath string) string {
 }
 
 // 更新记录
-func updateIndex(localPath string, fid string, size int64) {
+func dbSaveRecord(localPath string, fid string, size int64) {
 	p := filepath.ToSlash(localPath)
 	val := fid + "|" + strconv.FormatInt(size, 10)
 
@@ -104,7 +103,7 @@ func updateIndex(localPath string, fid string, size int64) {
 }
 
 // 获取直属子文件 Map
-func getFolderFileMap(currentLocalPath string) map[string]string {
+func dbListChildren(currentLocalPath string) map[string]string {
 	res := make(map[string]string)
 	prefix := filepath.ToSlash(currentLocalPath)
 	if !strings.HasSuffix(prefix, "/") {
@@ -125,33 +124,29 @@ func getFolderFileMap(currentLocalPath string) map[string]string {
 	return res
 }
 
-// RemoveFile 处理单个文件的删除
-func removeFile(fPath string) {
-	p := filepath.ToSlash(fPath)
-	err := boltDB.Batch(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketName)
-		return b.Delete([]byte(p))
-	})
+// 删除数据库记录
+func dbClearPath(fPath string) {
+	p := strings.TrimSuffix(filepath.ToSlash(fPath), "/")
 
-	if err != nil {
-		log.Printf("[数据库] 删除记录失败: %v", err)
-	}
-}
-
-// RemoveFolder 递归清理文件夹及其所有下属内容
-func removeFolder(fPath string) {
-	p := filepath.ToSlash(fPath)
-	prefix := p + "/"
-	boltDB.Update(func(tx *bbolt.Tx) error {
+	err := boltDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
-		b.Delete([]byte(p))
+		if err := b.Delete([]byte(p)); err != nil {
+			return err
+		}
+		prefix := p + "/"
 		c := b.Cursor()
 		for k, _ := c.Seek([]byte(prefix)); k != nil && strings.HasPrefix(string(k), prefix); {
-			c.Delete()
+			if err := c.Delete(); err != nil {
+				return err
+			}
 			k, _ = c.Next()
 		}
 		return nil
 	})
+
+	if err != nil {
+		log.Printf("[数据库] 清理路径失败 %s: %v", p, err)
+	}
 }
 
 func StartSync(parentCtx context.Context, mainWg *sync.WaitGroup) {
@@ -187,9 +182,6 @@ func runSync(parentCtx context.Context) {
 	strmUrl = config.StrmUrl
 	doneTasks.Store(0)
 	failedTasks.Store(0)
-	logsMutex.Lock()
-	logs = logs[:0]
-	logsMutex.Unlock()
 	initDB()
 
 	defer func() {
@@ -209,7 +201,7 @@ func runSync(parentCtx context.Context) {
 	log.Printf("[同步] 开始同步流程...")
 
 	// 获取根目录 ID
-	rootID := getCloudID(rootPath)
+	rootID := dbGetFID(rootPath)
 	// 初次运行，需初始化云端数据库
 	if rootID == "" {
 		log.Printf("[同步] 初次运行开始初始化云端数据库...")
@@ -218,7 +210,7 @@ func runSync(parentCtx context.Context) {
 			log.Printf("[同步] 获取根目录信息失败: %v", err)
 			return
 		}
-		updateIndex(rootPath, fid, -1)
+		dbSaveRecord(rootPath, fid, -1)
 		rootID = fid
 		isScanning.Store(true)
 		wg.Go(func() {
@@ -287,7 +279,7 @@ func cloudScan(ctx context.Context, currentPath string) {
 	case scanSem <- struct{}{}:
 		defer func() { <-scanSem }()
 	}
-	cid := getCloudID(currentPath)
+	cid := dbGetFID(currentPath)
 	list, err := open115.FileList(ctx, cid)
 	if err != nil {
 		log.Printf("[同步] 获取云端[%s]失败: %v", currentPath, err)
@@ -304,7 +296,7 @@ func cloudScan(ctx context.Context, currentPath string) {
 		}
 		fullPath := filepath.Join(currentPath, item.Fn)
 		if item.Fc == "0" { // 目录
-			updateIndex(fullPath, item.Fid, -1)
+			dbSaveRecord(fullPath, item.Fid, -1)
 			wg.Go(func() {
 				cloudScan(ctx, fullPath)
 			})
@@ -316,7 +308,7 @@ func cloudScan(ctx context.Context, currentPath string) {
 				savePath = strings.TrimSuffix(fullPath, filepath.Ext(fullPath)) + ".strm"
 				saveSize = 0 // STRM 文件大小记为0
 			}
-			updateIndex(savePath, item.Fid, saveSize)
+			dbSaveRecord(savePath, item.Fid, saveSize)
 		}
 	}
 }
@@ -332,7 +324,7 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 		return
 	}
 
-	dbFileMap := getFolderFileMap(currentLocalPath)
+	dbFileMap := dbListChildren(currentLocalPath)
 	localFound := make(map[string]bool)
 
 	// 遍历本地文件
@@ -361,7 +353,7 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 					cancelFunc()
 					return
 				}
-				updateIndex(fullPath, newFid, -1)
+				dbSaveRecord(fullPath, newFid, -1)
 				dbFid = newFid
 				log.Printf("[同步] 创建云端文件夹: %s", fullPath)
 			}
@@ -395,13 +387,6 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 			}
 		}
 	}
-	//删除云端和数据库记录
-	var deleteFids []string
-	type deleteIndex struct {
-		path  string
-		isDir bool
-	}
-	var toDeleteIndex []deleteIndex
 	// 遍历当前文件夹数据库 查找存在但本地已删除的项
 	for dbFileName, dbVal := range dbFileMap {
 		if !localFound[dbFileName] {
@@ -409,31 +394,21 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 			parts := strings.SplitN(dbVal, "|", 2)
 			fid := parts[0]
 			isDir := strings.HasSuffix(dbVal, "|-1")
-			deleteFids = append(deleteFids, fid)
-			toDeleteIndex = append(toDeleteIndex, deleteIndex{path: fullPath, isDir: isDir})
-		}
-	}
-	// 移动云端文件
-	if len(deleteFids) > 0 {
-		// 将 []string 转换为 "id1,id2,id3" 格式
-		batchFids := strings.Join(deleteFids, ",")
-		err := open115.MoveFile(ctx, batchFids, tempFid)
-		if err != nil {
-			log.Printf("[同步] 批量移动云端文件失败: %v", err)
-			cancelFunc()
-			return
-		}
-		log.Printf("[同步] 移动云端[%s]内文件数量: %d", currentLocalPath, len(deleteFids))
-	}
-	// 删除本地数据库记录
-	if len(toDeleteIndex) > 0 {
-		for _, index := range toDeleteIndex {
-			if index.isDir {
-				removeFolder(index.path)
+			ext := strings.ToLower(filepath.Ext(dbFileName))
+			isStrm := (ext == ".strm")
+			var err error
+			if isDir || isStrm {
+				err = open115.MoveFile(ctx, fid, tempFid)
 			} else {
-				removeFile(index.path)
+				err = open115.DeleteFile(ctx, fid)
 			}
-			log.Printf("[同步] 删除[%s]数据库索引", index.path)
+			if err != nil {
+				log.Printf("[同步] 删除云端文件失败: %v", err)
+				cancelFunc()
+				return
+			}
+			dbClearPath(fullPath)
+			log.Printf("[同步] 删除云端文件: %s", fullPath)
 		}
 	}
 }
@@ -442,28 +417,30 @@ func processFile(ctx context.Context, fPath, cid, name string, size int64, isStr
 		return
 	}
 	var err error
-	var fid string
-	path := fPath
+	indexPath := fPath
 	ext := strings.ToLower(filepath.Ext(fPath))
 	isVideo := ext == ".mp4" || ext == ".mkv"
-	if isVideo {
-		path = strings.TrimSuffix(fPath, filepath.Ext(fPath)) + ".strm"
+	if isVideo && size < 1024*1024*10 { // 小于10MB的文件不变成strm
+		indexPath = strings.TrimSuffix(fPath, filepath.Ext(fPath)) + ".strm"
 	}
-	cloudFid := getCloudID(path)
-	if cloudFid != "" {
-		err := open115.MoveFile(ctx, cloudFid, tempFid)
+	fid := dbGetFID(indexPath)
+	if fid != "" {
+		if isStrm {
+			err = open115.MoveFile(ctx, fid, tempFid)
+		} else {
+			err = open115.DeleteFile(ctx, fid)
+		}
 		if err != nil {
-			log.Printf("[同步] 移动云端文件失败: %v", err)
+			log.Printf("[同步] 删除云端文件失败: %v", err)
 			return
 		}
-		removeFile(path)
-		log.Printf("[同步] 删除重复文件[%s]", path)
+		dbClearPath(indexPath)
 	}
 	if isStrm {
-		contentBytes, _ := os.ReadFile(path)
-		fid, err = handleStrmTask(ctx, path, cid, name, string(contentBytes))
+		contentBytes, _ := os.ReadFile(fPath)
+		fid, err = handleStrmTask(ctx, fPath, cid, name, string(contentBytes))
 		if err == nil {
-			updateIndex(path, fid, time.Now().Unix())
+			dbSaveRecord(fPath, fid, time.Now().Unix())
 		}
 	} else {
 		var pickcode string
@@ -474,16 +451,19 @@ func processFile(ctx context.Context, fPath, cid, name string, size int64, isStr
 				strmContent := fmt.Sprintf("%s/download?pickcode=%s&fid=%s",
 					baseUrl, pickcode, fid)
 
-				if err = os.WriteFile(path, []byte(strmContent), 0644); err == nil {
+				if err := os.WriteFile(indexPath, []byte(strmContent), 0644); err == nil {
 					if ctx.Err() != nil {
 						return
 					}
-					if err = os.Remove(fPath); err == nil {
-						updateIndex(path, fid, time.Now().Unix())
+					if err := os.Remove(fPath); err == nil {
+						dbSaveRecord(indexPath, fid, time.Now().Unix())
+					} else {
+						log.Printf("[同步] 删除原文件失败: %v", err)
+						return
 					}
 				}
 			} else {
-				updateIndex(path, fid, size)
+				dbSaveRecord(fPath, fid, size)
 			}
 		}
 	}
@@ -501,16 +481,16 @@ func handleStrmTask(ctx context.Context, fPath, cid, name, content string) (stri
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	var err error
 	pickcode, fid := extractPickcode(content)
 	if pickcode == "" {
 		return "", fmt.Errorf("[同步] STRM内容无pickcode")
 	}
 	if fid == "" {
-		downloadInfo, err := open115.GetDownloadUrl(ctx, pickcode, "")
+		fid, _, _, err = open115.GetDownloadUrl(ctx, pickcode, "")
 		if err != nil {
 			return "", fmt.Errorf("[同步] 获取strm内视频fid失败: %v", err)
 		}
-		fid = downloadInfo.FileID
 	}
 
 	// 1. 移动文件

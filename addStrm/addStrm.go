@@ -32,8 +32,6 @@ var (
 	wg          sync.WaitGroup
 	scanSem     = make(chan struct{}, 3)
 	cancelFunc  context.CancelFunc
-	logs        []string
-	logsMutex   sync.Mutex
 )
 
 func GetStatus() (bool, int32, int32) {
@@ -53,9 +51,6 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 		isRunning.Store(true)
 		doneTasks.Store(0)
 		failedTasks.Store(0)
-		logsMutex.Lock()
-		logs = logs[:0]
-		logsMutex.Unlock()
 		conf := open115.Conf.Load()
 		strmPath = conf.StrmPath
 		strmUrl = conf.StrmUrl
@@ -212,11 +207,10 @@ func downloadToFile(ctx context.Context, t task) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	downloadInfo, err := open115.GetDownloadUrl(ctx, t.PC, "")
+	_, url, _, err := open115.GetDownloadUrl(ctx, t.PC, "")
 	if err != nil {
 		return err
 	}
-	url := downloadInfo.URL
 	// 1. 发起请求：Context 会自动管理超时和取消
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

@@ -30,8 +30,10 @@ type apiResponse struct {
 
 // 获取下载地址
 type downloadUrlData map[string]struct {
-	FileName string               `json:"file_name"`
-	Url      struct{ Url string } `json:"url"`
+	FileName string `json:"file_name"`
+	Url      struct {
+		Url string `json:"url"`
+	} `json:"url"`
 }
 
 // 新建文件夹
@@ -88,6 +90,7 @@ type uploadtokenData struct {
 	Expiration      string `json:"Expiration"`
 	AccessKeyId     string `json:"AccessKeyId"`
 }
+
 // ossCallback
 type ossCallbackResp struct {
 	State   bool   `json:"state"`

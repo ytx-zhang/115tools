@@ -112,8 +112,8 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 	var res apiResponse
 
 	if err := json.Unmarshal(bodyBytes, &res); err != nil {
-        return nil, fmt.Errorf("115报错: 接口响应格式非法: %w", err)
-    }
+		return nil, fmt.Errorf("115报错: 接口响应格式非法: %w", err)
+	}
 
 	if !res.State {
 		mySafeTrans.PauseUntil.Store(time.Now().Add(10 * time.Second).UnixNano())
@@ -121,42 +121,32 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 	}
 	var actualData T
 
-    dataStr := string(res.Data)
-    if dataStr == "" || dataStr == "null" || dataStr == "[]" {
-        return &actualData, nil
-    }
+	dataStr := string(res.Data)
+	if dataStr == "" || dataStr == "null" || dataStr == "[]" {
+		return &actualData, nil
+	}
 
 	if err := json.Unmarshal(res.Data, &actualData); err != nil {
-        return nil, fmt.Errorf("115报错: 解析data出错: %w", err)
-    }
+		return nil, fmt.Errorf("115报错: 解析data出错: %w", err)
+	}
 
 	return &actualData, nil
 }
 
-type downloadInfo struct {
-	URL      string
-	FileID   string
-	FileName string
-}
-
-func GetDownloadUrl(ctx context.Context, pickCode, ua string) (*downloadInfo, error) {
+func GetDownloadUrl(ctx context.Context, pickCode, ua string) (string, string, string, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return "", "", "", err
 	}
 	params := url.Values{}
 	params.Set("pick_code", pickCode)
 	res, err := request[downloadUrlData](ctx, "POST", "/open/ufile/downurl", params, ua)
 	if err != nil {
-		return nil, err
+		return "", "", "", err
 	}
-	for k, v := range *res {
-		return &downloadInfo{
-			FileID:   k,
-			URL:      v.Url.Url,
-			FileName: v.FileName,
-		}, nil
+	for fid, v := range *res {
+		return fid, v.Url.Url, v.FileName, nil
 	}
-	return nil, fmt.Errorf("未提取到下载信息")
+	return "", "", "", fmt.Errorf("未提取到下载信息")
 }
 
 func AddFolder(ctx context.Context, pid, name string) (string, error) {
@@ -181,6 +171,16 @@ func MoveFile(ctx context.Context, fid, cid string) error {
 	params.Set("file_ids", fid)
 	params.Set("to_cid", cid)
 	_, err := request[any](ctx, "POST", "/open/ufile/move", params, "")
+	return err
+}
+
+func DeleteFile(ctx context.Context, fid string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	params := url.Values{}
+	params.Set("file_ids", fid)
+	_, err := request[any](ctx, "POST", "/open/ufile/delete", params, "")
 	return err
 }
 
