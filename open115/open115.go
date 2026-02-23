@@ -70,67 +70,99 @@ func (t *SafeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 func request[T any](ctx context.Context, method, endpoint string, params url.Values, ua string) (*T, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
+	// 重试配置
+	const maxRetries = 3
+	var lastErr error
 
-	urlStr := baseDomain + endpoint
-	var reqBody io.Reader
-	var ct string
-	queryString := params.Encode()
-
-	if method == "GET" {
-		if queryString != "" {
-			urlStr += "?" + queryString
+	for i := range maxRetries {
+		// 每次重试前检查 Context 是否已取消
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-	} else {
-		reqBody = strings.NewReader(queryString)
-		ct = "application/x-www-form-urlencoded"
-	}
 
-	req, err := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
-	if err != nil {
-		return nil, err
-	}
+		urlStr := baseDomain + endpoint
+		var reqBody io.Reader
+		var ct string
+		queryString := params.Encode()
 
-	req.Header.Set("Authorization", "Bearer "+Conf.Load().Token.AccessToken)
-	if ct != "" {
-		req.Header.Set("Content-Type", ct)
-	}
-	req.Header.Set("User-Agent", ua)
+		if method == "GET" {
+			if queryString != "" {
+				urlStr += "?" + queryString
+			}
+		} else {
+			reqBody = strings.NewReader(queryString)
+			ct = "application/x-www-form-urlencoded"
+		}
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+		req, err := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
+		if err != nil {
+			return nil, err
+		}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read body failed: %w", err)
-	}
-	var res apiResponse
+		req.Header.Set("Authorization", "Bearer "+Conf.Load().Token.AccessToken)
+		if ct != "" {
+			req.Header.Set("Content-Type", ct)
+		}
+		req.Header.Set("User-Agent", ua)
 
-	if err := json.Unmarshal(bodyBytes, &res); err != nil {
-		return nil, fmt.Errorf("115报错: 接口响应格式非法: %w", err)
-	}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			// 网络层错误通常也值得短时间重试一次
+			time.Sleep(3 * time.Second)
+			continue
+		}
 
-	if !res.State {
-		mySafeTrans.PauseUntil.Store(time.Now().Add(10 * time.Second).UnixNano())
-		return nil, fmt.Errorf("115报错: %s (code: %d)", res.Message, res.Code)
-	}
-	var actualData T
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close() // 提前关闭 Body 以免泄露
+		if err != nil {
+			lastErr = fmt.Errorf("read body failed: %w", err)
+			continue
+		}
 
-	dataStr := string(res.Data)
-	if dataStr == "" || dataStr == "null" || dataStr == "[]" {
+		var res apiResponse
+		if err := json.Unmarshal(bodyBytes, &res); err != nil {
+			return nil, fmt.Errorf("115报错: 接口响应格式非法: %w", err)
+		}
+
+		// 核心重试逻辑：判断业务状态
+		if !res.State {
+			lastErr = fmt.Errorf("115报错: %s (code: %d)", res.Message, res.Code)
+
+			// 触发重试的特定错误码：990019 (稍后再试)
+			if strings.Contains(res.Message, "稍后再试") {
+				log.Printf("115报错: %s (第 %d/%d 次重试): ", res.Message, i+1, maxRetries)
+
+				// 全局暂停 10s，防止其他并发请求撞墙
+				mySafeTrans.PauseUntil.Store(time.Now().Add(10 * time.Second).UnixNano())
+
+				select {
+				case <-time.After(10 * time.Second):
+					continue // 进入下一次循环
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+
+			// 其他业务错误（如 Token 失效等）直接返回，不重试
+			return nil, lastErr
+		}
+
+		// 成功逻辑
+		var actualData T
+		dataStr := string(res.Data)
+		if dataStr == "" || dataStr == "null" || dataStr == "[]" {
+			return &actualData, nil
+		}
+
+		if err := json.Unmarshal(res.Data, &actualData); err != nil {
+			return nil, fmt.Errorf("115报错: 解析data出错: %w", err)
+		}
+
 		return &actualData, nil
 	}
 
-	if err := json.Unmarshal(res.Data, &actualData); err != nil {
-		return nil, fmt.Errorf("115报错: 解析data出错: %w", err)
-	}
-
-	return &actualData, nil
+	return nil, fmt.Errorf("115报错: %w", lastErr)
 }
 
 func GetDownloadUrl(ctx context.Context, pickCode, ua string) (string, string, string, error) {
