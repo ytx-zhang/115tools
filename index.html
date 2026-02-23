@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-CN" data-theme="dark">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,170 +10,183 @@
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
-        .font-mono { font-family: 'JetBrains Mono', monospace; }
+
+        .font-mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
         /* 日志进入动画 */
-        .log-item-enter-active { transition: all 0.3s ease-out; }
-        .log-item-enter-from { opacity: 0; transform: translateX(10px); }
+        .log-item-enter-active {
+            transition: all 0.3s ease-out;
+        }
+
+        .log-item-enter-from {
+            opacity: 0;
+            transform: translateX(10px);
+        }
     </style>
 </head>
+
 <body class="bg-base-300 min-h-screen p-4 md:p-8 text-base-content font-sans">
 
-<div id="app" class="max-w-4xl mx-auto">
-    <header class="flex justify-between items-end mb-8">
-        <div>
-            <h1 class="text-3xl font-black text-primary tracking-tighter italic">115 TOOLS</h1>
-            <p class="text-xs opacity-50 font-mono uppercase tracking-widest mt-1">Storage & Stream Automation</p>
-        </div>
-        <div class="flex items-center gap-2 text-xs font-mono bg-base-100 px-3 py-1.5 rounded-full shadow-inner border border-white/5">
-            <span class="relative flex h-2 w-2">
-                <span v-if="isConnected" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
-                <span class="relative inline-flex rounded-full h-2 w-2" :class="isConnected ? 'bg-success' : 'bg-error'"></span>
-            </span>
-            {{ isConnected ? 'LIVE' : 'OFFLINE' }}
-        </div>
-    </header>
+    <div id="app" class="max-w-4xl mx-auto">
+        <header class="flex justify-between items-end mb-8">
+            <div>
+                <h1 class="text-3xl font-black text-primary tracking-tighter italic">115 TOOLS</h1>
+                <p class="text-xs opacity-50 font-mono uppercase tracking-widest mt-1">Storage & Stream Automation</p>
+            </div>
+            <div
+                class="flex items-center gap-2 text-xs font-mono bg-base-100 px-3 py-1.5 rounded-full shadow-inner border border-white/5">
+                <span class="relative flex h-2 w-2">
+                    <span v-if="isConnected"
+                        class="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2"
+                        :class="isConnected ? 'bg-success' : 'bg-error'"></span>
+                </span>
+                {{ isConnected ? 'LIVE' : 'OFFLINE' }}
+            </div>
+        </header>
 
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-        <div class="card bg-base-100 shadow-xl border border-white/5 transition-all">
-            <div class="card-body p-6">
-                <h2 class="text-xs opacity-40 uppercase font-bold tracking-widest">文件同步状态</h2>
-                <div class="flex items-baseline gap-2 mt-3">
-                    <span class="text-5xl font-black text-primary">{{ status.sync.done }}</span>
-                    <span class="text-sm opacity-30 font-bold uppercase">Success</span>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <div class="card bg-base-100 shadow-xl border border-white/5 transition-all">
+                <div class="card-body p-6">
+                    <h2 class="text-xs opacity-40 uppercase font-bold tracking-widest">文件同步状态</h2>
+                    <div class="flex items-baseline gap-2 mt-3">
+                        <span class="text-5xl font-black text-primary">{{ status.sync.done }}</span>
+                        <span class="text-sm opacity-30 font-bold uppercase">Success</span>
+                    </div>
+                    <div v-if="status.sync.failed > 0"
+                        class="text-xs text-error font-bold mt-2 flex items-center gap-1">
+                        <span>⚠️</span> FAILED: {{ status.sync.failed }}
+                    </div>
+                    <div class="card-actions mt-6">
+                        <button @click="toggleSync" class="btn btn-primary btn-block text-base-100 shadow-md font-bold"
+                            :class="{'btn-outline btn-error': status.sync.running}">
+                            <span v-if="status.sync.running" class="loading loading-spinner loading-xs"></span>
+                            {{ status.sync.running ? '停止同步' : '开始同步文件' }}
+                        </button>
+                    </div>
                 </div>
-                <div v-if="status.sync.failed > 0" class="text-xs text-error font-bold mt-2 flex items-center gap-1">
-                    <span>⚠️</span> FAILED: {{ status.sync.failed }}
-                </div>
-                <div class="card-actions mt-6">
-                    <button 
-                        @click="toggleSync" 
-                        class="btn btn-primary btn-block text-base-100 shadow-md font-bold"
-                        :class="{'btn-outline btn-error': status.sync.running}"
-                    >
-                        <span v-if="status.sync.running" class="loading loading-spinner loading-xs"></span>
-                        {{ status.sync.running ? '停止同步' : '开始同步文件' }}
-                    </button>
+            </div>
+
+            <div class="card bg-base-100 shadow-xl border border-white/5 transition-all">
+                <div class="card-body p-6">
+                    <h2 class="text-xs opacity-40 uppercase font-bold tracking-widest">STRM 生成状态</h2>
+                    <div class="flex items-baseline gap-2 mt-3">
+                        <span class="text-5xl font-black text-secondary">{{ status.strm.done }}</span>
+                        <span class="text-sm opacity-30 font-bold uppercase">Finished</span>
+                    </div>
+                    <div v-if="status.strm.failed > 0"
+                        class="text-xs text-error font-bold mt-2 flex items-center gap-1">
+                        <span>⚠️</span> FAILED: {{ status.strm.failed }}
+                    </div>
+                    <div class="card-actions mt-6">
+                        <button @click="toggleStrm"
+                            class="btn btn-secondary btn-block text-base-100 shadow-md font-bold"
+                            :class="{'btn-outline btn-error': status.strm.running}">
+                            <span v-if="status.strm.running" class="loading loading-spinner loading-xs"></span>
+                            {{ status.strm.running ? '中止生成' : '开始生成 STRM' }}
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
 
-        <div class="card bg-base-100 shadow-xl border border-white/5 transition-all">
-            <div class="card-body p-6">
-                <h2 class="text-xs opacity-40 uppercase font-bold tracking-widest">STRM 生成状态</h2>
-                <div class="flex items-baseline gap-2 mt-3">
-                    <span class="text-5xl font-black text-secondary">{{ status.strm.done }}</span>
-                    <span class="text-sm opacity-30 font-bold uppercase">Finished</span>
+        <div class="mockup-code bg-base-100 border border-white/5 shadow-2xl min-h-[300px]">
+            <div class="px-5 font-mono text-sm">
+                <div class="flex justify-between items-center opacity-30 mb-6 border-b border-white/5 pb-2">
+                    <span class="text-xs font-bold uppercase tracking-tighter">System Console</span>
+                    <span class="text-[10px]">{{ new Date().toLocaleDateString() }}</span>
                 </div>
-                <div v-if="status.strm.failed > 0" class="text-xs text-error font-bold mt-2 flex items-center gap-1">
-                    <span>⚠️</span> FAILED: {{ status.strm.failed }}
+
+                <div v-if="!hasActivity" class="text-base-content/20 italic animate-pulse">
+                    Listening for incoming tasks...
                 </div>
-                <div class="card-actions mt-6">
-                    <button 
-                        @click="toggleStrm" 
-                        class="btn btn-secondary btn-block text-base-100 shadow-md font-bold"
-                        :class="{'btn-outline btn-error': status.strm.running}"
-                    >
-                        <span v-if="status.strm.running" class="loading loading-spinner loading-xs"></span>
-                        {{ status.strm.running ? '中止生成' : '开始生成 STRM' }}
-                    </button>
+
+                <transition-group name="log-item">
+                    <div v-for="msg in allActiveMsgs" :key="msg" class="text-success flex items-start gap-3 mb-3">
+                        <span class="text-primary font-black animate-bounce">>></span>
+                        <span class="flex-1 leading-relaxed">{{ msg }}</span>
+                        <span class="loading loading-ring loading-xs opacity-30"></span>
+                    </div>
+                </transition-group>
+
+                <div v-if="allErrors.length > 0" class="mt-8 pt-4 border-t border-error/20">
+                    <div v-for="(err, i) in allErrors" :key="'err-'+i"
+                        class="text-error flex items-start gap-3 mb-2 bg-error/5 p-2 rounded">
+                        <span class="font-bold px-1 bg-error text-error-content text-[10px] rounded">ERROR</span>
+                        <span class="flex-1">{{ err }}</span>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <div class="mockup-code bg-base-100 border border-white/5 shadow-2xl min-h-[300px]">
-        <div class="px-5 font-mono text-sm">
-            <div class="flex justify-between items-center opacity-30 mb-6 border-b border-white/5 pb-2">
-                <span class="text-xs font-bold uppercase tracking-tighter">System Console</span>
-                <span class="text-[10px]">{{ new Date().toLocaleDateString() }}</span>
-            </div>
-            
-            <div v-if="!hasActivity" class="text-base-content/20 italic animate-pulse">
-                Listening for incoming tasks...
-            </div>
+    <script>
+        const { createApp } = Vue;
 
-            <transition-group name="log-item">
-                <div v-for="msg in allActiveMsgs" :key="msg" class="text-success flex items-start gap-3 mb-3">
-                    <span class="text-primary font-black animate-bounce">>></span>
-                    <span class="flex-1 leading-relaxed">{{ msg }}</span>
-                    <span class="loading loading-ring loading-xs opacity-30"></span>
-                </div>
-            </transition-group>
+        createApp({
+            data() {
+                return {
+                    isConnected: false,
+                    // 初始化状态结构
+                    status: {
+                        sync: { running: false, done: 0, failed: 0, active: [], errors: [] },
+                        strm: { running: false, done: 0, failed: 0, active: [], errors: [] }
+                    }
+                }
+            },
+            computed: {
+                allActiveMsgs() {
+                    // 如果后端发来 null，通过 || [] 强制转为空数组
+                    const syncActive = (this.status.sync && this.status.sync.active) || [];
+                    const strmActive = (this.status.strm && this.status.strm.active) || [];
+                    return [...syncActive, ...strmActive];
+                },
+                allErrors() {
+                    const syncErr = (this.status.sync && this.status.sync.errors) || [];
+                    const strmErr = (this.status.strm && this.status.strm.errors) || [];
+                    return [...syncErr, ...strmErr];
+                }
+            },
+            mounted() {
+                // 页面加载即建立 SSE 连接，无需再请求 /status
+                this.connectSSE();
+            },
+            methods: {
+                connectSSE() {
+                    const es = new EventSource('/logs');
 
-            <div v-if="allErrors.length > 0" class="mt-8 pt-4 border-t border-error/20">
-                <div v-for="(err, i) in allErrors" :key="'err-'+i" class="text-error flex items-start gap-3 mb-2 bg-error/5 p-2 rounded">
-                    <span class="font-bold px-1 bg-error text-error-content text-[10px] rounded">ERROR</span>
-                    <span class="flex-1">{{ err }}</span>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
+                    es.onopen = () => {
+                        this.isConnected = true;
+                        console.log("SSE Stream Connected");
+                    };
 
-<script>
-    const { createApp } = Vue;
+                    es.onmessage = (e) => {
+                        try {
+                            const data = JSON.parse(e.data);
+                            // 直接更新整个状态对象，Vue 会自动刷新 UI
+                            this.status = data;
+                        } catch (err) {
+                            console.error("Parse Error:", err);
+                        }
+                    };
 
-    createApp({
-        data() {
-            return {
-                isConnected: false,
-                // 初始化状态结构
-                status: {
-                    sync: { running: false, done: 0, failed: 0, active: [], errors: [] },
-                    strm: { running: false, done: 0, failed: 0, active: [], errors: [] }
+                    es.onerror = () => {
+                        this.isConnected = false;
+                        // EventSource 默认会自动重连
+                    };
+                },
+                async toggleSync() {
+                    const endpoint = this.status.sync.running ? '/stopsync' : '/sync';
+                    await fetch(endpoint);
+                },
+                async toggleStrm() {
+                    await fetch('/strm');
                 }
             }
-        },
-        computed: {
-            // 合并显示两个模块的实时任务描述
-            allActiveMsgs() {
-                return [...this.status.sync.active, ...this.status.strm.active];
-            },
-            // 合并并限制显示错误
-            allErrors() {
-                return [...this.status.sync.errors, ...this.status.strm.errors];
-            },
-            hasActivity() {
-                return this.allActiveMsgs.length > 0 || this.allErrors.length > 0;
-            }
-        },
-        mounted() {
-            // 页面加载即建立 SSE 连接，无需再请求 /status
-            this.connectSSE();
-        },
-        methods: {
-            connectSSE() {
-                const es = new EventSource('/logs');
-                
-                es.onopen = () => {
-                    this.isConnected = true;
-                    console.log("SSE Stream Connected");
-                };
-
-                es.onmessage = (e) => {
-                    try {
-                        const data = JSON.parse(e.data);
-                        // 直接更新整个状态对象，Vue 会自动刷新 UI
-                        this.status = data;
-                    } catch (err) {
-                        console.error("Parse Error:", err);
-                    }
-                };
-
-                es.onerror = () => {
-                    this.isConnected = false;
-                    // EventSource 默认会自动重连
-                };
-            },
-            async toggleSync() {
-                const endpoint = this.status.sync.running ? '/stopsync' : '/sync';
-                await fetch(endpoint);
-            },
-            async toggleStrm() {
-                await fetch('/strm');
-            }
-        }
-    }).mount('#app');
-</script>
+        }).mount('#app');
+    </script>
 </body>
+
 </html>

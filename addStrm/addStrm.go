@@ -62,22 +62,26 @@ type StrmStatus struct {
 }
 
 func GetStatus() StrmStatus {
-	var msgs []string
+	// 初始化时直接给个空切片，不要用 var msgs []string
+	msgs := []string{}
 	activeMsgMap.Range(func(key, value any) bool {
 		msgs = append(msgs, value.(string))
 		return true
 	})
 
 	errorMu.Lock()
-	errs := make([]string, len(recentErrors))
-	copy(errs, recentErrors)
+	errs := []string{} // 同样初始化为空切片
+	if len(recentErrors) > 0 {
+		errs = make([]string, len(recentErrors))
+		copy(errs, recentErrors)
+	}
 	errorMu.Unlock()
 
 	return StrmStatus{
 		Running: isRunning.Load(),
 		Done:    doneTasks.Load(),
 		Failed:  failedTasks.Load(),
-		Active:  msgs,
+		Active:  msgs, // 现在这里永远是 [] 而不是 null
 		Errors:  errs,
 	}
 }

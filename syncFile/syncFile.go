@@ -171,8 +171,8 @@ type SyncStatus struct {
 }
 
 func GetStatus() SyncStatus {
-	var msgs []string
-	// 遍历 sync.Map 收集所有活跃任务的描述
+	// 重点：使用空切片初始化，确保 JSON 序列化为 []
+	msgs := []string{}
 	activeMsgMap.Range(func(key, value any) bool {
 		if s, ok := value.(string); ok && s != "" {
 			msgs = append(msgs, s)
@@ -180,18 +180,21 @@ func GetStatus() SyncStatus {
 		return true
 	})
 
-	// 安全地拷贝错误列表
 	errorMu.Lock()
-	errs := make([]string, len(recentErrors))
-	copy(errs, recentErrors)
+	// 重点：同样使用空切片初始化
+	errs := []string{}
+	if len(recentErrors) > 0 {
+		errs = make([]string, len(recentErrors))
+		copy(errs, recentErrors)
+	}
 	errorMu.Unlock()
 
 	return SyncStatus{
 		Running: isRunning.Load(),
 		Done:    doneTasks.Load(),
 		Failed:  failedTasks.Load(),
-		Active:  msgs,
-		Errors:  errs,
+		Active:  msgs, // 即使没有数据，JSON 也是 []
+		Errors:  errs, // 即使没有数据，JSON 也是 []
 	}
 }
 func StartSync(parentCtx context.Context, mainWg *sync.WaitGroup) {
