@@ -216,11 +216,11 @@ func runSync(parentCtx context.Context) {
 		})
 		wg.Wait()
 	}
-	isScanning.Store(false)
-	log.Printf("[同步] 云端数据库初始化完成")
 	if ctx.Err() != nil {
 		return
 	}
+	isScanning.Store(false)
+	log.Printf("[同步] 云端数据库初始化完成")
 
 	//获取temp文件夹信息
 	tempPath := config.TempPath
@@ -283,9 +283,9 @@ func cloudScan(ctx context.Context, currentPath string) {
 	case scanSem <- struct{}{}:
 		defer func() { <-scanSem }()
 	}
-	cid := dbGetFID(currentPath)
+	fid := dbGetFID(currentPath)
 	log.Printf("[同步] 获取云端列表:%s", currentPath)
-	list, err := open115.FileList(ctx, cid)
+	list, err := open115.FileList(ctx, fid)
 	if err != nil {
 		log.Printf("[同步] 获取云端[%s]失败: %v", currentPath, err)
 		cancelFunc()
@@ -301,27 +301,28 @@ func cloudScan(ctx context.Context, currentPath string) {
 		savePath := currentPath + "/" + item.Fn
 		saveSize := item.Fs
 		if item.Fc == "0" { // 目录
-			saveSize = -1
+			dbSaveRecord(savePath, item.Fid, -1)
 			wg.Go(func() {
 				cloudScan(ctx, savePath)
 			})
-		}
-		// 视频文件生成 strm 记录
-		if item.Isv == 1 {
-			savePath = savePath[:len(savePath)-len(filepath.Ext(savePath))] + ".strm"
-			saveSize = 0
-			// 检查本地是否存在且匹配
-			if info, err := os.Stat(savePath); err == nil {
-				if content, err := os.ReadFile(savePath); err == nil {
-					_, localFid := extractPickcode(string(content))
-					// 如果本地 strm 记录的 fid 和云端当前文件 fid 一致
-					if localFid == item.Fid {
-						saveSize = info.ModTime().Unix()
+		} else {
+			// 视频文件生成 strm 记录
+			if item.Isv == 1 {
+				savePath = savePath[:len(savePath)-len(filepath.Ext(savePath))] + ".strm"
+				saveSize = 0
+				// 检查本地是否存在且匹配
+				if info, err := os.Stat(savePath); err == nil {
+					if content, err := os.ReadFile(savePath); err == nil {
+						_, localFid := extractPickcode(string(content))
+						// 如果本地 strm 记录的 fid 和云端当前文件 fid 一致
+						if localFid == item.Fid {
+							saveSize = info.ModTime().Unix()
+						}
 					}
 				}
 			}
+			dbSaveRecord(savePath, item.Fid, saveSize)
 		}
-		dbSaveRecord(savePath, item.Fid, saveSize)
 	}
 }
 
