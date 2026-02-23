@@ -26,6 +26,9 @@ var (
 	tempFid      string
 	doneTasks    atomic.Int32
 	failedTasks  atomic.Int32
+	activeMsgMap sync.Map
+	recentErrors []string
+	errorMu      sync.Mutex
 	isRunning    atomic.Bool
 	needRetry    atomic.Bool
 	wg           sync.WaitGroup
@@ -146,7 +149,51 @@ func dbClearPath(fPath string) {
 		log.Printf("[数据库] 清理路径失败 %s: %v", fPath, err)
 	}
 }
+func updateTaskMsg(taskKey string, msg string) {
+	if msg == "" {
+		activeMsgMap.Delete(taskKey)
+	} else {
+		activeMsgMap.Store(taskKey, msg)
+	}
+}
+func addTaskError(errStr string) {
+	errorMu.Lock()
+	defer errorMu.Unlock()
+	recentErrors = append([]string{errStr}, recentErrors...)
+}
 
+type SyncStatus struct {
+	Running bool     `json:"running"` // 是否正在运行
+	Done    int32    `json:"done"`    // 已完成数量
+	Failed  int32    `json:"failed"`  // 失败数量
+	Active  []string `json:"active"`  // 当前正在进行的任务描述（如：正在上传 xxx）
+	Errors  []string `json:"errors"`  // 最近发生的错误描述列表
+}
+
+func GetStatus() SyncStatus {
+	var msgs []string
+	// 遍历 sync.Map 收集所有活跃任务的描述
+	activeMsgMap.Range(func(key, value any) bool {
+		if s, ok := value.(string); ok && s != "" {
+			msgs = append(msgs, s)
+		}
+		return true
+	})
+
+	// 安全地拷贝错误列表
+	errorMu.Lock()
+	errs := make([]string, len(recentErrors))
+	copy(errs, recentErrors)
+	errorMu.Unlock()
+
+	return SyncStatus{
+		Running: isRunning.Load(),
+		Done:    doneTasks.Load(),
+		Failed:  failedTasks.Load(),
+		Active:  msgs,
+		Errors:  errs,
+	}
+}
 func StartSync(parentCtx context.Context, mainWg *sync.WaitGroup) {
 	needRetry.Store(true)
 
@@ -180,6 +227,13 @@ func runSync(parentCtx context.Context) {
 	strmUrl = config.StrmUrl
 	doneTasks.Store(0)
 	failedTasks.Store(0)
+	errorMu.Lock()
+	recentErrors = nil // 清空错误列表
+	errorMu.Unlock()
+	activeMsgMap.Range(func(k, v any) bool {
+		activeMsgMap.Delete(k) // 清空残留的活跃消息
+		return true
+	})
 	initDB()
 
 	defer func() {
@@ -270,10 +324,6 @@ func runSync(parentCtx context.Context) {
 	log.Printf("[同步] 同步流程结束，处理文件总数: %d", total)
 }
 
-func GetStatus() (bool, int32, int32) {
-	return isRunning.Load(), doneTasks.Load(), failedTasks.Load()
-}
-
 // --- 递归扫描逻辑 ---
 
 func cloudScan(ctx context.Context, currentPath string) {
@@ -283,6 +333,10 @@ func cloudScan(ctx context.Context, currentPath string) {
 	case scanSem <- struct{}{}:
 		defer func() { <-scanSem }()
 	}
+	taskKey := "scan" + currentPath
+	updateTaskMsg(taskKey, fmt.Sprintf("获取云端列表: %s", currentPath))
+	defer updateTaskMsg(taskKey, "")
+
 	fid := dbGetFID(currentPath)
 	log.Printf("[同步] 获取云端列表:%s", currentPath)
 	list, err := open115.FileList(ctx, fid)
@@ -367,6 +421,10 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 		if entry.IsDir() { // 处理文件夹
 			if dbSize == -2 {
 				// 本地存在云端不存在，创建云端文件夹
+				taskKey := "add" + fullPath
+				updateTaskMsg(taskKey, fmt.Sprintf("创建云端文件夹: %s", fullPath))
+
+				log.Printf("[同步] 创建云端文件夹: %s", fullPath)
 				newFid, err := open115.AddFolder(ctx, currentCID, name)
 				if err != nil {
 					log.Printf("[同步] 创建云端文件夹[%s]失败: %v", fullPath, err)
@@ -375,7 +433,8 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 				}
 				dbSaveRecord(fullPath, newFid, -1)
 				dbFid = newFid
-				log.Printf("[同步] 创建云端文件夹: %s", fullPath)
+
+				updateTaskMsg(taskKey, "")
 			}
 			// 继续递归
 			syncFile(ctx, fullPath, dbFid, allFileTasks)
@@ -422,6 +481,10 @@ func processFile(ctx context.Context, fPath, cid, name string, size int64, isStr
 	if ctx.Err() != nil {
 		return
 	}
+	taskKey := "sync" + fPath
+	updateTaskMsg(taskKey, fmt.Sprintf("同步文件: %s", fPath))
+	defer updateTaskMsg(taskKey, "")
+
 	var err error
 	indexPath := fPath
 	ext := filepath.Ext(fPath)
@@ -477,6 +540,8 @@ func processFile(ctx context.Context, fPath, cid, name string, size int64, isStr
 	curr := doneTasks.Add(1)
 	if err != nil {
 		failedTasks.Add(1)
+		errMsg := fmt.Sprintf("[%s][同步] %s: %v", time.Now().Format("15:04"), fPath, err)
+		addTaskError(errMsg)
 		log.Printf("[同步][%d/%d] ❌ %s: %v", curr, total, fPath, err)
 	} else {
 		log.Printf("[同步][%d/%d] ✅ %s", curr, total, fPath)

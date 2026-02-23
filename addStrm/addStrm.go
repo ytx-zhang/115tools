@@ -12,30 +12,74 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type task struct {
-	Type      string // "STRM" or "DOWNLOAD"
+	Strm      bool
 	PC        string
 	FID       string
 	LocalPath string
 }
 
 var (
-	strmPath    string
-	tempPath    string
-	strmUrl     string
-	rootFids    []string
-	doneTasks   atomic.Int32
-	failedTasks atomic.Int32
-	isRunning   atomic.Bool
-	wg          sync.WaitGroup
-	scanSem     = make(chan struct{}, 3)
-	cancelFunc  context.CancelFunc
+	strmPath     string
+	tempPath     string
+	strmUrl      string
+	rootFids     []string
+	doneTasks    atomic.Int32
+	failedTasks  atomic.Int32
+	activeMsgMap sync.Map // 存储活跃任务描述
+	recentErrors []string // 存储最近错误
+	errorMu      sync.Mutex
+	isRunning    atomic.Bool
+	wg           sync.WaitGroup
+	scanSem      = make(chan struct{}, 3)
+	cancelFunc   context.CancelFunc
 )
 
-func GetStatus() (bool, int32, int32) {
-	return isRunning.Load(), doneTasks.Load(), failedTasks.Load()
+func updateTaskMsg(key string, msg string) {
+	if msg == "" {
+		activeMsgMap.Delete(key)
+	} else {
+		activeMsgMap.Store(key, msg)
+	}
+}
+
+// AddTaskError 记录错误
+func addTaskError(errStr string) {
+	errorMu.Lock()
+	defer errorMu.Unlock()
+	recentErrors = append([]string{errStr}, recentErrors...)
+}
+
+type StrmStatus struct {
+	Running bool     `json:"running"`
+	Done    int32    `json:"done"`
+	Failed  int32    `json:"failed"`
+	Active  []string `json:"active"` // 正在扫描的目录或正在处理的文件
+	Errors  []string `json:"errors"` // 最近生成的错误信息
+}
+
+func GetStatus() StrmStatus {
+	var msgs []string
+	activeMsgMap.Range(func(key, value any) bool {
+		msgs = append(msgs, value.(string))
+		return true
+	})
+
+	errorMu.Lock()
+	errs := make([]string, len(recentErrors))
+	copy(errs, recentErrors)
+	errorMu.Unlock()
+
+	return StrmStatus{
+		Running: isRunning.Load(),
+		Done:    doneTasks.Load(),
+		Failed:  failedTasks.Load(),
+		Active:  msgs,
+		Errors:  errs,
+	}
 }
 
 func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
@@ -51,6 +95,13 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 		isRunning.Store(true)
 		doneTasks.Store(0)
 		failedTasks.Store(0)
+		errorMu.Lock()
+		recentErrors = nil // 清空错误列表
+		errorMu.Unlock()
+		activeMsgMap.Range(func(k, v any) bool {
+			activeMsgMap.Delete(k) // 清空残留的活跃消息
+			return true
+		})
 		conf := open115.Conf.Load()
 		strmPath = conf.StrmPath
 		strmUrl = conf.StrmUrl
@@ -100,7 +151,7 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 			wg.Go(func() {
 				for task := range taskQueue {
 					current := doneTasks.Add(1)
-					if task.Type == "STRM" {
+					if task.Strm {
 						doCreateStrm(ctx, task, int32(current), total)
 					} else {
 						doDownloadFile(ctx, task, int32(current), total)
@@ -132,6 +183,10 @@ func scanCloudRecursive(ctx context.Context, cid string, localPath string, allFi
 	case scanSem <- struct{}{}:
 		defer func() { <-scanSem }()
 	}
+	taskKey := "addstrm" + localPath
+	updateTaskMsg(taskKey, fmt.Sprintf("获取云端列表: %s", localPath))
+	defer updateTaskMsg(taskKey, "")
+
 	log.Printf("[添加strm] 正在扫描云端目录: %s", localPath)
 	list, err := open115.FileList(ctx, cid)
 	if err != nil {
@@ -150,8 +205,7 @@ func scanCloudRecursive(ctx context.Context, cid string, localPath string, allFi
 		} else { // 文件逻辑
 			finalPath := currentLocalPath
 			if item.Isv == 1 {
-				ext := filepath.Ext(item.Fn)
-				finalPath = strings.TrimSuffix(currentLocalPath, ext) + ".strm"
+				finalPath = finalPath[:len(finalPath)-len(filepath.Ext(finalPath))] + ".strm"
 			}
 
 			// 存在则跳过
@@ -159,7 +213,7 @@ func scanCloudRecursive(ctx context.Context, cid string, localPath string, allFi
 				continue
 			}
 			t := task{
-				Type:      map[int]string{1: "STRM", 0: "DOWNLOAD"}[item.Isv],
+				Strm:      item.Isv == 1,
 				PC:        item.Pc,
 				FID:       item.Fid,
 				LocalPath: finalPath,
@@ -177,14 +231,13 @@ func doCreateStrm(ctx context.Context, t task, current, total int32) {
 	if ctx.Err() != nil {
 		return
 	}
-
-	baseUrl, _ := strings.CutSuffix(strmUrl, "/")
-	content := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", baseUrl, t.PC, t.FID)
+	content := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", strmUrl, t.PC, t.FID)
 	err := os.WriteFile(t.LocalPath, []byte(content), 0644)
 	if err == nil {
 		log.Printf("[%d/%d][添加STRM] 生成strm成功: %s", current, total, filepath.Base(t.LocalPath))
 	} else {
 		failedTasks.Add(1)
+		addTaskError(fmt.Sprintf("[添加STRM] [%s] 生成strm失败: %s (%v)", time.Now().Format("15:04"), t.LocalPath, err))
 		log.Printf("[%d/%d][添加STRM] 生成strm失败: %s: %v", current, total, filepath.Base(t.LocalPath), err)
 	}
 }
@@ -194,13 +247,17 @@ func doDownloadFile(ctx context.Context, t task, current, total int32) {
 	if ctx.Err() != nil {
 		return
 	}
+	taskKey := "addstrm" + t.LocalPath
+	updateTaskMsg(taskKey, fmt.Sprintf("下载文件: %s", t.LocalPath))
+	defer updateTaskMsg(taskKey, "")
 	// 使用辅助函数执行下载，统一处理报错
 	if err := downloadToFile(ctx, t); err != nil {
 		failedTasks.Add(1)
-		log.Printf("[%d/%d][添加STRM] 失败: %s: %v", current, total, t.LocalPath, err)
+		addTaskError(fmt.Sprintf("[添加STRM] [%s] 下载失败: %s (%v)", time.Now().Format("15:04"), t.LocalPath, err))
+		log.Printf("[%d/%d][添加STRM] 下载失败: %s: %v", current, total, t.LocalPath, err)
 		return
 	}
-	log.Printf("[%d/%d][添加STRM] 下载成功: %s", current, total, filepath.Base(t.LocalPath))
+	log.Printf("[%d/%d][添加STRM] 下载成功: %s", current, total, t.LocalPath)
 }
 
 func downloadToFile(ctx context.Context, t task) error {
@@ -211,7 +268,7 @@ func downloadToFile(ctx context.Context, t task) error {
 	if err != nil {
 		return err
 	}
-	// 1. 发起请求：Context 会自动管理超时和取消
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
@@ -228,8 +285,6 @@ func downloadToFile(ctx context.Context, t task) error {
 		return fmt.Errorf("HTTP status: %d", resp.StatusCode)
 	}
 
-	// 2. 准备目录和文件
-	// Go 1.22+ 优化：MkdirAll 的性能更高了
 	if err := os.MkdirAll(filepath.Dir(t.LocalPath), 0755); err != nil {
 		return err
 	}
@@ -240,22 +295,24 @@ func downloadToFile(ctx context.Context, t task) error {
 	}
 	defer out.Close()
 
-	// 3. 核心简化：io.Copy 会响应 Body 的取消信号
-	// 因为 resp.Body 是从携带 Context 的 Request 产生的，
-	// 一旦 ctx 取消，Body.Read 会立即返回 context canceled
 	_, err = io.Copy(out, resp.Body)
 	return err
 }
 
-// 提取出的移动云盘文件逻辑
+// 移动云盘文件逻辑
 func performMoveFiles(ctx context.Context) {
+	taskKey := "addstrm_move"
+	updateTaskMsg(taskKey, fmt.Sprintf("移动云盘文件至TempPath: %s", tempPath))
+	defer updateTaskMsg(taskKey, "")
+
 	targetCID, err := open115.FolderInfo(ctx, tempPath)
 	if err != nil {
-		log.Printf("[添加strm] 无法获取移动目标目录: %v", err)
+		log.Printf("[添加strm] 无法获取移动文件: %v", err)
 		return
 	}
 	fidsStr := strings.Join(rootFids, ",")
 	if err := open115.MoveFile(ctx, fidsStr, targetCID); err != nil {
+		addTaskError(fmt.Sprintf("[添加STRM] [%s] 移动云盘文件失败: %v", time.Now().Format("15:04"), err))
 		log.Printf("[添加strm] 移动云盘文件失败: %v", err)
 	} else {
 		log.Printf("[添加strm] 成功移动 %d 个文件至 TempPath", len(rootFids))

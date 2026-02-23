@@ -7,6 +7,7 @@ import (
 	"115tools/strmServer"
 	"115tools/syncFile"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -36,18 +37,38 @@ func main() {
 		http.ServeFile(w, r, "./index.html")
 	})
 
-	// 状态查询接口（保留向后兼容）
-	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		syncRun, syncCount, syncFailed := syncFile.GetStatus()
-		strmRun, strmCount, strmFailed := addStrm.GetStatus()
+	// 状态查询接口
+	type GlobalStatus struct {
+		Sync syncFile.SyncStatus `json:"sync"`
+		Strm addStrm.StrmStatus  `json:"strm"`
+	}
 
-		jsonStr := fmt.Sprintf(`{
-            "sync": {"running": %v, "done": %d, "failed": %d},
-            "strm": {"running": %v, "done": %d, "failed": %d}
-        }`, syncRun, syncCount, syncFailed, strmRun, strmCount, strmFailed)
-		w.Write([]byte(jsonStr))
+	// SSE 实时日志推送
+	mux.HandleFunc("GET /logs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				status := GlobalStatus{
+					Sync: syncFile.GetStatus(),
+					Strm: addStrm.GetStatus(),
+				}
+				data, _ := json.Marshal(status)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+		}
 	})
 
 	mainCtx, mainCancel := context.WithCancel(context.Background())
@@ -108,4 +129,3 @@ func main() {
 	mainWg.Wait() // 阻塞，直到 syncFile 和 addStrm 彻底清理完数据库和文件
 	log.Printf("程序已安全退出。")
 }
-

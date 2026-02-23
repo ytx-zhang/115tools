@@ -1,327 +1,178 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>文件同步和STRM生成工具</title>
+    <title>115 管理面板</title>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@4.4.19/dist/full.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-
-        .container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            padding: 40px;
-            max-width: 900px;
-            width: 100%;
-        }
-
-        .header {
-            text-align: center;
-            margin-bottom: 60px;
-        }
-
-        .header h1 {
-            font-size: 32px;
-            color: #333;
-            margin-bottom: 10px;
-        }
-
-        .header p {
-            color: #666;
-            font-size: 14px;
-        }
-
-        .buttons-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 40px;
-            margin-bottom: 30px;
-        }
-
-        @media (max-width: 600px) {
-            .buttons-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        .button-group {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 16px;
-        }
-
-        .btn {
-            width: 100%;
-            padding: 40px 20px;
-            font-size: 22px;
-            font-weight: bold;
-            border: none;
-            border-radius: 15px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            color: white;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            position: relative;
-            overflow: hidden;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-        }
-
-        .btn:hover:not(.running) {
-            transform: translateY(-4px);
-            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.2);
-        }
-
-        .btn:active:not(.running) {
-            transform: translateY(-2px);
-        }
-
-        .btn-sync {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }
-
-        .btn-strm {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        }
-
-        .btn.running {
-            background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
-            animation: pulse 1.5s ease-in-out infinite;
-        }
-
-        @keyframes pulse {
-            0%, 100% {
-                box-shadow: 0 0 0 0 rgba(250, 112, 154, 0.7);
-            }
-            50% {
-                box-shadow: 0 0 0 20px rgba(250, 112, 154, 0);
-            }
-        }
-
-        .loading-spinner {
-            display: inline-block;
-            width: 16px;
-            height: 16px;
-            border: 2px solid rgba(255, 255, 255, 0.3);
-            border-top: 2px solid white;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin-left: 8px;
-            vertical-align: middle;
-        }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        .stats-box {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 12px;
-            width: 100%;
-        }
-
-        .stat-card {
-            background: white;
-            border-radius: 10px;
-            padding: 12px;
-            text-align: center;
-            border: 2px solid #e9ecef;
-            transition: all 0.3s ease;
-        }
-
-        .stat-card.completed {
-            border-color: #28a745;
-            background: #f0fff4;
-        }
-
-        .stat-card.failed {
-            border-color: #dc3545;
-            background: #fff5f5;
-        }
-
-        .stat-number {
-            font-size: 28px;
-            font-weight: bold;
-            margin-bottom: 4px;
-        }
-
-        .stat-card.completed .stat-number {
-            color: #28a745;
-        }
-
-        .stat-card.failed .stat-number {
-            color: #dc3545;
-        }
-
-        .stat-label {
-            font-size: 12px;
-            color: #666;
-            font-weight: 500;
-        }
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        /* 日志进入动画 */
+        .log-item-enter-active { transition: all 0.3s ease-out; }
+        .log-item-enter-from { opacity: 0; transform: translateX(10px); }
     </style>
 </head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>📁 工具管理中心</h1>
-            <p>管理文件同步和STRM文件生成</p>
-        </div>
+<body class="bg-base-300 min-h-screen p-4 md:p-8 text-base-content font-sans">
 
-        <div class="buttons-grid">
-            <div class="button-group">
-                <button class="btn btn-sync" id="syncBtn" onclick="handleSync()">
-                    🔄 <span id="syncText">开始同步文件</span><span id="syncSpinner"></span>
-                </button>
-                <div class="stats-box">
-                    <div class="stat-card completed">
-                        <div class="stat-number" id="syncDone">0</div>
-                        <div class="stat-label">已完成</div>
-                    </div>
-                    <div class="stat-card failed">
-                        <div class="stat-number" id="syncFailed">0</div>
-                        <div class="stat-label">已失败</div>
-                    </div>
+<div id="app" class="max-w-4xl mx-auto">
+    <header class="flex justify-between items-end mb-8">
+        <div>
+            <h1 class="text-3xl font-black text-primary tracking-tighter italic">115 TOOLS</h1>
+            <p class="text-xs opacity-50 font-mono uppercase tracking-widest mt-1">Storage & Stream Automation</p>
+        </div>
+        <div class="flex items-center gap-2 text-xs font-mono bg-base-100 px-3 py-1.5 rounded-full shadow-inner border border-white/5">
+            <span class="relative flex h-2 w-2">
+                <span v-if="isConnected" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-2 w-2" :class="isConnected ? 'bg-success' : 'bg-error'"></span>
+            </span>
+            {{ isConnected ? 'LIVE' : 'OFFLINE' }}
+        </div>
+    </header>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+        <div class="card bg-base-100 shadow-xl border border-white/5 transition-all">
+            <div class="card-body p-6">
+                <h2 class="text-xs opacity-40 uppercase font-bold tracking-widest">文件同步状态</h2>
+                <div class="flex items-baseline gap-2 mt-3">
+                    <span class="text-5xl font-black text-primary">{{ status.sync.done }}</span>
+                    <span class="text-sm opacity-30 font-bold uppercase">Success</span>
+                </div>
+                <div v-if="status.sync.failed > 0" class="text-xs text-error font-bold mt-2 flex items-center gap-1">
+                    <span>⚠️</span> FAILED: {{ status.sync.failed }}
+                </div>
+                <div class="card-actions mt-6">
+                    <button 
+                        @click="toggleSync" 
+                        class="btn btn-primary btn-block text-base-100 shadow-md font-bold"
+                        :class="{'btn-outline btn-error': status.sync.running}"
+                    >
+                        <span v-if="status.sync.running" class="loading loading-spinner loading-xs"></span>
+                        {{ status.sync.running ? '停止同步' : '开始同步文件' }}
+                    </button>
                 </div>
             </div>
-            <div class="button-group">
-                <button class="btn btn-strm" id="strmBtn" onclick="handleStrm()">
-                    🎬 <span id="strmText">生成STRM文件</span><span id="strmSpinner"></span>
-                </button>
-                <div class="stats-box">
-                    <div class="stat-card completed">
-                        <div class="stat-number" id="strmDone">0</div>
-                        <div class="stat-label">已完成</div>
-                    </div>
-                    <div class="stat-card failed">
-                        <div class="stat-number" id="strmFailed">0</div>
-                        <div class="stat-label">已失败</div>
-                    </div>
+        </div>
+
+        <div class="card bg-base-100 shadow-xl border border-white/5 transition-all">
+            <div class="card-body p-6">
+                <h2 class="text-xs opacity-40 uppercase font-bold tracking-widest">STRM 生成状态</h2>
+                <div class="flex items-baseline gap-2 mt-3">
+                    <span class="text-5xl font-black text-secondary">{{ status.strm.done }}</span>
+                    <span class="text-sm opacity-30 font-bold uppercase">Finished</span>
+                </div>
+                <div v-if="status.strm.failed > 0" class="text-xs text-error font-bold mt-2 flex items-center gap-1">
+                    <span>⚠️</span> FAILED: {{ status.strm.failed }}
+                </div>
+                <div class="card-actions mt-6">
+                    <button 
+                        @click="toggleStrm" 
+                        class="btn btn-secondary btn-block text-base-100 shadow-md font-bold"
+                        :class="{'btn-outline btn-error': status.strm.running}"
+                    >
+                        <span v-if="status.strm.running" class="loading loading-spinner loading-xs"></span>
+                        {{ status.strm.running ? '中止生成' : '开始生成 STRM' }}
+                    </button>
                 </div>
             </div>
         </div>
     </div>
 
-    <script>
-        let statusUpdateInterval;
+    <div class="mockup-code bg-base-100 border border-white/5 shadow-2xl min-h-[300px]">
+        <div class="px-5 font-mono text-sm">
+            <div class="flex justify-between items-center opacity-30 mb-6 border-b border-white/5 pb-2">
+                <span class="text-xs font-bold uppercase tracking-tighter">System Console</span>
+                <span class="text-[10px]">{{ new Date().toLocaleDateString() }}</span>
+            </div>
+            
+            <div v-if="!hasActivity" class="text-base-content/20 italic animate-pulse">
+                Listening for incoming tasks...
+            </div>
 
-        // 初始化
-        function init() {
-            updateStatus();
-            // 每2秒更新一次状态
-            statusUpdateInterval = setInterval(updateStatus, 2000);
-        }
+            <transition-group name="log-item">
+                <div v-for="msg in allActiveMsgs" :key="msg" class="text-success flex items-start gap-3 mb-3">
+                    <span class="text-primary font-black animate-bounce">>></span>
+                    <span class="flex-1 leading-relaxed">{{ msg }}</span>
+                    <span class="loading loading-ring loading-xs opacity-30"></span>
+                </div>
+            </transition-group>
 
-        // 获取状态
-        async function updateStatus() {
-            try {
-                const response = await fetch('/status');
-                const data = await response.json();
+            <div v-if="allErrors.length > 0" class="mt-8 pt-4 border-t border-error/20">
+                <div v-for="(err, i) in allErrors" :key="'err-'+i" class="text-error flex items-start gap-3 mb-2 bg-error/5 p-2 rounded">
+                    <span class="font-bold px-1 bg-error text-error-content text-[10px] rounded">ERROR</span>
+                    <span class="flex-1">{{ err }}</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 
-                // 更新同步状态和统计
-                const syncRunning = data.sync.running;
-                const syncBtn = document.getElementById('syncBtn');
-                const syncText = document.getElementById('syncText');
-                const syncSpinner = document.getElementById('syncSpinner');
-                
-                document.getElementById('syncDone').textContent = data.sync.done;
-                document.getElementById('syncFailed').textContent = data.sync.failed;
+<script>
+    const { createApp } = Vue;
 
-                if (syncRunning) {
-                    syncBtn.classList.add('running');
-                    syncText.textContent = '停止同步';
-                    syncSpinner.innerHTML = '<span class="loading-spinner"></span>';
-                } else {
-                    syncBtn.classList.remove('running');
-                    syncText.textContent = '开始同步文件';
-                    syncSpinner.innerHTML = '';
+    createApp({
+        data() {
+            return {
+                isConnected: false,
+                // 初始化状态结构
+                status: {
+                    sync: { running: false, done: 0, failed: 0, active: [], errors: [] },
+                    strm: { running: false, done: 0, failed: 0, active: [], errors: [] }
                 }
-
-                // 更新STRM状态和统计
-                const strmRunning = data.strm.running;
-                const strmBtn = document.getElementById('strmBtn');
-                const strmText = document.getElementById('strmText');
-                const strmSpinner = document.getElementById('strmSpinner');
-                
-                document.getElementById('strmDone').textContent = data.strm.done;
-                document.getElementById('strmFailed').textContent = data.strm.failed;
-
-                if (strmRunning) {
-                    strmBtn.classList.add('running');
-                    strmText.textContent = '停止生成';
-                    strmSpinner.innerHTML = '<span class="loading-spinner"></span>';
-                } else {
-                    strmBtn.classList.remove('running');
-                    strmText.textContent = '生成STRM文件';
-                    strmSpinner.innerHTML = '';
-                }
-            } catch (error) {
-                console.error('获取状态失败:', error);
             }
-        }
-
-        // 处理同步按钮点击
-        async function handleSync() {
-            try {
-                const response = await fetch('/status');
-                const data = await response.json();
-                
-                if (data.sync.running) {
-                    // 如果正在运行，停止同步
-                    await fetch('/stopsync');
-                } else {
-                    // 如果未运行，开始同步
-                    await fetch('/sync');
-                }
-                
-                updateStatus();
-            } catch (error) {
-                console.error('操作失败:', error);
-                alert('操作失败，请检查服务器连接');
+        },
+        computed: {
+            // 合并显示两个模块的实时任务描述
+            allActiveMsgs() {
+                return [...this.status.sync.active, ...this.status.strm.active];
+            },
+            // 合并并限制显示错误
+            allErrors() {
+                return [...this.status.sync.errors, ...this.status.strm.errors];
+            },
+            hasActivity() {
+                return this.allActiveMsgs.length > 0 || this.allErrors.length > 0;
             }
-        }
+        },
+        mounted() {
+            // 页面加载即建立 SSE 连接，无需再请求 /status
+            this.connectSSE();
+        },
+        methods: {
+            connectSSE() {
+                const es = new EventSource('/logs');
+                
+                es.onopen = () => {
+                    this.isConnected = true;
+                    console.log("SSE Stream Connected");
+                };
 
-        // 处理STRM按钮点击
-        async function handleStrm() {
-            try {
-                // 发送 /strm 请求切换状态
+                es.onmessage = (e) => {
+                    try {
+                        const data = JSON.parse(e.data);
+                        // 直接更新整个状态对象，Vue 会自动刷新 UI
+                        this.status = data;
+                    } catch (err) {
+                        console.error("Parse Error:", err);
+                    }
+                };
+
+                es.onerror = () => {
+                    this.isConnected = false;
+                    // EventSource 默认会自动重连
+                };
+            },
+            async toggleSync() {
+                const endpoint = this.status.sync.running ? '/stopsync' : '/sync';
+                await fetch(endpoint);
+            },
+            async toggleStrm() {
                 await fetch('/strm');
-                updateStatus();
-            } catch (error) {
-                console.error('操作失败:', error);
-                alert('操作失败，请检查服务器连接');
             }
         }
-
-        // 页面加载完成后初始化
-        document.addEventListener('DOMContentLoaded', init);
-
-        // 页面关闭时清理定时器
-        window.addEventListener('beforeunload', () => {
-            if (statusUpdateInterval) {
-                clearInterval(statusUpdateInterval);
-            }
-        });
-    </script>
+    }).mount('#app');
+</script>
 </body>
 </html>
