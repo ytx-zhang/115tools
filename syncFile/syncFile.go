@@ -23,7 +23,6 @@ var (
 	bucketName   = []byte("FileIndex")
 	dBPath       = `/app/data/files.db`
 	strmUrl      string
-	rootPath     string
 	tempFid      string
 	doneTasks    atomic.Int32
 	failedTasks  atomic.Int32
@@ -177,7 +176,7 @@ func runSync(parentCtx context.Context) {
 	ctx, cancelFunc = context.WithCancel(parentCtx)
 	var isScanning atomic.Bool
 	config := open115.Conf.Load()
-	rootPath = config.SyncPath
+	rootPath := config.SyncPath
 	strmUrl = config.StrmUrl
 	doneTasks.Store(0)
 	failedTasks.Store(0)
@@ -217,19 +216,25 @@ func runSync(parentCtx context.Context) {
 		})
 		wg.Wait()
 	}
+	isScanning.Store(false)
+	log.Printf("[同步] 云端数据库初始化完成")
 	if ctx.Err() != nil {
 		return
 	}
-	isScanning.Store(false)
-	log.Printf("[同步] 云端数据库初始化完成")
+
 	//获取temp文件夹信息
 	tempPath := config.TempPath
-	fid, err := open115.FolderInfo(ctx, tempPath)
-	if err != nil {
-		log.Printf("[同步] 获取temp目录信息失败: %v", err)
-		return
+	tempFid = dbGetFID(tempPath)
+	if tempFid == "" {
+		fid, err := open115.FolderInfo(ctx, tempPath)
+		if err != nil {
+			log.Printf("[同步] 获取temp目录信息失败: %v", err)
+			return
+		}
+		dbSaveRecord(tempPath, fid, -1)
+		tempFid = fid
 	}
-	tempFid = fid
+
 	log.Printf("[同步] 开始扫描本地文件")
 	var allFileTasks []task
 	syncFile(ctx, rootPath, rootID, &allFileTasks)
@@ -279,13 +284,13 @@ func cloudScan(ctx context.Context, currentPath string) {
 		defer func() { <-scanSem }()
 	}
 	cid := dbGetFID(currentPath)
+	log.Printf("[同步] 获取云端列表:%s", currentPath)
 	list, err := open115.FileList(ctx, cid)
 	if err != nil {
 		log.Printf("[同步] 获取云端[%s]失败: %v", currentPath, err)
 		cancelFunc()
 		return
 	}
-	log.Printf("[同步] 获取云端成功:%s", currentPath)
 	for _, item := range list {
 		if ctx.Err() != nil {
 			return
@@ -293,22 +298,30 @@ func cloudScan(ctx context.Context, currentPath string) {
 		if item.Aid != "1" { // 有效文件
 			continue
 		}
-		fullPath := currentPath + "/" + item.Fn
+		savePath := currentPath + "/" + item.Fn
+		saveSize := item.Fs
 		if item.Fc == "0" { // 目录
-			dbSaveRecord(fullPath, item.Fid, -1)
+			saveSize = -1
 			wg.Go(func() {
-				cloudScan(ctx, fullPath)
+				cloudScan(ctx, savePath)
 			})
-		} else {
-			savePath := fullPath
-			saveSize := item.Fs
-			// 视频文件特殊处理
-			if item.Isv == 1 {
-				savePath = fullPath[:len(fullPath)-len(filepath.Ext(fullPath))] + ".strm"
-				saveSize = 0 // STRM 文件大小记为0
-			}
-			dbSaveRecord(savePath, item.Fid, saveSize)
 		}
+		// 视频文件生成 strm 记录
+		if item.Isv == 1 {
+			savePath = savePath[:len(savePath)-len(filepath.Ext(savePath))] + ".strm"
+			saveSize = 0
+			// 检查本地是否存在且匹配
+			if info, err := os.Stat(savePath); err == nil {
+				if content, err := os.ReadFile(savePath); err == nil {
+					_, localFid := extractPickcode(string(content))
+					// 如果本地 strm 记录的 fid 和云端当前文件 fid 一致
+					if localFid == item.Fid {
+						saveSize = info.ModTime().Unix()
+					}
+				}
+			}
+		}
+		dbSaveRecord(savePath, item.Fid, saveSize)
 	}
 }
 
@@ -505,8 +518,7 @@ func handleStrmTask(ctx context.Context, fPath, cid, name, content string) (stri
 		}
 	}
 	// 3. 写入文件
-	baseUrl, _ := strings.CutSuffix(strmUrl, "/")
-	newContent := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", baseUrl, pickcode, fid)
+	newContent := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", strmUrl, pickcode, fid)
 	if err := os.WriteFile(fPath, []byte(newContent), 0644); err != nil {
 		return "", fmt.Errorf("[同步] strm文件写入内容失败: %v", err)
 	}
@@ -530,6 +542,5 @@ func checkVideo(ext string, size int64) bool {
 	case ".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv":
 		return true
 	}
-
 	return false
 }
