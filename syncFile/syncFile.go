@@ -408,7 +408,7 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 			} else {
 				err = open115.DeleteFile(ctx, fid)
 			}
-			if err != nil {
+			if err != nil && !strings.Contains(err.Error(), "不存在或已经删除") {
 				log.Printf("[同步] 删除云端文件失败: %v", err)
 				return
 			}
@@ -435,7 +435,7 @@ func processFile(ctx context.Context, fPath, cid, name string, size int64, isStr
 		} else {
 			err = open115.DeleteFile(ctx, fid)
 		}
-		if err != nil {
+		if err != nil && !strings.Contains(err.Error(), "不存在或已经删除") {
 			log.Printf("[同步] 删除云端文件失败: %v", err)
 			return
 		}
