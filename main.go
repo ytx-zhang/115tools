@@ -39,8 +39,8 @@ func main() {
 
 	// 状态查询接口
 	type GlobalStatus struct {
-		Sync syncFile.SyncStatus `json:"sync"`
-		Strm addStrm.StrmStatus  `json:"strm"`
+		Sync syncFile.TaskStatsJSON `json:"sync"`
+		Strm addStrm.TaskStatsJSON  `json:"strm"`
 	}
 
 	// SSE 实时日志推送
@@ -76,6 +76,7 @@ func main() {
 	var mainWg sync.WaitGroup
 
 	mux.HandleFunc("GET /download", strmServer.RedirectToRealURL)
+
 	mux.HandleFunc("GET /sync", func(w http.ResponseWriter, r *http.Request) {
 		syncFile.StartSync(mainCtx, &mainWg)
 		w.Header().Set("Cache-Control", "no-store")
@@ -86,8 +87,14 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusAccepted)
 	})
+
 	mux.HandleFunc("GET /strm", func(w http.ResponseWriter, r *http.Request) {
 		addStrm.StartAddStrm(mainCtx, &mainWg)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusAccepted)
+	})
+	mux.HandleFunc("GET /stopstrm", func(w http.ResponseWriter, r *http.Request) {
+		addStrm.StopAddStrm()
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusAccepted)
 	})

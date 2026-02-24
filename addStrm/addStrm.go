@@ -15,6 +15,64 @@ import (
 	"time"
 )
 
+var (
+	strmPath   string
+	tempPath   string
+	strmUrl    string
+	rootFids   []string
+	wg         sync.WaitGroup
+	scanSem    = make(chan struct{}, 3)
+	cancelFunc context.CancelFunc
+)
+
+type taskStats struct {
+	total        atomic.Int64
+	completed    atomic.Int64
+	failed       atomic.Int64
+	mu           sync.Mutex
+	failedErrors []string
+	running      atomic.Bool
+}
+
+var stats = &taskStats{}
+
+func (s *taskStats) Reset() {
+	s.total.Store(0)
+	s.completed.Store(0)
+	s.failed.Store(0)
+	s.mu.Lock()
+	s.failedErrors = s.failedErrors[:0]
+	s.mu.Unlock()
+	s.running.Store(false)
+}
+
+type TaskStatsJSON struct {
+	Total     int64    `json:"total"`
+	Completed int64    `json:"completed"`
+	Failed    int64    `json:"failed"`
+	Errors    []string `json:"errors"`
+	Running   bool     `json:"running"`
+}
+
+func GetStatus() TaskStatsJSON {
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+
+	return TaskStatsJSON{
+		Total:     stats.total.Load(),
+		Completed: stats.completed.Load(),
+		Failed:    stats.failed.Load(),
+		Errors:    append([]string(nil), stats.failedErrors...),
+		Running:   stats.running.Load(),
+	}
+}
+func markFailed(reason string) {
+	stats.failed.Add(1)
+	stats.mu.Lock()
+	stats.failedErrors = append(stats.failedErrors, reason)
+	stats.mu.Unlock()
+}
+
 type task struct {
 	Strm      bool
 	PC        string
@@ -22,72 +80,8 @@ type task struct {
 	LocalPath string
 }
 
-var (
-	strmPath     string
-	tempPath     string
-	strmUrl      string
-	rootFids     []string
-	doneTasks    atomic.Int32
-	failedTasks  atomic.Int32
-	activeMsgMap sync.Map // 存储活跃任务描述
-	recentErrors []string // 存储最近错误
-	errorMu      sync.Mutex
-	isRunning    atomic.Bool
-	wg           sync.WaitGroup
-	scanSem      = make(chan struct{}, 3)
-	cancelFunc   context.CancelFunc
-)
-
-func updateTaskMsg(key string, msg string) {
-	if msg == "" {
-		activeMsgMap.Delete(key)
-	} else {
-		activeMsgMap.Store(key, msg)
-	}
-}
-
-// AddTaskError 记录错误
-func addTaskError(errStr string) {
-	errorMu.Lock()
-	defer errorMu.Unlock()
-	recentErrors = append([]string{errStr}, recentErrors...)
-}
-
-type StrmStatus struct {
-	Running bool     `json:"running"`
-	Done    int32    `json:"done"`
-	Failed  int32    `json:"failed"`
-	Active  []string `json:"active"` // 正在扫描的目录或正在处理的文件
-	Errors  []string `json:"errors"` // 最近生成的错误信息
-}
-
-func GetStatus() StrmStatus {
-	// 初始化时直接给个空切片，不要用 var msgs []string
-	msgs := []string{}
-	activeMsgMap.Range(func(key, value any) bool {
-		msgs = append(msgs, value.(string))
-		return true
-	})
-
-	errorMu.Lock()
-	errs := []string{} // 同样初始化为空切片
-	if len(recentErrors) > 0 {
-		errs = make([]string, len(recentErrors))
-		copy(errs, recentErrors)
-	}
-	errorMu.Unlock()
-
-	return StrmStatus{
-		Running: isRunning.Load(),
-		Done:    doneTasks.Load(),
-		Failed:  failedTasks.Load(),
-		Active:  msgs, // 现在这里永远是 [] 而不是 null
-		Errors:  errs,
-	}
-}
-
 func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
-	if isRunning.Load() {
+	if stats.running.Load() {
 		log.Printf("[添加strm] 检测到正在运行，准备下发停止信号...")
 		cancelFunc()
 		return
@@ -96,16 +90,8 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 	mainWg.Go(func() {
 		var ctx context.Context
 		ctx, cancelFunc = context.WithCancel(parentCtx)
-		isRunning.Store(true)
-		doneTasks.Store(0)
-		failedTasks.Store(0)
-		errorMu.Lock()
-		recentErrors = nil // 清空错误列表
-		errorMu.Unlock()
-		activeMsgMap.Range(func(k, v any) bool {
-			activeMsgMap.Delete(k) // 清空残留的活跃消息
-			return true
-		})
+		stats.Reset()
+		stats.running.Store(true)
 		conf := open115.Conf.Load()
 		strmPath = conf.StrmPath
 		strmUrl = conf.StrmUrl
@@ -113,7 +99,7 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 
 		defer func() {
 			cancelFunc()
-			isRunning.Store(false)
+			stats.running.Store(false)
 			log.Printf("[添加strm] 任务彻底停止")
 		}()
 
@@ -126,12 +112,10 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 
 		// 扫描阶段：递归寻找需要处理的文件
 		log.Printf("[添加strm] 正在扫描云端目录结构...")
-		var allFileTasks []task // 本次任务的局部切片，预分配容量以优化性能
-		var mu sync.Mutex
 		rootFids = nil
-		doneTasks.Store(0)
+		taskQueue := make(chan task, 10)
 		wg.Go(func() {
-			scanCloudRecursive(ctx, startCID, strmPath, &allFileTasks, &mu)
+			scanCloudRecursive(ctx, startCID, strmPath, taskQueue)
 		})
 		wg.Wait()
 
@@ -141,35 +125,31 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 			return
 		}
 
-		total := int32(len(allFileTasks))
+		total := stats.total.Load()
 		if total == 0 {
 			log.Printf("[添加strm] 未发现新任务")
 			return
 		}
 
 		// 执行阶段
-		log.Printf("[添加strm] 开始执行任务，总计: %d", total)
-		taskQueue := make(chan task, 3)
+		log.Printf("[添加strm] 云端扫描完成，开始处理文件，总数: %d", total)
+
 		const workerCount = 3
 		for range workerCount {
 			wg.Go(func() {
 				for task := range taskQueue {
-					current := doneTasks.Add(1)
+					if ctx.Err() != nil {
+						continue
+					}
+					current := stats.completed.Add(1)
 					if task.Strm {
-						doCreateStrm(ctx, task, int32(current), total)
+						doCreateStrm(ctx, task, current, total)
 					} else {
-						doDownloadFile(ctx, task, int32(current), total)
+						doDownloadFile(ctx, task, current, total)
 					}
 				}
 			})
 		}
-		go func() {
-			for _, t := range allFileTasks {
-				taskQueue <- t
-			}
-			close(taskQueue)
-		}()
-		// 等待所有协程结束
 		wg.Wait()
 
 		// 移动文件逻辑：仅在任务未被取消且全部成功时执行
@@ -178,18 +158,21 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 		}
 	})
 }
+func StopAddStrm() {
+	if cancelFunc != nil {
+		cancelFunc()
+		log.Printf("[添加STRM] 正在中止当前运行中的任务...")
+	}
+}
 
 // scanCloudRecursive 递归扫描云端，支持 Context 取消
-func scanCloudRecursive(ctx context.Context, cid string, localPath string, allFileTasks *[]task, mu *sync.Mutex) {
+func scanCloudRecursive(ctx context.Context, cid string, localPath string, taskQueue chan task) {
 	select {
 	case <-ctx.Done():
 		return
 	case scanSem <- struct{}{}:
 		defer func() { <-scanSem }()
 	}
-	taskKey := "addstrm" + localPath
-	updateTaskMsg(taskKey, fmt.Sprintf("获取云端列表: %s", localPath))
-	defer updateTaskMsg(taskKey, "")
 
 	log.Printf("[添加strm] 正在扫描云端目录: %s", localPath)
 	list, err := open115.FileList(ctx, cid)
@@ -205,7 +188,7 @@ func scanCloudRecursive(ctx context.Context, cid string, localPath string, allFi
 
 		if item.Fc == "0" { // 文件夹
 			_ = os.MkdirAll(currentLocalPath, 0755)
-			wg.Go(func() { scanCloudRecursive(ctx, item.Fid, currentLocalPath, allFileTasks, mu) })
+			wg.Go(func() { scanCloudRecursive(ctx, item.Fid, currentLocalPath, taskQueue) })
 		} else { // 文件逻辑
 			finalPath := currentLocalPath
 			if item.Isv == 1 {
@@ -216,22 +199,20 @@ func scanCloudRecursive(ctx context.Context, cid string, localPath string, allFi
 			if _, err := os.Stat(finalPath); err == nil {
 				continue
 			}
-			t := task{
+			taskQueue <- task{
 				Strm:      item.Isv == 1,
 				PC:        item.Pc,
 				FID:       item.Fid,
 				LocalPath: finalPath,
 			}
-			mu.Lock()
-			*allFileTasks = append(*allFileTasks, t)
-			mu.Unlock()
+			stats.total.Add(1)
 		}
 	}
 
 }
 
 // doCreateStrm 生成 STRM 文件
-func doCreateStrm(ctx context.Context, t task, current, total int32) {
+func doCreateStrm(ctx context.Context, t task, current, total int64) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -240,24 +221,21 @@ func doCreateStrm(ctx context.Context, t task, current, total int32) {
 	if err == nil {
 		log.Printf("[%d/%d][添加STRM] 生成strm成功: %s", current, total, filepath.Base(t.LocalPath))
 	} else {
-		failedTasks.Add(1)
-		addTaskError(fmt.Sprintf("[添加STRM] [%s] 生成strm失败: %s (%v)", time.Now().Format("15:04"), t.LocalPath, err))
+		stats.failed.Add(1)
+		markFailed(fmt.Sprintf("[添加STRM] [%s] 生成strm失败: %s (%v)", time.Now().Format("15:04"), t.LocalPath, err))
 		log.Printf("[%d/%d][添加STRM] 生成strm失败: %s: %v", current, total, filepath.Base(t.LocalPath), err)
 	}
 }
 
 // doDownloadFile 处理文件下载，支持网络中断
-func doDownloadFile(ctx context.Context, t task, current, total int32) {
+func doDownloadFile(ctx context.Context, t task, current, total int64) {
 	if ctx.Err() != nil {
 		return
 	}
-	taskKey := "addstrm" + t.LocalPath
-	updateTaskMsg(taskKey, fmt.Sprintf("下载文件: %s", t.LocalPath))
-	defer updateTaskMsg(taskKey, "")
 	// 使用辅助函数执行下载，统一处理报错
 	if err := downloadToFile(ctx, t); err != nil {
-		failedTasks.Add(1)
-		addTaskError(fmt.Sprintf("[添加STRM] [%s] 下载失败: %s (%v)", time.Now().Format("15:04"), t.LocalPath, err))
+		stats.failed.Add(1)
+		markFailed(fmt.Sprintf("[添加STRM] [%s] 下载失败: %s (%v)", time.Now().Format("15:04"), t.LocalPath, err))
 		log.Printf("[%d/%d][添加STRM] 下载失败: %s: %v", current, total, t.LocalPath, err)
 		return
 	}
@@ -305,10 +283,6 @@ func downloadToFile(ctx context.Context, t task) error {
 
 // 移动云盘文件逻辑
 func performMoveFiles(ctx context.Context) {
-	taskKey := "addstrm_move"
-	updateTaskMsg(taskKey, fmt.Sprintf("移动云盘文件至TempPath: %s", tempPath))
-	defer updateTaskMsg(taskKey, "")
-
 	targetCID, err := open115.FolderInfo(ctx, tempPath)
 	if err != nil {
 		log.Printf("[添加strm] 无法获取移动文件: %v", err)
@@ -316,7 +290,7 @@ func performMoveFiles(ctx context.Context) {
 	}
 	fidsStr := strings.Join(rootFids, ",")
 	if err := open115.MoveFile(ctx, fidsStr, targetCID); err != nil {
-		addTaskError(fmt.Sprintf("[添加STRM] [%s] 移动云盘文件失败: %v", time.Now().Format("15:04"), err))
+		markFailed(fmt.Sprintf("[添加STRM] [%s] 移动云盘文件失败: %v", time.Now().Format("15:04"), err))
 		log.Printf("[添加strm] 移动云盘文件失败: %v", err)
 	} else {
 		log.Printf("[添加strm] 成功移动 %d 个文件至 TempPath", len(rootFids))

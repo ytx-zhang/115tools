@@ -24,12 +24,6 @@ var (
 	dBPath       = `/app/data/files.db`
 	strmUrl      string
 	tempFid      string
-	doneTasks    atomic.Int32
-	failedTasks  atomic.Int32
-	activeMsgMap sync.Map
-	recentErrors []string
-	errorMu      sync.Mutex
-	isRunning    atomic.Bool
 	needRetry    atomic.Bool
 	wg           sync.WaitGroup
 	scanSem      = make(chan struct{}, 3)
@@ -41,15 +35,6 @@ var (
 		New: func() any { return make(map[string]string, 256) },
 	}
 )
-
-type task struct {
-	ctx    context.Context
-	path   string
-	cid    string
-	name   string
-	size   int64
-	isStrm bool
-}
 
 // --- 数据库初始化与封装 ---
 func initDB() {
@@ -149,60 +134,63 @@ func dbClearPath(fPath string) {
 		log.Printf("[数据库] 清理路径失败 %s: %v", fPath, err)
 	}
 }
-func updateTaskMsg(taskKey string, msg string) {
-	if msg == "" {
-		activeMsgMap.Delete(taskKey)
-	} else {
-		activeMsgMap.Store(taskKey, msg)
+
+// 任务详情
+type taskStats struct {
+	total        atomic.Int64
+	completed    atomic.Int64
+	failed       atomic.Int64
+	mu           sync.Mutex
+	failedErrors []string
+	running      atomic.Bool
+}
+
+var stats = &taskStats{}
+
+func (s *taskStats) Reset() {
+	s.total.Store(0)
+	s.completed.Store(0)
+	s.failed.Store(0)
+	s.mu.Lock()
+	s.failedErrors = s.failedErrors[:0]
+	s.mu.Unlock()
+	s.running.Store(false)
+}
+
+type TaskStatsJSON struct {
+	Total     int64    `json:"total"`
+	Completed int64    `json:"completed"`
+	Failed    int64    `json:"failed"`
+	Errors    []string `json:"errors"`
+	Running   bool     `json:"running"`
+}
+
+func GetStatus() TaskStatsJSON {
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+
+	return TaskStatsJSON{
+		Total:     stats.total.Load(),
+		Completed: stats.completed.Load(),
+		Failed:    stats.failed.Load(),
+		Errors:    append([]string(nil), stats.failedErrors...),
+		Running:   stats.running.Load(),
 	}
 }
-func addTaskError(errStr string) {
-	errorMu.Lock()
-	defer errorMu.Unlock()
-	recentErrors = append([]string{errStr}, recentErrors...)
+func markFailed(reason string) {
+	stats.failed.Add(1)
+	stats.mu.Lock()
+	stats.failedErrors = append(stats.failedErrors, reason)
+	stats.mu.Unlock()
 }
 
-type SyncStatus struct {
-	Running bool     `json:"running"` // 是否正在运行
-	Done    int32    `json:"done"`    // 已完成数量
-	Failed  int32    `json:"failed"`  // 失败数量
-	Active  []string `json:"active"`  // 当前正在进行的任务描述（如：正在上传 xxx）
-	Errors  []string `json:"errors"`  // 最近发生的错误描述列表
-}
-
-func GetStatus() SyncStatus {
-	// 重点：使用空切片初始化，确保 JSON 序列化为 []
-	msgs := []string{}
-	activeMsgMap.Range(func(key, value any) bool {
-		if s, ok := value.(string); ok && s != "" {
-			msgs = append(msgs, s)
-		}
-		return true
-	})
-
-	errorMu.Lock()
-	// 重点：同样使用空切片初始化
-	errs := []string{}
-	if len(recentErrors) > 0 {
-		errs = make([]string, len(recentErrors))
-		copy(errs, recentErrors)
-	}
-	errorMu.Unlock()
-
-	return SyncStatus{
-		Running: isRunning.Load(),
-		Done:    doneTasks.Load(),
-		Failed:  failedTasks.Load(),
-		Active:  msgs, // 即使没有数据，JSON 也是 []
-		Errors:  errs, // 即使没有数据，JSON 也是 []
-	}
-}
+// --- 同步流程 ---
 func StartSync(parentCtx context.Context, mainWg *sync.WaitGroup) {
 	needRetry.Store(true)
 
-	if isRunning.CompareAndSwap(false, true) {
+	if stats.running.CompareAndSwap(false, true) {
 		mainWg.Go(func() {
-			defer isRunning.Store(false)
+			defer stats.running.Store(false)
 			for needRetry.Swap(false) {
 				runSync(parentCtx)
 			}
@@ -221,6 +209,16 @@ func StopSync() {
 		log.Printf("[同步] 正在中止当前运行中的任务...")
 	}
 }
+
+type task struct {
+	ctx    context.Context
+	path   string
+	cid    string
+	name   string
+	size   int64
+	isStrm bool
+}
+
 func runSync(parentCtx context.Context) {
 	var ctx context.Context
 	ctx, cancelFunc = context.WithCancel(parentCtx)
@@ -228,15 +226,7 @@ func runSync(parentCtx context.Context) {
 	config := open115.Conf.Load()
 	rootPath := config.SyncPath
 	strmUrl = config.StrmUrl
-	doneTasks.Store(0)
-	failedTasks.Store(0)
-	errorMu.Lock()
-	recentErrors = nil // 清空错误列表
-	errorMu.Unlock()
-	activeMsgMap.Range(func(k, v any) bool {
-		activeMsgMap.Delete(k) // 清空残留的活跃消息
-		return true
-	})
+	stats.Reset()
 	initDB()
 
 	defer func() {
@@ -293,19 +283,18 @@ func runSync(parentCtx context.Context) {
 	}
 
 	log.Printf("[同步] 开始扫描本地文件")
-	var allFileTasks []task
-	syncFile(ctx, rootPath, rootID, &allFileTasks)
+	taskQueue := make(chan task, 10)
+	syncFile(ctx, rootPath, rootID, taskQueue)
 
 	if ctx.Err() != nil {
 		return
 	}
-	total := int32(len(allFileTasks))
+	total := stats.total.Load()
 	if total == 0 {
 		log.Printf("[同步] 未发现新任务")
 		return
 	}
 	log.Printf("[同步] 本地文件扫描完成，开始处理文件，总数: %d", total)
-	taskQueue := make(chan task, 3)
 	const workerCount = 3
 	for range workerCount {
 		wg.Go(func() {
@@ -317,12 +306,6 @@ func runSync(parentCtx context.Context) {
 			}
 		})
 	}
-	go func() {
-		for _, t := range allFileTasks {
-			taskQueue <- t
-		}
-		close(taskQueue)
-	}()
 	wg.Wait() // 等待所有 文件任务 退出
 	log.Printf("[同步] 同步流程结束，处理文件总数: %d", total)
 }
@@ -336,9 +319,6 @@ func cloudScan(ctx context.Context, currentPath string) {
 	case scanSem <- struct{}{}:
 		defer func() { <-scanSem }()
 	}
-	taskKey := "scan" + currentPath
-	updateTaskMsg(taskKey, fmt.Sprintf("获取云端列表: %s", currentPath))
-	defer updateTaskMsg(taskKey, "")
 
 	fid := dbGetFID(currentPath)
 	log.Printf("[同步] 获取云端列表:%s", currentPath)
@@ -383,7 +363,7 @@ func cloudScan(ctx context.Context, currentPath string) {
 	}
 }
 
-func syncFile(ctx context.Context, currentLocalPath string, currentCID string, allFileTasks *[]task) {
+func syncFile(ctx context.Context, currentLocalPath string, currentCID string, taskQueue chan task) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -424,9 +404,6 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 		if entry.IsDir() { // 处理文件夹
 			if dbSize == -2 {
 				// 本地存在云端不存在，创建云端文件夹
-				taskKey := "add" + fullPath
-				updateTaskMsg(taskKey, fmt.Sprintf("创建云端文件夹: %s", fullPath))
-
 				log.Printf("[同步] 创建云端文件夹: %s", fullPath)
 				newFid, err := open115.AddFolder(ctx, currentCID, name)
 				if err != nil {
@@ -436,11 +413,9 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 				}
 				dbSaveRecord(fullPath, newFid, -1)
 				dbFid = newFid
-
-				updateTaskMsg(taskKey, "")
 			}
 			// 继续递归
-			syncFile(ctx, fullPath, dbFid, allFileTasks)
+			syncFile(ctx, fullPath, dbFid, taskQueue)
 		} else { // 处理文件
 			info, _ := entry.Info()
 			isStrm := strings.EqualFold(filepath.Ext(name), ".strm")
@@ -451,10 +426,11 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 			}
 
 			if dbSize == -2 || size != dbSize {
-				*allFileTasks = append(*allFileTasks, task{
+				taskQueue <- task{
 					ctx: ctx, path: fullPath, cid: currentCID,
 					name: name, size: size, isStrm: isStrm,
-				})
+				}
+				stats.total.Add(1)
 			}
 		}
 	}
@@ -480,14 +456,10 @@ func syncFile(ctx context.Context, currentLocalPath string, currentCID string, a
 		}
 	}
 }
-func processFile(ctx context.Context, fPath, cid, name string, size int64, isStrm bool, total int32) {
+func processFile(ctx context.Context, fPath, cid, name string, size int64, isStrm bool, total int64) {
 	if ctx.Err() != nil {
 		return
 	}
-	taskKey := "sync" + fPath
-	updateTaskMsg(taskKey, fmt.Sprintf("同步文件: %s", fPath))
-	defer updateTaskMsg(taskKey, "")
-
 	var err error
 	indexPath := fPath
 	ext := filepath.Ext(fPath)
@@ -540,14 +512,14 @@ func processFile(ctx context.Context, fPath, cid, name string, size int64, isStr
 		}
 	}
 
-	curr := doneTasks.Add(1)
+	current := stats.completed.Add(1)
 	if err != nil {
-		failedTasks.Add(1)
+		stats.failed.Add(1)
 		errMsg := fmt.Sprintf("[%s][同步] %s: %v", time.Now().Format("15:04"), fPath, err)
-		addTaskError(errMsg)
-		log.Printf("[同步][%d/%d] ❌ %s: %v", curr, total, fPath, err)
+		markFailed(errMsg)
+		log.Printf("[同步][%d/%d] ❌ %s: %v", current, total, fPath, err)
 	} else {
-		log.Printf("[同步][%d/%d] ✅ %s", curr, total, fPath)
+		log.Printf("[同步][%d/%d] ✅ %s", current, total, fPath)
 	}
 }
 
