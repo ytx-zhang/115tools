@@ -4,7 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>115 tools</title>
+    <link id="favicon" rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='1em' font-size='80'>☁️</text></svg>">
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
@@ -14,55 +16,51 @@
         sync: { completed: 0, total: 0, running: false, errors: [] },
         strm: { completed: 0, total: 0, running: false, errors: [] }
     },
-    get syncPercent() { return Math.round((this.stats.sync.completed / this.stats.sync.total) * 100)},
-    get strmPercent() { return Math.round((this.stats.strm.completed / this.stats.strm.total) * 100)},
-    get allErrors() { 
-        return [
-            ...(this.stats.sync.errors || []), 
-            ...(this.stats.strm.errors || [])
-        ] 
-    }
+    get syncPercent() { return Math.round((this.stats.sync.completed / this.stats.sync.total) * 100) },
+    get strmPercent() { return Math.round((this.stats.strm.completed / this.stats.strm.total) * 100) },
+    get allErrors() { return [...(this.stats.sync?.errors || []), ...(this.stats.strm?.errors || [])] }
 }" x-init="
     const es = new EventSource('/logs');
-    es.onmessage = (e) => { stats = JSON.parse(e.data);};
+    es.onmessage = (e) => { stats = JSON.parse(e.data); isConnected = true };
 ">
     <main class="container">
-
         <div class="grid">
-            <article>
+            <article x-data="{ r: () => stats.sync.running }">
                 <header>文件同步</header>
                 <fieldset role="group">
-                    <h2>
-                        <span x-text="stats.sync.completed">0</span> / <span x-text="stats.sync.total">0</span>
-                    </h2>
-                    <button @click="fetch(stats.sync.running ? '/stopsync' : '/sync')"
-                        :class="stats.sync.running ? 'secondary' : ''" x-text="stats.sync.running ? '停止' : '开始'">
-                    </button>
+                    <h2 style="margin: 0; flex: 1;"><span x-text="stats.sync.completed">0</span> / <span
+                            x-text="stats.sync.total">0</span></h2>
+                    <button @click="fetch(r() ? '/stopsync' : '/sync')" :class="r() ? 'secondary' : ''"
+                        x-text="r() ? '停止' : '开始'"></button>
                 </fieldset>
-                <progress :value="stats.sync.running ? syncPercent : -1" max="100"></progress>
+                <progress :value="r() ? syncPercent : -1" max="100"></progress>
             </article>
 
-            <article>
+            <article x-data="{ r: () => stats.strm.running }">
                 <header>STRM 生成</header>
                 <fieldset role="group">
-                    <h2>
-                        <span x-text="stats.strm.completed">0</span> / <span x-text="stats.strm.total">0</span>
-                    </h2>
-                    <button @click="fetch(stats.strm.running ? '/stopstrm' : '/strm')"
-                        :class="stats.strm.running ? 'secondary' : ''" x-text="stats.strm.running ? '停止' : '开始'">
-                    </button>
+                    <h2 style="margin: 0; flex: 1;"><span x-text="stats.strm.completed">0</span> / <span
+                            x-text="stats.strm.total">0</span></h2>
+                    <button @click="fetch(r() ? '/stopstrm' : '/strm')" :class="r() ? 'secondary' : ''"
+                        x-text="r() ? '停止' : '开始'"></button>
                 </fieldset>
-                <progress :value="stats.strm.running ? strmPercent : -1" max="100"></progress>
+                <progress :value="r() ? strmPercent : -1" max="100"></progress>
             </article>
         </div>
 
         <details :open="allErrors.length > 0">
-            <summary role="button" class="outline secondary">错误日志</summary>
+            <summary role="button" class="outline secondary">错误日志 <span x-show="allErrors.length"
+                    x-text="'(' + allErrors.length + ')'"></span></summary>
             <div class="overflow-auto" style="max-height: 150px;">
                 <table class="striped">
+                    <template x-if="!allErrors.length">
+                        <tr>
+                            <td style="text-align:center"><small>暂无日志</small></td>
+                        </tr>
+                    </template>
                     <template x-for="err in allErrors">
                         <tr>
-                            <td x-text="err"></td>
+                            <td x-text="err" style="color:var(--pico-del-color);font-size:0.8rem"></td>
                         </tr>
                     </template>
                 </table>
