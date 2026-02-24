@@ -283,30 +283,24 @@ func runSync(parentCtx context.Context) {
 	}
 
 	log.Printf("[同步] 开始扫描本地文件")
-	taskQueue := make(chan task, 10)
-	syncFile(ctx, rootPath, rootID, taskQueue)
-
+	taskQueue := make(chan task, 100)
 	if ctx.Err() != nil {
 		return
 	}
-	total := stats.total.Load()
-	if total == 0 {
-		log.Printf("[同步] 未发现新任务")
-		return
-	}
-	log.Printf("[同步] 本地文件扫描完成，开始处理文件，总数: %d", total)
-	const workerCount = 3
-	for range workerCount {
+	for range 3 {
 		wg.Go(func() {
 			for task := range taskQueue {
 				if ctx.Err() != nil {
 					continue
 				}
-				processFile(task.ctx, task.path, task.cid, task.name, task.size, task.isStrm, total)
+				processFile(task.ctx, task.path, task.cid, task.name, task.size, task.isStrm, stats.total.Load())
 			}
 		})
 	}
+	syncFile(ctx, rootPath, rootID, taskQueue)
+	close(taskQueue)
 	wg.Wait() // 等待所有 文件任务 退出
+	total := stats.total.Load()
 	log.Printf("[同步] 同步流程结束，处理文件总数: %d", total)
 }
 

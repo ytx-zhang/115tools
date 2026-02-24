@@ -113,29 +113,8 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 		// 扫描阶段：递归寻找需要处理的文件
 		log.Printf("[添加strm] 正在扫描云端目录结构...")
 		rootFids = nil
-		taskQueue := make(chan task, 10)
-		wg.Go(func() {
-			scanCloudRecursive(ctx, startCID, strmPath, taskQueue)
-		})
-		wg.Wait()
-
-		// 扫描结束后检查是否已被取消
-		if ctx.Err() != nil {
-			log.Printf("[添加strm] 扫描阶段被中止")
-			return
-		}
-
-		total := stats.total.Load()
-		if total == 0 {
-			log.Printf("[添加strm] 未发现新任务")
-			return
-		}
-
-		// 执行阶段
-		log.Printf("[添加strm] 云端扫描完成，开始处理文件，总数: %d", total)
-
-		const workerCount = 3
-		for range workerCount {
+		taskQueue := make(chan task, 100)
+		for range 3 {
 			wg.Go(func() {
 				for task := range taskQueue {
 					if ctx.Err() != nil {
@@ -143,13 +122,15 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 					}
 					current := stats.completed.Add(1)
 					if task.Strm {
-						doCreateStrm(ctx, task, current, total)
+						doCreateStrm(ctx, task, current, stats.total.Load())
 					} else {
-						doDownloadFile(ctx, task, current, total)
+						doDownloadFile(ctx, task, current, stats.total.Load())
 					}
 				}
 			})
 		}
+		scanCloudRecursive(ctx, startCID, strmPath, taskQueue)
+		close(taskQueue)
 		wg.Wait()
 
 		// 移动文件逻辑：仅在任务未被取消且全部成功时执行
@@ -188,7 +169,7 @@ func scanCloudRecursive(ctx context.Context, cid string, localPath string, taskQ
 
 		if item.Fc == "0" { // 文件夹
 			_ = os.MkdirAll(currentLocalPath, 0755)
-			wg.Go(func() { scanCloudRecursive(ctx, item.Fid, currentLocalPath, taskQueue) })
+			scanCloudRecursive(ctx, item.Fid, currentLocalPath, taskQueue)
 		} else { // 文件逻辑
 			finalPath := currentLocalPath
 			if item.Isv == 1 {
