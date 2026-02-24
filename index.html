@@ -1,184 +1,74 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>115 控制面板</title>
-    <link href="https://cdn.jsdelivr.net/npm/daisyui@4.4.19/dist/full.min.css" rel="stylesheet" type="text/css" />
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <style>
-        body { background-color: #0d1117; color: #c9d1d9; }
-        .log-panel { background-color: #161b22; scrollbar-width: thin; scrollbar-color: #30363d transparent; }
-        .card-custom { background-color: #161b22; border: 1px solid #30363d; transition: all 0.3s ease; }
-        .card-custom:hover { border-color: #484f58; }
-        @keyframes running-glow {
-            0% { box-shadow: 0 0 5px rgba(59, 130, 246, 0.2); }
-            50% { box-shadow: 0 0 15px rgba(59, 130, 246, 0.4); }
-            100% { box-shadow: 0 0 5px rgba(59, 130, 246, 0.2); }
-        }
-        .is-running { animation: running-glow 2s infinite; border-color: #3b82f6; }
-    </style>
+    <title>115 tools</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
-<body class="min-h-screen font-sans">
-    <div id="app" class="container mx-auto p-4 max-w-4xl">
-        
-        <header class="flex justify-between items-center mb-8 py-6 border-b border-gray-800">
-            <div>
-                <h1 class="text-2xl font-black text-white tracking-tight">115 控制台</h1>
-                <div class="flex items-center gap-2 mt-1">
-                    <span class="relative flex h-2 w-2">
-                        <span :class="isConnected ? 'bg-green-500' : 'bg-red-500'" class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"></span>
-                        <span :class="isConnected ? 'bg-green-500' : 'bg-red-500'" class="relative inline-flex rounded-full h-2 w-2"></span>
-                    </span>
-                    <span class="text-[10px] font-mono uppercase tracking-widest opacity-50">{{ isConnected ? 'Live Connection' : 'Offline' }}</span>
-                </div>
-            </div>
-            <div class="font-mono text-xs opacity-40 hidden md:block text-right">
-                {{ currentTime }}
-            </div>
-        </header>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-            <div class="card card-custom shadow-xl" :class="{'is-running': stats.sync.running}">
-                <div class="card-body p-6">
-                    <div class="flex justify-between items-start mb-2">
-                        <h2 class="text-gray-400 text-xs font-bold uppercase tracking-widest">文件同步服务</h2>
-                        <span v-if="stats.sync.running" class="badge badge-primary badge-xs font-bold">RUNNING</span>
-                    </div>
-                    
-                    <div class="flex items-center gap-6 my-2">
-                        <div class="radial-progress text-primary border-4 border-gray-800" 
-                             :style="`--value:${syncPercent}; --size:4.2rem; --thickness: 4px;`" role="progressbar">
-                            <span class="text-xs font-bold">{{ syncPercent }}%</span>
-                        </div>
-                        <div>
-                            <div class="text-3xl font-mono font-bold text-white">{{ stats.sync.completed }}</div>
-                            <div class="text-[10px] opacity-40 uppercase tracking-tighter">Total Targets: {{ stats.sync.total }}</div>
-                        </div>
-                    </div>
+<body x-data="{ 
+    stats: {
+        sync: { completed: 0, total: 0, running: false, errors: [] },
+        strm: { completed: 0, total: 0, running: false, errors: [] }
+    },
+    get syncPercent() { return Math.round((this.stats.sync.completed / this.stats.sync.total) * 100)},
+    get strmPercent() { return Math.round((this.stats.strm.completed / this.stats.strm.total) * 100)},
+    get allErrors() { 
+        return [
+            ...(this.stats.sync.errors || []), 
+            ...(this.stats.strm.errors || [])
+        ] 
+    }
+}" x-init="
+    const es = new EventSource('/logs');
+    es.onmessage = (e) => { stats = JSON.parse(e.data);};
+">
+    <main class="container">
 
-                    <div class="card-actions mt-4">
-                        <button v-if="!stats.sync.running" @click="apiAction('/sync')" class="btn btn-primary btn-block btn-sm">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" /></svg>
-                            开始同步
-                        </button>
-                        <button v-else @click="apiAction('/stopsync')" class="btn btn-error btn-outline btn-block btn-sm">
-                            停止同步任务
-                        </button>
-                    </div>
-                </div>
-            </div>
+        <div class="grid">
+            <article>
+                <header>文件同步</header>
+                <fieldset role="group">
+                    <h2>
+                        <span x-text="stats.sync.completed">0</span> / <span x-text="stats.sync.total">0</span>
+                    </h2>
+                    <button @click="fetch(stats.sync.running ? '/stopsync' : '/sync')"
+                        :class="stats.sync.running ? 'secondary' : ''" x-text="stats.sync.running ? '停止' : '开始'">
+                    </button>
+                </fieldset>
+                <progress :value="stats.sync.running ? syncPercent : -1" max="100"></progress>
+            </article>
 
-            <div class="card card-custom shadow-xl" :class="{'is-running': stats.strm.running}">
-                <div class="card-body p-6">
-                    <div class="flex justify-between items-start mb-2">
-                        <h2 class="text-gray-400 text-xs font-bold uppercase tracking-widest">STRM 链接生成</h2>
-                        <span v-if="stats.strm.running" class="badge badge-secondary badge-xs font-bold text-white">RUNNING</span>
-                    </div>
-                    
-                    <div class="flex items-center gap-6 my-2">
-                        <div class="radial-progress text-secondary border-4 border-gray-800" 
-                             :style="`--value:${strmPercent}; --size:4.2rem; --thickness: 4px;`" role="progressbar">
-                            <span class="text-xs font-bold text-secondary">{{ strmPercent }}%</span>
-                        </div>
-                        <div>
-                            <div class="text-3xl font-mono font-bold text-white">{{ stats.strm.completed }}</div>
-                            <div class="text-[10px] opacity-40 uppercase tracking-tighter">Total Items: {{ stats.strm.total }}</div>
-                        </div>
-                    </div>
-
-                    <div class="card-actions mt-4">
-                        <button v-if="!stats.strm.running" @click="apiAction('/strm')" class="btn btn-secondary btn-block btn-sm text-white">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path d="M11 3a1 1 0 10-2 0v1a1 1 0 102 0V3zM15.657 5.757a1 1 0 00-1.414-1.414l-.707.707a1 1 0 001.414 1.414l.707-.707zM18 10a1 1 0 01-1 1h-1a1 1 0 110-2h1a1 1 0 011 1zM5.05 6.464A1 1 0 106.464 5.05l-.707-.707a1 1 0 00-1.414 1.414l.707.707zM5 10a1 1 0 01-1 1H3a1 1 0 110-2h1a1 1 0 011 1zM8 16v-1a1 1 0 112 0v1a1 1 0 11-2 0zM13.536 14.95a1 1 0 011.414-1.414l.707.707a1 1 0 01-1.414 1.414l-.707-.707z" /></svg>
-                            开始生成 STRM
-                        </button>
-                        <button v-else @click="apiAction('/stopstrm')" class="btn btn-error btn-outline btn-block btn-sm">
-                            停止生成任务
-                        </button>
-                    </div>
-                </div>
-            </div>
+            <article>
+                <header>STRM 生成</header>
+                <fieldset role="group">
+                    <h2>
+                        <span x-text="stats.strm.completed">0</span> / <span x-text="stats.strm.total">0</span>
+                    </h2>
+                    <button @click="fetch(stats.strm.running ? '/stopstrm' : '/strm')"
+                        :class="stats.strm.running ? 'secondary' : ''" x-text="stats.strm.running ? '停止' : '开始'">
+                    </button>
+                </fieldset>
+                <progress :value="stats.strm.running ? strmPercent : -1" max="100"></progress>
+            </article>
         </div>
 
-        <div class="card card-custom shadow-2xl overflow-hidden">
-            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800 bg-[#1c2128]">
-                <div class="flex items-center gap-3">
-                    <div class="w-2 h-2 rounded-full bg-error"></div>
-                    <span class="text-xs font-bold tracking-widest text-gray-400">FAILURE LOGS</span>
-                </div>
-                <span class="text-[10px] font-mono opacity-30">{{ allErrors.length }} ENTRIES</span>
+        <details :open="allErrors.length > 0">
+            <summary role="button" class="outline secondary">错误日志</summary>
+            <div class="overflow-auto" style="max-height: 150px;">
+                <table class="striped">
+                    <template x-for="err in allErrors">
+                        <tr>
+                            <td x-text="err"></td>
+                        </tr>
+                    </template>
+                </table>
             </div>
-            <div class="log-panel h-80 overflow-y-auto p-5 font-mono text-[12px] leading-loose">
-                <div v-if="allErrors.length === 0" class="flex flex-col items-center justify-center h-full opacity-10 grayscale">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                    <span class="tracking-[0.2em]">SYSTEM CLEAR</span>
-                </div>
-                <div v-for="(err, index) in allErrors" :key="index" class="flex gap-4 mb-3 group">
-                    <span class="text-gray-600 select-none">[{{ (index + 1).toString().padStart(2, '0') }}]</span>
-                    <span class="text-red-400/80 group-hover:text-red-400 transition-colors">{{ err }}</span>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        const { createApp, ref, computed, onMounted } = Vue;
-
-        createApp({
-            setup() {
-                const isConnected = ref(false);
-                const currentTime = ref('');
-                const stats = ref({
-                    sync: { total: 0, completed: 0, failed: 0, errors: [], running: false },
-                    strm: { total: 0, completed: 0, failed: 0, errors: [], running: false }
-                });
-
-                const syncPercent = computed(() => {
-                    const s = stats.value.sync;
-                    return s.total > 0 ? Math.round(((s.completed + s.failed) / s.total) * 100) : 0;
-                });
-
-                const strmPercent = computed(() => {
-                    const s = stats.value.strm;
-                    return s.total > 0 ? Math.round(((s.completed + s.failed) / s.total) * 100) : 0;
-                });
-
-                const allErrors = computed(() => [
-                    ...(stats.value.sync.errors || []),
-                    ...(stats.value.strm.errors || [])
-                ]);
-
-                const apiAction = async (path) => {
-                    try {
-                        await fetch(path);
-                    } catch (e) {
-                        console.error("API Error:", e);
-                    }
-                };
-
-                const initSSE = () => {
-                    const es = new EventSource('/logs');
-                    es.onmessage = (e) => {
-                        const data = JSON.parse(e.data);
-                        stats.value = data;
-                        isConnected.value = true;
-                    };
-                    es.onerror = () => { isConnected.value = false; };
-                };
-
-                setInterval(() => {
-                    const now = new Date();
-                    currentTime.value = now.toLocaleDateString() + ' ' + now.toLocaleTimeString();
-                }, 1000);
-
-                onMounted(initSSE);
-
-                return {
-                    isConnected, stats, syncPercent, strmPercent, allErrors, apiAction, currentTime
-                };
-            }
-        }).mount('#app');
-    </script>
+        </details>
+    </main>
 </body>
+
 </html>
