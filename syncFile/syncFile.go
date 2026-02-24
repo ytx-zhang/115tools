@@ -282,7 +282,7 @@ func runSync(parentCtx context.Context) {
 	}
 
 	log.Printf("[同步] 开始扫描本地文件")
-	taskQueue := make(chan task, 100)
+	taskQueue := make(chan task, 50000)
 	if ctx.Err() != nil {
 		return
 	}

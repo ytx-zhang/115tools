@@ -113,7 +113,7 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 		// 扫描阶段：递归寻找需要处理的文件
 		log.Printf("[添加strm] 正在扫描云端目录结构...")
 		rootFids = nil
-		taskQueue := make(chan task, 100)
+		taskQueue := make(chan task, 10000)
 		for range 3 {
 			wg.Go(func() {
 				for task := range taskQueue {
