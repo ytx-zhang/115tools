@@ -187,7 +187,7 @@ func markFailed(reason string) {
 // --- 同步流程 ---
 func StartSync(parentCtx context.Context, mainWg *sync.WaitGroup) {
 	needRetry.Store(true)
-
+	stats.Reset()
 	if stats.running.CompareAndSwap(false, true) {
 		mainWg.Go(func() {
 			defer stats.running.Store(false)
@@ -226,7 +226,6 @@ func runSync(parentCtx context.Context) {
 	config := open115.Conf.Load()
 	rootPath := config.SyncPath
 	strmUrl = config.StrmUrl
-	stats.Reset()
 	initDB()
 
 	defer func() {
