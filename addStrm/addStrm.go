@@ -104,7 +104,7 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 		}()
 
 		log.Printf("[添加strm] 正在获取起始目录id: %v", strmPath)
-		startCID, err := open115.FolderInfo(ctx, strmPath)
+		startCID, _, _, err := open115.FolderInfo(ctx, strmPath)
 		if err != nil {
 			log.Printf("[添加strm] 无法获取起始目录id: %v", err)
 			return
@@ -264,7 +264,7 @@ func downloadToFile(ctx context.Context, t task) error {
 
 // 移动云盘文件逻辑
 func performMoveFiles(ctx context.Context) {
-	targetCID, err := open115.FolderInfo(ctx, tempPath)
+	targetCID, _, _, err := open115.FolderInfo(ctx, tempPath)
 	if err != nil {
 		log.Printf("[添加strm] 无法获取移动文件: %v", err)
 		return

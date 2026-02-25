@@ -49,7 +49,9 @@ type updatafileData struct {
 
 // 获取文件夹fid
 type folderinfoData struct {
-	FileId string `json:"file_id"`
+	FileId      string `json:"file_id"`
+	Count       string `json:"count"`
+	FolderCount string `json:"folder_count"`
 }
 
 // 获取文件列表

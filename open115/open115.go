@@ -230,17 +230,17 @@ func UpdataFile(ctx context.Context, fid, name string) (string, error) {
 	return res.FileName, nil
 }
 
-func FolderInfo(ctx context.Context, path string) (string, error) {
+func FolderInfo(ctx context.Context, path string) (string, string, string, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", "", "", err
 	}
 	params := url.Values{}
 	params.Set("path", path)
 	res, err := request[folderinfoData](ctx, "GET", "/open/folder/get_info", params, "")
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
-	return res.FileId, nil
+	return res.FileId, res.Count, res.FolderCount, nil
 }
 
 func FileList(ctx context.Context, cid string) ([]filelistData, error) {

@@ -21,7 +21,7 @@
     get allErrors() { return [...(this.stats.sync?.errors || []), ...(this.stats.strm?.errors || [])] }
 }" x-init="
     const es = new EventSource('/logs');
-    es.onmessage = (e) => { stats = JSON.parse(e.data); isConnected = true };
+    es.onmessage = (e) => { stats = JSON.parse(e.data) };
 ">
     <main class="container">
         <div class="grid">
