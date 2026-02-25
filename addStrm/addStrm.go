@@ -143,7 +143,7 @@ func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
 			log.Printf("[任务中止] 生成strm过程中被中止 取消原因: %v", err)
 		}
 
-		if len(stats.failedErrors) == 0 {
+		if len(stats.failedErrors) == 0 && len(rootFids) > 0 {
 			performMoveFiles(ctx)
 		}
 	})
