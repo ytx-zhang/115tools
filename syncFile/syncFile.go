@@ -362,14 +362,12 @@ func cleanUp(ctx context.Context, localPath string, cloudFID string) {
 	}
 
 	// 1. 获取云端全量统计 (递归总数)
-	_, countStr, folderCountStr, err := open115.FolderInfo(ctx, localPath)
+	_, count, folderCount, err := open115.FolderInfo(ctx, localPath)
 	if err != nil {
 		log.Printf("[清理] 获取FolderInfo失败: %s, %v", localPath, err)
 		return
 	}
 	// 115 统计口径：Count(文件总数) + FolderCount(文件夹总数)
-	count, _ := strconv.Atoi(countStr)
-	folderCount, _ := strconv.Atoi(folderCountStr)
 	cloudTotal := count + folderCount
 
 	// 2. 从数据库获取本地记录的全量总数

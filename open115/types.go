@@ -47,11 +47,11 @@ type updatafileData struct {
 	FileName string `json:"file_name"`
 }
 
-// 获取文件夹fid
+// 获取文件夹详情
 type folderinfoData struct {
 	FileId      string `json:"file_id"`
-	Count       string `json:"count"`
-	FolderCount string `json:"folder_count"`
+	Count       int    `json:"count"`
+	FolderCount int    `json:"folder_count"`
 }
 
 // 获取文件列表
