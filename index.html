@@ -36,7 +36,7 @@
                 <fieldset role="group">
                     <h2 style="margin: 0; flex: 1;align-content: center;"><span x-text="stats.sync.completed">0</span> / <span
                             x-text="stats.sync.total">0</span></h2>
-                    <button @click="fetch(r() ? '/stopsync' : '/sync')" :class="r() ? 'secondary' : ''"
+                    <button @click="fetch(r() ? '/stopsync' : '/sync');stats.sync.running = !stats.sync.running;" :class="r() ? 'secondary' : ''"
                         x-text="r() ? '停止' : '开始'"></button>
                 </fieldset>
                 <progress x-show="r()" :value="syncPercent" max="100"></progress>
@@ -47,7 +47,7 @@
                 <fieldset role="group">
                     <h2 style="margin: 0; flex: 1;align-content: center;"><span x-text="stats.strm.completed">0</span> / <span
                             x-text="stats.strm.total">0</span></h2>
-                    <button @click="fetch(r() ? '/stopstrm' : '/strm')" :class="r() ? 'secondary' : ''"
+                    <button @click="fetch(r() ? '/stopstrm' : '/strm');stats.strm.running = !stats.strm.running;" :class="r() ? 'secondary' : ''"
                         x-text="r() ? '停止' : '开始'"></button>
                 </fieldset>
                 <progress x-show="r()" :value="strmPercent" max="100"></progress>
