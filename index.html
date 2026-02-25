@@ -18,7 +18,7 @@
     },
     get syncPercent() { return Math.round((this.stats.sync.completed / this.stats.sync.total) * 100) },
     get strmPercent() { return Math.round((this.stats.strm.completed / this.stats.strm.total) * 100) },
-    get allErrors() { return [...this.stats.sync.errors, ...this.stats.strm.errors}
+    get allErrors() { return [...this.stats.sync.errors, ...this.stats.strm.errors]}
 }" x-init="
     const es = new EventSource('/logs');
     es.onmessage = (e) => { stats = JSON.parse(e.data) };
