@@ -16,8 +16,14 @@
         sync: { completed: 0, total: 0, running: false, errors: [] },
         strm: { completed: 0, total: 0, running: false, errors: [] }
     },
-    get syncPercent() { return Math.round((this.stats.sync.completed / this.stats.sync.total) * 100) },
-    get strmPercent() { return Math.round((this.stats.strm.completed / this.stats.strm.total) * 100) },
+    get syncPercent() {
+        if (this.stats.sync.total === 0) return 0;
+        return Math.round((this.stats.sync.completed / this.stats.sync.total) * 100)
+    },
+    get strmPercent() {
+        if (this.stats.strm.total === 0) return 0;
+        return Math.round((this.stats.strm.completed / this.stats.strm.total) * 100)
+    },
     get allErrors() { return [...this.stats.sync.errors, ...this.stats.strm.errors]}
 }" x-init="
     const es = new EventSource('/logs');
@@ -33,7 +39,7 @@
                     <button @click="fetch(r() ? '/stopsync' : '/sync')" :class="r() ? 'secondary' : ''"
                         x-text="r() ? '停止' : '开始'"></button>
                 </fieldset>
-                <progress :value="r() ? syncPercent : 0" max="100"></progress>
+                <progress x-show="r()" :value="syncPercent" max="100"></progress>
             </article>
 
             <article x-data="{ r: () => stats.strm.running }">
@@ -44,7 +50,7 @@
                     <button @click="fetch(r() ? '/stopstrm' : '/strm')" :class="r() ? 'secondary' : ''"
                         x-text="r() ? '停止' : '开始'"></button>
                 </fieldset>
-                <progress :value="r() ? strmPercent : 0" max="100"></progress>
+                <progress x-show="r()" :value="strmPercent" max="100"></progress>
             </article>
         </div>
 
