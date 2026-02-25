@@ -224,25 +224,27 @@ func doSync(ctx context.Context, rootPath, rootID string) {
 	wg.Wait()
 	log.Printf("[同步] 同步任务执行完成")
 }
-func cleanUp(ctx context.Context, localPath string, cloudFID string) {
+func cleanUp(ctx context.Context, currentPath string, cloudFID string) {
 	select {
 	case scanSem <- struct{}{}:
 		defer func() { <-scanSem }()
 	case <-ctx.Done():
+		err := context.Cause(ctx)
+		log.Printf("[清理] 云端文件夹校验: %s 中止原因: %v", currentPath, err)
 		return
 	}
-	_, count, folderCount, err := open115.FolderInfo(ctx, localPath)
+	_, count, folderCount, err := open115.FolderInfo(ctx, currentPath)
 	if err != nil {
-		log.Printf("[清理] 获取FolderInfo失败: %s, %v", localPath, err)
+		log.Printf("[清理] 获取FolderInfo失败: %s, %v", currentPath, err)
 		return
 	}
 	cloudTotal := count + folderCount
-	dbTotal := dbGetTotalCount(localPath)
+	dbTotal := dbGetTotalCount(currentPath)
 	if cloudTotal == dbTotal {
 		return
 	}
 
-	log.Printf("[清理] 数量不一致: %s (云端:%d, 数据库:%d)，开始对比...", localPath, cloudTotal, dbTotal)
+	log.Printf("[清理] 数量不一致: %s (云端:%d, 数据库:%d)，开始对比...", currentPath, cloudTotal, dbTotal)
 	items, err := open115.FileList(ctx, cloudFID)
 	if err != nil {
 		return
@@ -252,7 +254,7 @@ func cleanUp(ctx context.Context, localPath string, cloudFID string) {
 		if item.Aid != "1" {
 			continue
 		}
-		expectedPath := localPath + "/" + item.Fn
+		expectedPath := currentPath + "/" + item.Fn
 		if item.Isv == 1 {
 			expectedPath = expectedPath[:len(expectedPath)-len(filepath.Ext(expectedPath))] + ".strm"
 		}
@@ -319,20 +321,20 @@ func cloudScan(ctx context.Context, currentPath string) {
 	}
 }
 
-func localScan(ctx context.Context, currentLocalPath string, currentCID string, taskQueue chan task) {
+func localScan(ctx context.Context, currentPath string, currentCID string, taskQueue chan task) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	entries, err := os.ReadDir(currentLocalPath)
+	entries, err := os.ReadDir(currentPath)
 	if err != nil {
-		cancelFunc(fmt.Errorf("读取本地文件夹[%s]: %v", currentLocalPath, err))
+		cancelFunc(fmt.Errorf("读取本地文件夹[%s]: %v", currentPath, err))
 		return
 	}
 
 	dbFileMap := dbMapPool.Get().(map[string]string)
 	clear(dbFileMap)
 	defer dbMapPool.Put(dbFileMap)
-	dbListChildren(currentLocalPath, dbFileMap)
+	dbListChildren(currentPath, dbFileMap)
 
 	localFound := localMapPool.Get().(map[string]bool)
 	clear(localFound)
@@ -343,7 +345,7 @@ func localScan(ctx context.Context, currentLocalPath string, currentCID string, 
 		}
 		name := entry.Name()
 		localFound[name] = true
-		fullPath := currentLocalPath + "/" + name
+		fullPath := currentPath + "/" + name
 
 		var dbFid string
 		var dbSize int64 = -2
@@ -387,7 +389,7 @@ func localScan(ctx context.Context, currentLocalPath string, currentCID string, 
 
 	for dbFileName, dbVal := range dbFileMap {
 		if !localFound[dbFileName] {
-			fullPath := currentLocalPath + "/" + dbFileName
+			fullPath := currentPath + "/" + dbFileName
 			fid, size, _ := strings.Cut(dbVal, "|")
 			isDir := size == "-1"
 			isStrm := strings.EqualFold(filepath.Ext(dbFileName), ".strm")
