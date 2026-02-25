@@ -230,7 +230,7 @@ func cleanUp(ctx context.Context, currentPath string, cloudFID string) {
 		defer func() { <-scanSem }()
 	case <-ctx.Done():
 		err := context.Cause(ctx)
-		log.Printf("[清理] 云端文件夹校验: %s 中止原因: %v", currentPath, err)
+		log.Printf("[任务中止] 云端文件夹校验: %s 中止原因: %v", currentPath, err)
 		return
 	}
 	_, count, folderCount, err := open115.FolderInfo(ctx, currentPath)
