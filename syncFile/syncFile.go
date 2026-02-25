@@ -277,7 +277,7 @@ func runSync(parentCtx context.Context) {
 
 	// 4. 数量校验与冗余清理
 	if ctx.Err() == nil {
-		log.Printf("[同步] 开始最后的云端数据一致性校验...")
+		log.Printf("[同步] 云端数据一致性校验...")
 		// 115 索引刷新可能有几秒延迟，稍微等一下
 		time.Sleep(10 * time.Second)
 
@@ -286,6 +286,7 @@ func runSync(parentCtx context.Context) {
 			cleanUp(ctx, config.SyncPath, rootID)
 		})
 		wg.Wait()
+		log.Printf("[同步] 云端数据一致性校验完成")
 	}
 }
 func initRoot(ctx context.Context, rootPath string) (string, error) {
@@ -353,8 +354,6 @@ func doSync(ctx context.Context, rootPath, rootID string) {
 	log.Printf("[同步] 同步任务执行完成")
 }
 func cleanUp(ctx context.Context, localPath string, cloudFID string) {
-	defer wg.Done()
-
 	select {
 	case scanSem <- struct{}{}:
 		defer func() { <-scanSem }()
@@ -363,7 +362,7 @@ func cleanUp(ctx context.Context, localPath string, cloudFID string) {
 	}
 
 	// 1. 获取云端全量统计 (递归总数)
-	_, countStr, folderCountStr, err := open115.FolderInfo(ctx, cloudFID)
+	_, countStr, folderCountStr, err := open115.FolderInfo(ctx, localPath)
 	if err != nil {
 		log.Printf("[清理] 获取FolderInfo失败: %s, %v", localPath, err)
 		return
