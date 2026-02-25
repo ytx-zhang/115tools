@@ -20,7 +20,6 @@ var (
 )
 
 func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
-	// 清理超过10分钟的缓存项
 	urlCache.Range(func(key, value any) bool {
 		if item, ok := value.(cacheItem); ok && time.Since(item.time) > 10*time.Minute {
 			urlCache.Delete(key)
@@ -35,7 +34,6 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	}
 	clientUA := r.Header.Get("User-Agent")
 	cacheKey := pickCode + "_" + clientUA
-	// 排队判断层
 	notifier := make(chan struct{})
 	existingNotifier, exists := pendingTasks.LoadOrStore(cacheKey, notifier)
 	if exists {
@@ -46,17 +44,14 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 			close(notifier)
 		}()
 	}
-	//添加http头
 	w.Header().Set("Cache-Control", "public, max-age=600")
 	w.Header().Set("Vary", "User-Agent")
-	// 读取缓存
 	if val, ok := urlCache.Load(cacheKey); ok {
 		item := val.(cacheItem)
 		log.Printf("[strm请求:缓存命中]: %s | UA: %s", item.name, clientUA)
 		http.Redirect(w, r, item.url, http.StatusFound)
 		return
 	}
-	// 请求115
 	_, url, name, err := open115.GetDownloadUrl(r.Context(), pickCode, clientUA)
 	if err != nil || url == "" {
 		errMsg := "获取下载地址失败"

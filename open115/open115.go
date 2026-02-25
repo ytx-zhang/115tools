@@ -70,12 +70,10 @@ func (t *SafeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 func request[T any](ctx context.Context, method, endpoint string, params url.Values, ua string) (*T, error) {
-	// 重试配置
 	const maxRetries = 3
 	var lastErr error
 
 	for i := range maxRetries {
-		// 每次重试前检查 Context 是否已取消
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -84,7 +82,6 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 		var reqBody io.Reader
 		var ct string
 		queryString := params.Encode()
-
 		if method == "GET" {
 			if queryString != "" {
 				urlStr += "?" + queryString
@@ -93,28 +90,24 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 			reqBody = strings.NewReader(queryString)
 			ct = "application/x-www-form-urlencoded"
 		}
-
 		req, err := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
 		if err != nil {
 			return nil, err
 		}
-
 		req.Header.Set("Authorization", "Bearer "+Conf.Load().Token.AccessToken)
 		if ct != "" {
 			req.Header.Set("Content-Type", ct)
 		}
 		req.Header.Set("User-Agent", ua)
-
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			lastErr = err
-			// 网络层错误通常也值得短时间重试一次
 			time.Sleep(3 * time.Second)
 			continue
 		}
 
 		bodyBytes, err := io.ReadAll(resp.Body)
-		resp.Body.Close() // 提前关闭 Body 以免泄露
+		resp.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("read body failed: %w", err)
 			continue
@@ -124,31 +117,20 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 		if err := json.Unmarshal(bodyBytes, &res); err != nil {
 			return nil, fmt.Errorf("115报错: 接口响应格式非法: %w", err)
 		}
-
-		// 核心重试逻辑：判断业务状态
 		if !res.State {
 			lastErr = fmt.Errorf("115报错: %s (code: %d)", res.Message, res.Code)
-
-			// 触发重试的特定错误码：990019 (稍后再试)
 			if strings.Contains(res.Message, "稍后再试") {
 				log.Printf("115报错: %s (第 %d/%d 次重试): ", res.Message, i+1, maxRetries)
-
-				// 全局暂停 10s，防止其他并发请求撞墙
 				mySafeTrans.PauseUntil.Store(time.Now().Add(10 * time.Second).UnixNano())
-
 				select {
 				case <-time.After(10 * time.Second):
-					continue // 进入下一次循环
+					continue
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
 			}
-
-			// 其他业务错误（如 Token 失效等）直接返回，不重试
 			return nil, lastErr
 		}
-
-		// 成功逻辑
 		var actualData T
 		dataStr := string(res.Data)
 		if dataStr == "" || dataStr == "null" || dataStr == "[]" {
@@ -315,7 +297,6 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (str
 		return initData.FileId, initData.PickCode, nil
 	case 7:
 		signCheck := initData.SignCheck
-		// 将signCheck用_分割
 		signParts := strings.Split(signCheck, "-")
 		if len(signParts) != 2 {
 			return "", "", fmt.Errorf("签名检查格式错误: %v", signParts)
@@ -451,9 +432,7 @@ func LoadConfig() {
 	if initialConf.Token.RefreshToken == "" {
 		log.Fatalf("[CONFIG] 警告: 配置不完整，缺少 RefreshToken")
 	}
-
 	Conf.Store(&initialConf)
-
 	if initialConf.Token.ExpireAt.Unix() > 0 {
 		log.Printf("[CONFIG] 已加载配置，Token 有效期至: %v", initialConf.Token.ExpireAt.Format("2006-01-02 15:04:05"))
 	}
@@ -470,7 +449,6 @@ func fileSHA1(filePath string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-
 	hash := sha1.New()
 	if _, err := io.Copy(hash, f); err != nil {
 		return "", err
@@ -484,12 +462,10 @@ func fileSHA1Partial(filePath string, offset int64, length int64) (string, error
 		return "", err
 	}
 	defer f.Close()
-
 	_, err = f.Seek(offset, io.SeekStart)
 	if err != nil {
 		return "", err
 	}
-
 	buf := make([]byte, length-offset+1)
 	n, err := io.ReadFull(f, buf)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {

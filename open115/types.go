@@ -28,7 +28,6 @@ type apiResponse struct {
 	Data    json.RawMessage `json:"data"`
 }
 
-// 获取下载地址
 type downloadUrlData map[string]struct {
 	FileName string `json:"file_name"`
 	Url      struct {
@@ -36,36 +35,31 @@ type downloadUrlData map[string]struct {
 	} `json:"url"`
 }
 
-// 新建文件夹
 type addfolderData struct {
 	FileName string `json:"file_name"`
 	FileId   string `json:"file_id"`
 }
 
-// 文件(夹)更新
 type updatafileData struct {
 	FileName string `json:"file_name"`
 }
 
-// 获取文件夹详情
 type folderinfoData struct {
 	FileId      string `json:"file_id"`
 	Count       int    `json:"count"`
 	FolderCount int    `json:"folder_count"`
 }
 
-// 获取文件列表
 type filelistData struct {
-	Fid string `json:"fid"` //文件ID
-	Aid string `json:"aid"` //文件的状态，aid 的别名。1 正常，7 删除(回收站)，120 彻底删除
-	Fc  string `json:"fc"`  //文件分类。0 文件夹，1 文件
-	Fn  string `json:"fn"`  //文件(夹)名称
-	Fs  int64  `json:"fs"`  //文件大小
-	Pc  string `json:"pc"`  //文件提取码
-	Isv int    `json:"isv"` //是否为视频
+	Fid string `json:"fid"`
+	Aid string `json:"aid"`
+	Fc  string `json:"fc"`
+	Fn  string `json:"fn"`
+	Fs  int64  `json:"fs"`
+	Pc  string `json:"pc"`
+	Isv int    `json:"isv"`
 }
 
-// 上传初始化
 type uploadInitData struct {
 	PickCode  string          `json:"pick_code"`
 	Status    int             `json:"status"`
@@ -75,16 +69,14 @@ type uploadInitData struct {
 	Object    string          `json:"object"`
 	SignKey   string          `json:"sign_key"`
 	SignCheck string          `json:"sign_check"`
-	Callback  json.RawMessage `json:"callback"` // 改为原始消息
+	Callback  json.RawMessage `json:"callback"`
 }
 
-// 定义真正的 Callback 内容结构
 type callbackInfo struct {
 	Callback    string `json:"callback"`
 	CallbackVar string `json:"callback_var"`
 }
 
-// 获取上传 Token
 type uploadtokenData struct {
 	Endpoint        string `json:"endpoint"`
 	AccessKeySecret string `json:"AccessKeySecret"`
@@ -93,7 +85,6 @@ type uploadtokenData struct {
 	AccessKeyId     string `json:"AccessKeyId"`
 }
 
-// ossCallback
 type ossCallbackResp struct {
 	State   bool   `json:"state"`
 	Message string `json:"message"`

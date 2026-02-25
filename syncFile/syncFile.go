@@ -2,7 +2,6 @@ package syncFile
 
 import (
 	"115tools/open115"
-	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -14,20 +13,16 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"go.etcd.io/bbolt"
 )
 
 var (
-	boltDB       *bbolt.DB
-	bucketName   = []byte("FileIndex")
-	dBPath       = `/app/data/files.db`
 	strmUrl      string
 	tempFid      string
 	needRetry    atomic.Bool
 	wg           sync.WaitGroup
 	scanSem      = make(chan struct{}, 3)
-	cancelFunc   context.CancelFunc
+	isCloudScan  atomic.Bool
+	cancelFunc   context.CancelCauseFunc
 	localMapPool = sync.Pool{
 		New: func() any { return make(map[string]bool, 256) },
 	}
@@ -36,125 +31,6 @@ var (
 	}
 )
 
-// --- 数据库初始化与封装 ---
-func initDB() {
-	var err error
-	boltDB, err = bbolt.Open(dBPath, 0600, nil)
-	if err != nil {
-		log.Fatalf("[数据库] 初始化失败: %v", err)
-	}
-	boltDB.MaxBatchDelay = 100 * time.Millisecond
-	boltDB.MaxBatchSize = 2000
-	boltDB.Update(func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(bucketName)
-		return err
-	})
-}
-
-func closeDB() {
-	if boltDB != nil {
-		log.Printf("[数据库] 正在关闭 bbolt...")
-		boltDB.Close()
-	}
-}
-
-func removeDB() {
-	if err := os.Remove(dBPath); err != nil {
-		log.Printf("[同步] 清理数据库失败: %v", err)
-	} else {
-		log.Printf("[同步] 已清理数据库文件")
-	}
-}
-
-// 获取FID
-func dbGetFID(localPath string) string {
-	var fid string
-	boltDB.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketName)
-		v := b.Get([]byte(localPath))
-		if v == nil {
-			return nil
-		}
-		s := string(v)
-		if before, _, ok := strings.Cut(s, "|"); ok {
-			fid = before
-		}
-		return nil
-	})
-	return fid
-}
-
-// 更新记录
-func dbSaveRecord(localPath string, fid string, size int64) {
-	val := fid + "|" + strconv.FormatInt(size, 10)
-
-	boltDB.Batch(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketName)
-		return b.Put([]byte(localPath), []byte(val))
-	})
-}
-
-// 获取直属子文件
-func dbListChildren(currentLocalPath string, res map[string]string) {
-	prefix := currentLocalPath + "/"
-	prefixBytes := []byte(prefix)
-
-	boltDB.View(func(tx *bbolt.Tx) error {
-		c := tx.Bucket(bucketName).Cursor()
-		for k, v := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, v = c.Next() {
-			remain := k[len(prefixBytes):]
-			if !bytes.Contains(remain, []byte("/")) {
-				res[string(remain)] = string(v)
-			}
-		}
-		return nil
-	})
-}
-
-// 删除数据库记录
-func dbClearPath(fPath string) {
-	prefix := fPath + "/"
-	prefixBytes := []byte(prefix)
-
-	err := boltDB.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketName)
-		b.Delete([]byte(fPath))
-
-		c := b.Cursor()
-		for k, _ := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); {
-			if err := c.Delete(); err != nil {
-				return err
-			}
-			k, _ = c.Next()
-		}
-		return nil
-	})
-
-	if err != nil {
-		log.Printf("[数据库] 清理路径失败 %s: %v", fPath, err)
-	}
-}
-
-// 获取某个路径下所有子项的总数
-func dbGetTotalCount(parentPath string) int {
-	count := 0
-	prefix := parentPath + "/"
-	prefixBytes := []byte(prefix)
-	boltDB.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketName)
-		if b == nil {
-			return nil
-		}
-		cursor := b.Cursor()
-		for k, _ := cursor.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, _ = cursor.Next() {
-			count++
-		}
-		return nil
-	})
-	return count
-}
-
-// 任务详情
 type taskStats struct {
 	total        atomic.Int64
 	completed    atomic.Int64
@@ -204,7 +80,6 @@ func markFailed(reason string) {
 	stats.mu.Unlock()
 }
 
-// --- 同步流程 ---
 func StartSync(parentCtx context.Context, mainWg *sync.WaitGroup) {
 	needRetry.Store(true)
 	stats.Reset()
@@ -225,8 +100,7 @@ func StartSync(parentCtx context.Context, mainWg *sync.WaitGroup) {
 func StopSync() {
 	if cancelFunc != nil {
 		needRetry.Store(false)
-		cancelFunc()
-		log.Printf("[同步] 正在中止当前运行中的任务...")
+		cancelFunc(fmt.Errorf("[同步] 用户请求停止同步"))
 	}
 }
 
@@ -241,14 +115,14 @@ type task struct {
 
 func runSync(parentCtx context.Context) {
 	var ctx context.Context
-	ctx, cancelFunc = context.WithCancel(parentCtx)
+	ctx, cancelFunc = context.WithCancelCause(parentCtx)
 	config := open115.Conf.Load()
 	rootPath := config.SyncPath
 	strmUrl = config.StrmUrl
 	initDB()
 
 	defer func() {
-		cancelFunc()
+		cancelFunc(fmt.Errorf("[同步] 任务已彻底停止"))
 		closeDB()
 		log.Printf("[同步] 任务彻底停止")
 	}()
@@ -259,60 +133,54 @@ func runSync(parentCtx context.Context) {
 	}
 
 	log.Printf("[同步] 开始同步流程...")
-
-	// 1. 确保根目录和云端基础数据存在
 	rootID, err := initRoot(ctx, config.SyncPath)
 	if err != nil {
 		log.Printf("[同步] 初始化失败: %v", err)
 		return
 	}
-
-	// 2. 获取 Temp 目录信息
 	if err := initTemp(ctx, config.TempPath); err != nil {
 		log.Printf("[同步] Temp目录准备失败: %v", err)
 		return
 	}
-
-	// 3. 执行核心同步任务
 	doSync(ctx, config.SyncPath, rootID)
 
-	// 4. 数量校验与冗余清理
-	if ctx.Err() == nil {
+	if err := context.Cause(ctx); err == nil {
 		log.Printf("[同步] 云端数据一致性校验...")
-		// 115 索引刷新可能有几秒延迟，稍微等一下
-		time.Sleep(10 * time.Second)
-
-		// 启动入口
+		time.Sleep(5 * time.Second)
 		wg.Go(func() {
 			cleanUp(ctx, config.SyncPath, rootID)
 		})
 		wg.Wait()
 		log.Printf("[同步] 云端数据一致性校验完成")
+	} else {
+		log.Printf("[任务中止] 同步过程中被中止: %v", err)
 	}
 }
 func initRoot(ctx context.Context, rootPath string) (string, error) {
-	rootID := dbGetFID(rootPath)
-	if rootID != "" {
-		return rootID, nil
+	fid := dbGetFID(rootPath)
+	if fid != "" {
+		return fid, nil
 	}
-
+	isCloudScan.Store(true)
+	defer isCloudScan.Store(false)
 	log.Printf("[同步] 初次运行，开始初始化云端数据库...")
 	fid, _, _, err := open115.FolderInfo(ctx, rootPath)
 	if err != nil {
 		return "", err
 	}
-
 	dbSaveRecord(rootPath, fid, -1)
 
-	// 并发扫描云端建立索引
 	wg.Go(func() {
 		cloudScan(ctx, rootPath)
 	})
 	wg.Wait()
 
-	if ctx.Err() != nil {
-		removeDB() // 扫描被中断则删除不完整的数据库
-		return "", ctx.Err()
+	if err := context.Cause(ctx); err != nil {
+		if isCloudScan.Load() {
+			log.Printf("[同步] 云端扫描被中止，正在清理数据库 中止原因: %v", err)
+			removeDB()
+		}
+		return "", err
 	}
 
 	log.Printf("[同步] 云端数据库初始化完成")
@@ -333,23 +201,25 @@ func initTemp(ctx context.Context, tempPath string) error {
 }
 func doSync(ctx context.Context, rootPath, rootID string) {
 	log.Printf("[同步] 开始扫描本地文件并推送任务")
-	taskQueue := make(chan task, 50000)
-
-	// 启动 3 个消费者协程
+	taskQueue := make(chan task, 1000)
 	for range 3 {
 		wg.Go(func() {
 			for t := range taskQueue {
 				if ctx.Err() != nil {
 					continue
 				}
-				processFile(t.ctx, t.path, t.cid, t.name, t.size, t.isStrm, stats.total.Load())
+				current := stats.completed.Add(1)
+				total := stats.total.Load()
+				if err := processFile(t.ctx, t.path, t.cid, t.name, t.size, t.isStrm); err != nil {
+					markFailed(fmt.Sprintf("[同步] [%s] 处理文件失败: %s (%v)", time.Now().Format("15:04"), t.path, err))
+					log.Printf("[同步][%d/%d] ❌ %s: %v", current, total, t.path, err)
+				} else {
+					log.Printf("[同步][%d/%d] ✅ %s", current, total, t.path)
+				}
 			}
 		})
 	}
-
-	// 生产者：递归扫描本地并对比数据库
 	localScan(ctx, rootPath, rootID, taskQueue)
-
 	close(taskQueue)
 	wg.Wait()
 	log.Printf("[同步] 同步任务执行完成")
@@ -361,27 +231,18 @@ func cleanUp(ctx context.Context, localPath string, cloudFID string) {
 	case <-ctx.Done():
 		return
 	}
-
-	// 1. 获取云端全量统计 (递归总数)
 	_, count, folderCount, err := open115.FolderInfo(ctx, localPath)
 	if err != nil {
 		log.Printf("[清理] 获取FolderInfo失败: %s, %v", localPath, err)
 		return
 	}
-	// 115 统计口径：Count(文件总数) + FolderCount(文件夹总数)
 	cloudTotal := count + folderCount
-
-	// 2. 从数据库获取本地记录的全量总数
 	dbTotal := dbGetTotalCount(localPath)
-
-	// 3. 【剪枝】数量完全一致，直接跳过此目录及其子项目
 	if cloudTotal == dbTotal {
 		return
 	}
 
 	log.Printf("[清理] 数量不一致: %s (云端:%d, 数据库:%d)，开始对比...", localPath, cloudTotal, dbTotal)
-
-	// 4. 获取当前层级列表进行 FID 校验
 	items, err := open115.FileList(ctx, cloudFID)
 	if err != nil {
 		return
@@ -391,18 +252,12 @@ func cleanUp(ctx context.Context, localPath string, cloudFID string) {
 		if item.Aid != "1" {
 			continue
 		}
-
-		// 构造数据库中的路径
 		expectedPath := localPath + "/" + item.Fn
 		if item.Isv == 1 {
 			expectedPath = expectedPath[:len(expectedPath)-len(filepath.Ext(expectedPath))] + ".strm"
 		}
-
-		// 校验 FID 是否存在于数据库
 		recordedFid := dbGetFID(expectedPath)
-
 		if recordedFid != item.Fid {
-			// FID不匹配（或数据库无记录），即为冗余
 			log.Printf("[清理] 发现冗余项: %s (FID: %s)", expectedPath, item.Fid)
 			if item.Fc == "0" {
 				open115.MoveFile(ctx, item.Fid, tempFid)
@@ -410,15 +265,12 @@ func cleanUp(ctx context.Context, localPath string, cloudFID string) {
 				open115.DeleteFile(ctx, item.Fid)
 			}
 		} else if item.Fc == "0" {
-			// FID匹配且是目录，但这一支路总数不对，递归检查
 			wg.Go(func() {
 				cleanUp(ctx, expectedPath, item.Fid)
 			})
 		}
 	}
 }
-
-// --- 递归扫描逻辑 ---
 
 func cloudScan(ctx context.Context, currentPath string) {
 	select {
@@ -432,34 +284,30 @@ func cloudScan(ctx context.Context, currentPath string) {
 	log.Printf("[同步] 获取云端列表:%s", currentPath)
 	list, err := open115.FileList(ctx, fid)
 	if err != nil {
-		log.Printf("[同步] 获取云端[%s]失败: %v", currentPath, err)
-		cancelFunc()
+		cancelFunc(fmt.Errorf("获取云端列表[%s]: %v", currentPath, err))
 		return
 	}
 	for _, item := range list {
-		if ctx.Err() != nil {
+		if err := ctx.Err(); err != nil {
 			return
 		}
-		if item.Aid != "1" { // 有效文件
+		if item.Aid != "1" {
 			continue
 		}
 		savePath := currentPath + "/" + item.Fn
 		saveSize := item.Fs
-		if item.Fc == "0" { // 目录
+		if item.Fc == "0" {
 			dbSaveRecord(savePath, item.Fid, -1)
 			wg.Go(func() {
 				cloudScan(ctx, savePath)
 			})
 		} else {
-			// 视频文件生成 strm 记录
 			if item.Isv == 1 {
 				savePath = savePath[:len(savePath)-len(filepath.Ext(savePath))] + ".strm"
 				saveSize = 0
-				// 检查本地是否存在且匹配
 				if info, err := os.Stat(savePath); err == nil {
 					if content, err := os.ReadFile(savePath); err == nil {
 						_, localFid := extractPickcode(string(content))
-						// 如果本地 strm 记录的 fid 和云端当前文件 fid 一致
 						if localFid == item.Fid {
 							saveSize = info.ModTime().Unix()
 						}
@@ -472,13 +320,12 @@ func cloudScan(ctx context.Context, currentPath string) {
 }
 
 func localScan(ctx context.Context, currentLocalPath string, currentCID string, taskQueue chan task) {
-	if ctx.Err() != nil {
+	if err := ctx.Err(); err != nil {
 		return
 	}
 	entries, err := os.ReadDir(currentLocalPath)
 	if err != nil {
-		log.Printf("[同步] 获取本地目录[%s]失败: %v", currentLocalPath, err)
-		cancelFunc()
+		cancelFunc(fmt.Errorf("读取本地文件夹[%s]: %v", currentLocalPath, err))
 		return
 	}
 
@@ -490,10 +337,8 @@ func localScan(ctx context.Context, currentLocalPath string, currentCID string, 
 	localFound := localMapPool.Get().(map[string]bool)
 	clear(localFound)
 	defer localMapPool.Put(localFound)
-
-	// 遍历本地文件
 	for _, entry := range entries {
-		if ctx.Err() != nil {
+		if err := ctx.Err(); err != nil {
 			return
 		}
 		name := entry.Name()
@@ -501,7 +346,7 @@ func localScan(ctx context.Context, currentLocalPath string, currentCID string, 
 		fullPath := currentLocalPath + "/" + name
 
 		var dbFid string
-		var dbSize int64 = -2 // -2 表示本地存在但数据库无记录
+		var dbSize int64 = -2
 		if s, exists := dbFileMap[name]; exists {
 			if before, after, ok := strings.Cut(s, "|"); ok {
 				dbFid = before
@@ -509,22 +354,19 @@ func localScan(ctx context.Context, currentLocalPath string, currentCID string, 
 			}
 		}
 
-		if entry.IsDir() { // 处理文件夹
+		if entry.IsDir() {
 			if dbSize == -2 {
-				// 本地存在云端不存在，创建云端文件夹
 				log.Printf("[同步] 创建云端文件夹: %s", fullPath)
 				newFid, err := open115.AddFolder(ctx, currentCID, name)
 				if err != nil {
-					log.Printf("[同步] 创建云端文件夹[%s]失败: %v", fullPath, err)
-					cancelFunc()
+					cancelFunc(fmt.Errorf("创建云端文件夹[%s]: %v", fullPath, err))
 					return
 				}
 				dbSaveRecord(fullPath, newFid, -1)
 				dbFid = newFid
 			}
-			// 继续递归
 			localScan(ctx, fullPath, dbFid, taskQueue)
-		} else { // 处理文件
+		} else {
 			info, _ := entry.Info()
 			isStrm := strings.EqualFold(filepath.Ext(name), ".strm")
 			size := info.Size()
@@ -542,7 +384,7 @@ func localScan(ctx context.Context, currentLocalPath string, currentCID string, 
 			}
 		}
 	}
-	// 遍历当前文件夹数据库 查找存在但本地已删除的项
+
 	for dbFileName, dbVal := range dbFileMap {
 		if !localFound[dbFileName] {
 			fullPath := currentLocalPath + "/" + dbFileName
@@ -564,9 +406,9 @@ func localScan(ctx context.Context, currentLocalPath string, currentCID string, 
 		}
 	}
 }
-func processFile(ctx context.Context, fPath, cid, name string, size int64, isStrm bool, total int64) {
-	if ctx.Err() != nil {
-		return
+func processFile(ctx context.Context, fPath, cid, name string, size int64, isStrm bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	var err error
 	indexPath := fPath
@@ -584,8 +426,9 @@ func processFile(ctx context.Context, fPath, cid, name string, size int64, isStr
 		}
 		if err != nil && !strings.Contains(err.Error(), "不存在或已经删除") {
 			log.Printf("[同步] 删除云端文件失败: %v", err)
-			return
+			return err
 		}
+		err = nil
 		dbClearPath(indexPath)
 	}
 	if isStrm {
@@ -595,23 +438,21 @@ func processFile(ctx context.Context, fPath, cid, name string, size int64, isStr
 			dbSaveRecord(fPath, fid, time.Now().Unix())
 		}
 	} else {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var pickcode string
 		fid, pickcode, err = open115.UploadFile(ctx, fPath, cid, "", "")
 		if err == nil {
 			if isVideo {
 				baseUrl, _ := strings.CutSuffix(strmUrl, "/")
-				strmContent := fmt.Sprintf("%s/download?pickcode=%s&fid=%s",
-					baseUrl, pickcode, fid)
-
+				strmContent := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", baseUrl, pickcode, fid)
 				if err := os.WriteFile(indexPath, []byte(strmContent), 0644); err == nil {
-					if ctx.Err() != nil {
-						return
-					}
 					if err := os.Remove(fPath); err == nil {
 						dbSaveRecord(indexPath, fid, time.Now().Unix())
 					} else {
 						log.Printf("[同步] 删除原文件失败: %v", err)
-						return
+						return err
 					}
 				}
 			} else {
@@ -619,16 +460,7 @@ func processFile(ctx context.Context, fPath, cid, name string, size int64, isStr
 			}
 		}
 	}
-
-	current := stats.completed.Add(1)
-	if err != nil {
-		stats.failed.Add(1)
-		errMsg := fmt.Sprintf("[%s][同步] %s: %v", time.Now().Format("15:04"), fPath, err)
-		markFailed(errMsg)
-		log.Printf("[同步][%d/%d] ❌ %s: %v", current, total, fPath, err)
-	} else {
-		log.Printf("[同步][%d/%d] ✅ %s", current, total, fPath)
-	}
+	return err
 }
 
 func handleStrmTask(ctx context.Context, fPath, cid, name, content string) (string, error) {
@@ -647,12 +479,10 @@ func handleStrmTask(ctx context.Context, fPath, cid, name, content string) (stri
 		}
 	}
 
-	// 1. 移动文件
 	if err := open115.MoveFile(ctx, fid, cid); err != nil {
 		return "", fmt.Errorf("[同步] 移动strm内视频失败: %v", err)
 	}
 
-	// 2. 改名及后缀二次校验
 	targetPureName := strings.TrimSuffix(name, ".strm")
 	newName, err := open115.UpdataFile(ctx, fid, targetPureName)
 	if err != nil {
@@ -666,7 +496,7 @@ func handleStrmTask(ctx context.Context, fPath, cid, name, content string) (stri
 			return "", fmt.Errorf("[同步] strm内视频二次改名失败: %v", err)
 		}
 	}
-	// 3. 写入文件
+
 	newContent := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", strmUrl, pickcode, fid)
 	if err := os.WriteFile(fPath, []byte(newContent), 0644); err != nil {
 		return "", fmt.Errorf("[同步] strm文件写入内容失败: %v", err)
