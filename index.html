@@ -33,7 +33,7 @@
                     <button @click="fetch(r() ? '/stopsync' : '/sync')" :class="r() ? 'secondary' : ''"
                         x-text="r() ? '停止' : '开始'"></button>
                 </fieldset>
-                <progress :value="r() ? syncPercent : -1" max="100"></progress>
+                <progress :value="r() ? syncPercent : 0" max="100"></progress>
             </article>
 
             <article x-data="{ r: () => stats.strm.running }">
@@ -44,7 +44,7 @@
                     <button @click="fetch(r() ? '/stopstrm' : '/strm')" :class="r() ? 'secondary' : ''"
                         x-text="r() ? '停止' : '开始'"></button>
                 </fieldset>
-                <progress :value="r() ? strmPercent : -1" max="100"></progress>
+                <progress :value="r() ? strmPercent : 0" max="100"></progress>
             </article>
         </div>
 
