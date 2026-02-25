@@ -138,23 +138,38 @@ func runSync(parentCtx context.Context) {
 		log.Printf("[同步] 初始化失败: %v", err)
 		return
 	}
+	if err := context.Cause(ctx); err != nil {
+		log.Printf("[任务中止] 初始化同步 中止原因: %v", err)
+		return
+	}
+
 	if err := initTemp(ctx, config.TempPath); err != nil {
 		log.Printf("[同步] Temp目录准备失败: %v", err)
 		return
 	}
-	doSync(ctx, config.SyncPath, rootID)
-
-	if err := context.Cause(ctx); err == nil {
-		log.Printf("[同步] 云端数据一致性校验...")
-		time.Sleep(5 * time.Second)
-		wg.Go(func() {
-			cleanUp(ctx, config.SyncPath, rootID)
-		})
-		wg.Wait()
-		log.Printf("[同步] 云端数据一致性校验完成")
-	} else {
-		log.Printf("[任务中止] 同步过程中被中止: %v", err)
+	if err := context.Cause(ctx); err != nil {
+		log.Printf("[任务中止] Temp目录准备 中止原因: %v", err)
+		return
 	}
+
+	doSync(ctx, config.SyncPath, rootID)
+	if err := context.Cause(ctx); err != nil {
+		log.Printf("[任务中止] 同步过程中被中止 中止原因: %v", err)
+		return
+	}
+
+	time.Sleep(5 * time.Second)
+
+	if err := context.Cause(ctx); err != nil {
+		log.Printf("[任务中止] 云端数据一致性校验 中止原因: : %v", err)
+		return
+	}
+	log.Printf("[同步] 云端数据一致性校验...")
+	wg.Go(func() {
+		cleanUp(ctx, config.SyncPath, rootID)
+	})
+	wg.Wait()
+	log.Printf("[同步] 云端数据一致性校验完成")
 }
 func initRoot(ctx context.Context, rootPath string) (string, error) {
 	fid := dbGetFID(rootPath)
@@ -235,7 +250,7 @@ func cleanUp(ctx context.Context, currentPath string, cloudFID string) {
 	}
 	_, count, folderCount, err := open115.FolderInfo(ctx, currentPath)
 	if err != nil {
-		log.Printf("[清理] 获取FolderInfo失败: %s, %v", currentPath, err)
+		log.Printf("[清理] 获取文件夹信息失败: %s, %v", currentPath, err)
 		return
 	}
 	cloudTotal := count + folderCount
