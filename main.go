@@ -39,35 +39,27 @@ func main() {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		fetchStatus := func() string {
+		f, ok := w.(http.Flusher)
+		send := func() {
 			status := GlobalStatus{
 				Sync: syncFile.GetStatus(),
 				Strm: addStrm.GetStatus(),
 			}
 			data, _ := json.Marshal(status)
-			return string(data)
-		}
-		send := func(jsonStr string) {
-			fmt.Fprintf(w, "data: %s\n\n", jsonStr)
-			if f, ok := w.(http.Flusher); ok {
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			if ok {
 				f.Flush()
 			}
 		}
-		lastJSON := fetchStatus()
-		send(lastJSON)
-
-		ticker := time.NewTicker(500 * time.Millisecond)
+		send()
+		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-r.Context().Done():
 				return
 			case <-ticker.C:
-				currentJSON := fetchStatus()
-				if currentJSON != lastJSON {
-					send(currentJSON)
-					lastJSON = currentJSON
-				}
+				send()
 			}
 		}
 	})
