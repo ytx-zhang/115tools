@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,7 +35,9 @@ type taskStats struct {
 	running      atomic.Bool
 }
 
-var stats = &taskStats{}
+var stats = &taskStats{
+	failedErrors: []string{},
+}
 
 func (s *taskStats) Reset() {
 	s.total.Store(0)
@@ -57,13 +60,11 @@ type TaskStatsJSON struct {
 func GetStatus() TaskStatsJSON {
 	stats.mu.Lock()
 	defer stats.mu.Unlock()
-
-	errors := append(make([]string, 0, len(stats.failedErrors)), stats.failedErrors...)
 	return TaskStatsJSON{
 		Total:     stats.total.Load(),
 		Completed: stats.completed.Load(),
 		Failed:    stats.failed.Load(),
-		Errors:    errors,
+		Errors:    slices.Clone(stats.failedErrors),
 		Running:   stats.running.Load(),
 	}
 }
