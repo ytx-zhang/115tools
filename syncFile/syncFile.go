@@ -188,11 +188,12 @@ func GetStatus() TaskStatsJSON {
 	stats.mu.Lock()
 	defer stats.mu.Unlock()
 
+	errors := append(make([]string, 0, len(stats.failedErrors)), stats.failedErrors...)
 	return TaskStatsJSON{
 		Total:     stats.total.Load(),
 		Completed: stats.completed.Load(),
 		Failed:    stats.failed.Load(),
-		Errors:    append([]string(nil), stats.failedErrors...),
+		Errors:    errors,
 		Running:   stats.running.Load(),
 	}
 }
