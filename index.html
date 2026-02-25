@@ -34,7 +34,7 @@
             <article x-data="{ r: () => stats.sync.running }">
                 <header>文件同步</header>
                 <fieldset role="group">
-                    <h2 style="margin: 0; flex: 1;"><span x-text="stats.sync.completed">0</span> / <span
+                    <h2 style="margin: 0; flex: 1;align-content: center;"><span x-text="stats.sync.completed">0</span> / <span
                             x-text="stats.sync.total">0</span></h2>
                     <button @click="fetch(r() ? '/stopsync' : '/sync')" :class="r() ? 'secondary' : ''"
                         x-text="r() ? '停止' : '开始'"></button>
@@ -45,7 +45,7 @@
             <article x-data="{ r: () => stats.strm.running }">
                 <header>STRM 生成</header>
                 <fieldset role="group">
-                    <h2 style="margin: 0; flex: 1;"><span x-text="stats.strm.completed">0</span> / <span
+                    <h2 style="margin: 0; flex: 1;align-content: center;"><span x-text="stats.strm.completed">0</span> / <span
                             x-text="stats.strm.total">0</span></h2>
                     <button @click="fetch(r() ? '/stopstrm' : '/strm')" :class="r() ? 'secondary' : ''"
                         x-text="r() ? '停止' : '开始'"></button>
