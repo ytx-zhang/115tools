@@ -1,12 +1,12 @@
 package emby302
 
 import (
-	"115tools/open115"
+	"115tools/config"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httputil"
@@ -34,7 +34,7 @@ type embyMedia struct {
 }
 
 func StartEmby302(ctx context.Context) {
-	conf := open115.Conf.Load()
+	conf := config.Get()
 	embyURL = conf.EmbyUrl
 	fontInAssURL = conf.FontInAssUrl
 	strmUrl = conf.StrmUrl
@@ -70,12 +70,11 @@ func StartEmby302(ctx context.Context) {
 		}
 
 		if subProxy != nil && subtitleRegex.MatchString(path) {
-			log.Printf("[Subtitle Proxy] Path: %s -> Target: %s", path, fontInAssURL)
+			slog.Info("[重定向字幕]", "path", path)
 			subProxy.ServeHTTP(w, r)
 			return
 		}
 
-		// 拦截所有包含 /Images/ 的请求
 		if strings.Contains(path, "/items/") && strings.Contains(path, "/images/") {
 			if r.URL.RawQuery != "" {
 				query := r.URL.Query()
@@ -86,29 +85,22 @@ func StartEmby302(ctx context.Context) {
 			}
 		}
 
-		// 拦截视频流 original 请求
 		if strings.Contains(path, "/videos/") && strings.Contains(path, "/original") {
 			matches := itemIDRegex.FindStringSubmatch(path)
 			if len(matches) > 1 {
 				itemID := matches[1]
-
-				// 实时向 Emby 获取 MediaInfo
 				media, err := fetchMediaFromEmby(r.Context(), itemID, r.URL.Query())
-
 				if err == nil && strings.HasPrefix(media.Path, strmUrl) {
-
 					finalURL, err := getFinalLocation(r.Context(), media.Path, r.Header.Get("User-Agent"))
-					if err == nil && finalURL != "" {
-						log.Printf("[302 Success] %s", media.Name)
+					if err == nil {
+						slog.Info("[302 成功]", "name", media.Name)
 						http.Redirect(w, r, finalURL, http.StatusFound)
 						return
 					} else {
-						log.Printf("[302 Failed/Timeout] %s, Error: %v", media.Name, err)
+						slog.Error("[302 失败]", "name", media.Name, "error", err)
 					}
-				}
-
-				if err == nil {
-					log.Printf("[Fallback] [%s] 不符合 302 条件)", media.Name)
+				} else {
+					slog.Info("[302 跳过] 不符合 302 条件", "name", media.Name)
 				}
 			}
 		}
@@ -117,29 +109,29 @@ func StartEmby302(ctx context.Context) {
 	})
 
 	srv := &http.Server{
-		Addr:    ListenAddr,
+		Addr:    ":8095",
 		Handler: mux,
 	}
 
 	go func() {
-		log.Printf("Emby 302 服务已启动: %s", ListenAddr)
+		slog.Info("Emby 302 服务启动在 :8095")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("监听失败: %s\n", err)
+			slog.Error("监听失败", "error", err)
 		}
 	}()
 
 	<-ctx.Done()
 
-	log.Println("正在关闭 Emby 302 服务...")
+	slog.Info("正在关闭 Emby 302 服务...")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("强制关闭服务失败: %v", err)
+		slog.Error("强制关闭服务失败", "error", err)
 	}
 
-	log.Println("Emby 302 服务已退出")
+	slog.Info("Emby 302 服务已退出")
 }
 
 func fetchMediaFromEmby(ctx context.Context, itemID string, query url.Values) (*embyMedia, error) {

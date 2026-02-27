@@ -1,10 +1,11 @@
 package syncFile
 
 import (
+	"115tools/config"
 	"115tools/open115"
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -46,13 +47,12 @@ var stats = &taskStats{
 }
 
 func (s *taskStats) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.total.Store(0)
 	s.completed.Store(0)
 	s.failed.Store(0)
-	s.mu.Lock()
 	s.failedErrors = s.failedErrors[:0]
-	s.mu.Unlock()
-	s.running.Store(false)
 }
 
 type TaskStatsJSON struct {
@@ -75,27 +75,24 @@ func GetStatus() TaskStatsJSON {
 	}
 }
 func markFailed(reason string) {
-	stats.failed.Add(1)
 	stats.mu.Lock()
+	defer stats.mu.Unlock()
+	stats.failed.Add(1)
 	stats.failedErrors = append(stats.failedErrors, reason)
-	stats.mu.Unlock()
 }
 
 func StartSync(parentCtx context.Context, mainWg *sync.WaitGroup) {
 	needRetry.Store(true)
-	stats.Reset()
 	if stats.running.CompareAndSwap(false, true) {
 		mainWg.Go(func() {
 			defer stats.running.Store(false)
+			stats.Reset()
 			for needRetry.Swap(false) {
-				if parentCtx.Err() != nil {
+				if err := context.Cause(parentCtx); err != nil {
+					slog.Error("[同步] 任务中止", "error", err)
 					return
 				}
 				runSync(parentCtx)
-			}
-
-			if needRetry.Load() {
-				StartSync(parentCtx, mainWg)
 			}
 		})
 	}
@@ -118,71 +115,76 @@ type task struct {
 }
 
 func runSync(parentCtx context.Context) {
+	slog.Info("[同步] 开始同步文件...")
 	var ctx context.Context
 	ctx, cancelFunc = context.WithCancelCause(parentCtx)
-	config := open115.Conf.Load()
+	select {
+	case <-time.After(1 * time.Second):
+	case <-ctx.Done():
+		slog.Info("[任务中止] 同步文件", "error", context.Cause(ctx))
+		return
+	}
+	config := config.Get()
 	rootPath := config.SyncPath
+	if rootPath == "" {
+		slog.Error("[同步] SyncPath 未设置")
+		return
+	}
 	strmUrl = config.StrmUrl
 	initDB()
 
 	defer func() {
-		cancelFunc(fmt.Errorf("[同步] 任务已彻底停止"))
+		cancelFunc(fmt.Errorf("[同步] 任务结束"))
 		closeDB()
-		log.Printf("[同步] 任务彻底停止")
+		slog.Info("[同步] 任务结束", "处理文件", stats.completed.Load(), "失败任务", stats.failed.Load())
 	}()
-
-	if rootPath == "" {
-		log.Printf("[同步] SyncPath 未设置")
-		return
-	}
-
-	log.Printf("[同步] 开始同步流程...")
 	rootID, err := initRoot(ctx, config.SyncPath)
 	if err != nil {
-		log.Printf("[同步] 初始化失败: %v", err)
-		return
-	}
-	if err := context.Cause(ctx); err != nil {
-		log.Printf("[任务中止] 初始化同步 中止原因: %v", err)
+		slog.Error("[同步] 初始化失败", "error", err)
 		return
 	}
 
 	if err := initTemp(ctx, config.TempPath); err != nil {
-		log.Printf("[同步] Temp目录准备失败: %v", err)
-		return
-	}
-	if err := context.Cause(ctx); err != nil {
-		log.Printf("[任务中止] Temp目录准备 中止原因: %v", err)
+		slog.Error("[同步] Temp目录初始化失败", "error", err)
 		return
 	}
 
-	doSync(ctx, config.SyncPath, rootID)
-	if err := context.Cause(ctx); err != nil {
-		log.Printf("[任务中止] 同步过程中被中止 中止原因: %v", err)
+	if err := doSync(ctx, config.SyncPath, rootID); err != nil {
+		slog.Error("[同步] 执行同步失败", "error", err)
 		return
 	}
-
-	time.Sleep(5 * time.Second)
-
-	if err := context.Cause(ctx); err != nil {
-		log.Printf("[任务中止] 云端数据一致性校验 中止原因: : %v", err)
+	if stats.total.Load() == 0 {
+		slog.Info("[同步] 没有需要同步的文件")
 		return
 	}
-	log.Printf("[同步] 云端数据一致性校验...")
+	slog.Info("[同步] 云端数据一致性校验...")
+	select {
+	case <-time.After(3 * time.Second):
+	case <-ctx.Done():
+		slog.Info("[任务中止] 云端数据一致性校验", "error", context.Cause(ctx))
+		return
+	}
 	wg.Go(func() {
 		cleanUp(ctx, config.SyncPath, rootID)
 	})
 	wg.Wait()
-	log.Printf("[同步] 云端数据一致性校验完成")
+	if err := context.Cause(ctx); err != nil {
+		slog.Info("[任务中止] 云端数据一致性校验", "error", err)
+	}
+	slog.Info("[同步] 云端数据一致性校验完成")
 }
 func initRoot(ctx context.Context, rootPath string) (string, error) {
+	if err := context.Cause(ctx); err != nil {
+		slog.Info("[任务中止] 初始化同步", "error", err)
+		return "", err
+	}
 	fid := dbGetFID(rootPath)
 	if fid != "" {
 		return fid, nil
 	}
 	isCloudScan.Store(true)
 	defer isCloudScan.Store(false)
-	log.Printf("[同步] 初次运行，开始初始化云端数据库...")
+	slog.Info("[同步] 初次运行，开始初始化云端数据库...")
 	fid, _, _, err := open115.FolderInfo(ctx, rootPath)
 	if err != nil {
 		return "", err
@@ -196,16 +198,20 @@ func initRoot(ctx context.Context, rootPath string) (string, error) {
 
 	if err := context.Cause(ctx); err != nil {
 		if isCloudScan.Load() {
-			log.Printf("[同步] 云端扫描被中止，正在清理数据库 中止原因: %v", err)
-			removeDB()
+			slog.Warn("[同步] 云端扫描被中止，正在清理数据库", "error", err)
+			dbClearPath(rootPath)
 		}
 		return "", err
 	}
 
-	log.Printf("[同步] 云端数据库初始化完成")
+	slog.Info("[同步] 云端数据库初始化完成")
 	return fid, nil
 }
 func initTemp(ctx context.Context, tempPath string) error {
+	if err := context.Cause(ctx); err != nil {
+		slog.Info("[任务中止] Temp目录初始化", "error", err)
+		return err
+	}
 	tempFid = dbGetFID(tempPath)
 	if tempFid != "" {
 		return nil
@@ -218,81 +224,42 @@ func initTemp(ctx context.Context, tempPath string) error {
 	tempFid = fid
 	return nil
 }
-func doSync(ctx context.Context, rootPath, rootID string) {
-	log.Printf("[同步] 开始扫描本地文件并推送任务")
+func doSync(ctx context.Context, rootPath, rootID string) error {
 	taskQueue := make(chan task, 1000)
 	for range 3 {
 		wg.Go(func() {
 			for t := range taskQueue {
-				if ctx.Err() != nil {
+				if context.Cause(ctx) != nil {
 					continue
 				}
 				current := stats.completed.Add(1)
 				total := stats.total.Load()
-				if err := processFile(t.ctx, t.path, t.cid, t.name, t.size, t.isStrm); err != nil {
-					markFailed(fmt.Sprintf("[同步] [%s] 处理文件失败: %s (%v)", time.Now().Format("15:04"), t.path, err))
-					log.Printf("[同步][%d/%d] ❌ %s: %v", current, total, t.path, err)
+				var err error
+				if t.isStrm {
+					err = handleStrmTask(t)
 				} else {
-					log.Printf("[同步][%d/%d] ✅ %s", current, total, t.path)
+					err = handleFileTask(t)
+				}
+				if err != nil {
+					markFailed(fmt.Sprintf("[同步] [%s] 处理文件失败: %s (%v)", time.Now().Format("15:04"), t.path, err))
+					slog.Error("[同步] 处理文件失败", "进度", fmt.Sprintf("%d/%d", current, total), "path", t.path, "error", err)
+				} else {
+					slog.Info("[同步] 处理文件成功", "进度", fmt.Sprintf("%d/%d", current, total), "path", t.path)
 				}
 			}
 		})
 	}
-	localScan(ctx, rootPath, rootID, taskQueue)
+	if err := context.Cause(ctx); err != nil {
+		slog.Info("[任务中止] 扫描本地文件", "error", err)
+		return err
+	}
+	if err := localScan(ctx, rootPath, rootID, taskQueue); err != nil {
+		return err
+	}
 	close(taskQueue)
 	wg.Wait()
-	log.Printf("[同步] 同步任务执行完成")
+	return nil
 }
-func cleanUp(ctx context.Context, currentPath string, cloudFID string) {
-	select {
-	case scanSem <- struct{}{}:
-		defer func() { <-scanSem }()
-	case <-ctx.Done():
-		err := context.Cause(ctx)
-		log.Printf("[任务中止] 云端文件夹校验: %s 中止原因: %v", currentPath, err)
-		return
-	}
-	_, count, folderCount, err := open115.FolderInfo(ctx, currentPath)
-	if err != nil {
-		log.Printf("[清理] 获取文件夹信息失败: %s, %v", currentPath, err)
-		return
-	}
-	cloudTotal := count + folderCount
-	dbTotal := dbGetTotalCount(currentPath)
-	if cloudTotal == dbTotal {
-		return
-	}
-
-	log.Printf("[清理] 数量不一致: %s (云端:%d, 数据库:%d)，开始对比...", currentPath, cloudTotal, dbTotal)
-	items, err := open115.FileList(ctx, cloudFID)
-	if err != nil {
-		return
-	}
-
-	for _, item := range items {
-		if item.Aid != "1" {
-			continue
-		}
-		expectedPath := currentPath + "/" + item.Fn
-		if item.Isv == 1 {
-			expectedPath = expectedPath[:len(expectedPath)-len(filepath.Ext(expectedPath))] + ".strm"
-		}
-		recordedFid := dbGetFID(expectedPath)
-		if recordedFid != item.Fid {
-			log.Printf("[清理] 发现冗余项: %s (FID: %s)", expectedPath, item.Fid)
-			if item.Fc == "0" {
-				open115.MoveFile(ctx, item.Fid, tempFid)
-			} else {
-				open115.DeleteFile(ctx, item.Fid)
-			}
-		} else if item.Fc == "0" {
-			wg.Go(func() {
-				cleanUp(ctx, expectedPath, item.Fid)
-			})
-		}
-	}
-}
-
 func cloudScan(ctx context.Context, currentPath string) {
 	select {
 	case <-ctx.Done():
@@ -302,14 +269,14 @@ func cloudScan(ctx context.Context, currentPath string) {
 	}
 
 	fid := dbGetFID(currentPath)
-	log.Printf("[同步] 获取云端列表:%s", currentPath)
+	slog.Info("[同步] 获取云端列表", "path", currentPath)
 	list, err := open115.FileList(ctx, fid)
 	if err != nil {
-		cancelFunc(fmt.Errorf("获取云端列表[%s]: %v", currentPath, err))
+		cancelFunc(fmt.Errorf("获取云端列表[%s]失败: %v", currentPath, err))
 		return
 	}
 	for _, item := range list {
-		if err := ctx.Err(); err != nil {
+		if err := context.Cause(ctx); err != nil {
 			return
 		}
 		if item.Aid != "1" {
@@ -339,15 +306,14 @@ func cloudScan(ctx context.Context, currentPath string) {
 		}
 	}
 }
-
-func localScan(ctx context.Context, currentPath string, currentCID string, taskQueue chan task) {
-	if err := ctx.Err(); err != nil {
-		return
+func localScan(ctx context.Context, currentPath string, currentCID string, taskQueue chan task) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
 	}
 	entries, err := os.ReadDir(currentPath)
 	if err != nil {
 		cancelFunc(fmt.Errorf("读取本地文件夹[%s]: %v", currentPath, err))
-		return
+		return err
 	}
 
 	dbFileMap := dbMapPool.Get().(map[string]string)
@@ -358,9 +324,10 @@ func localScan(ctx context.Context, currentPath string, currentCID string, taskQ
 	localFound := localMapPool.Get().(map[string]bool)
 	clear(localFound)
 	defer localMapPool.Put(localFound)
+
 	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return
+		if err := context.Cause(ctx); err != nil {
+			return err
 		}
 		name := entry.Name()
 		localFound[name] = true
@@ -377,16 +344,18 @@ func localScan(ctx context.Context, currentPath string, currentCID string, taskQ
 
 		if entry.IsDir() {
 			if dbSize == -2 {
-				log.Printf("[同步] 创建云端文件夹: %s", fullPath)
+				slog.Info("[同步] 创建云端文件夹", "path", fullPath)
 				newFid, err := open115.AddFolder(ctx, currentCID, name)
 				if err != nil {
-					cancelFunc(fmt.Errorf("创建云端文件夹[%s]: %v", fullPath, err))
-					return
+					cancelFunc(fmt.Errorf("创建云端文件夹[%s]失败: %v", fullPath, err))
+					return err
 				}
 				dbSaveRecord(fullPath, newFid, -1)
 				dbFid = newFid
 			}
-			localScan(ctx, fullPath, dbFid, taskQueue)
+			if err := localScan(ctx, fullPath, dbFid, taskQueue); err != nil {
+				return err
+			}
 		} else {
 			info, _ := entry.Info()
 			isStrm := strings.EqualFold(filepath.Ext(name), ".strm")
@@ -407,125 +376,162 @@ func localScan(ctx context.Context, currentPath string, currentCID string, taskQ
 	}
 
 	for dbFileName, dbVal := range dbFileMap {
+		if err := context.Cause(ctx); err != nil {
+			slog.Info("[任务中止] 扫描本地文件", "error", err)
+			return err
+		}
 		if !localFound[dbFileName] {
 			fullPath := currentPath + "/" + dbFileName
 			fid, size, _ := strings.Cut(dbVal, "|")
 			isDir := size == "-1"
 			isStrm := strings.EqualFold(filepath.Ext(dbFileName), ".strm")
-			var err error
-			if isDir || isStrm {
-				err = open115.MoveFile(ctx, fid, tempFid)
-			} else {
-				err = open115.DeleteFile(ctx, fid)
-			}
-			if err != nil && !strings.Contains(err.Error(), "不存在或已经删除") {
-				log.Printf("[同步] 删除云端文件失败: %v", err)
-				return
-			}
-			dbClearPath(fullPath)
-			log.Printf("[同步] 删除云端文件: %s", fullPath)
+			cleanCloud(ctx, fullPath, fid, isDir || isStrm)
 		}
 	}
+	return nil
 }
-func processFile(ctx context.Context, fPath, cid, name string, size int64, isStrm bool) error {
-	if err := ctx.Err(); err != nil {
+func handleFileTask(t task) error {
+	size := t.size
+	savePath := t.path
+	ext := filepath.Ext(t.path)
+	isVideo := checkVideo(ext, t.size)
+	if isVideo {
+		savePath = t.path[:len(t.path)-len(ext)] + ".strm"
+	}
+	indexFid := dbGetFID(savePath)
+	if indexFid != "" {
+		if err := cleanCloud(t.ctx, savePath, indexFid, isVideo); err != nil {
+			return err
+		}
+	}
+	fid, pickcode, err := open115.UploadFile(t.ctx, t.path, t.cid, "", "")
+	if err != nil {
 		return err
 	}
-	var err error
-	indexPath := fPath
-	ext := filepath.Ext(fPath)
-	isVideo := checkVideo(ext, size)
 	if isVideo {
-		indexPath = fPath[:len(fPath)-len(ext)] + ".strm"
-	}
-	fid := dbGetFID(indexPath)
-	if fid != "" {
-		if isStrm {
-			err = open115.MoveFile(ctx, fid, tempFid)
-		} else {
-			err = open115.DeleteFile(ctx, fid)
-		}
-		if err != nil && !strings.Contains(err.Error(), "不存在或已经删除") {
-			log.Printf("[同步] 删除云端文件失败: %v", err)
+		if err := saveStrmFile(pickcode, fid, savePath); err != nil {
+			slog.Error("[同步] 写入strm文件失败", "path", savePath, "error", err)
 			return err
 		}
-		err = nil
-		dbClearPath(indexPath)
-	}
-	if isStrm {
-		contentBytes, _ := os.ReadFile(fPath)
-		fid, err = handleStrmTask(ctx, fPath, cid, name, string(contentBytes))
-		if err == nil {
-			dbSaveRecord(fPath, fid, time.Now().Unix())
-		}
-	} else {
-		if err := ctx.Err(); err != nil {
+		if err := os.Remove(t.path); err != nil {
+			slog.Error("[同步] 删除原文件失败", "path", t.path, "error", err)
 			return err
 		}
-		var pickcode string
-		fid, pickcode, err = open115.UploadFile(ctx, fPath, cid, "", "")
-		if err == nil {
-			if isVideo {
-				baseUrl, _ := strings.CutSuffix(strmUrl, "/")
-				strmContent := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", baseUrl, pickcode, fid)
-				if err := os.WriteFile(indexPath, []byte(strmContent), 0644); err == nil {
-					if err := os.Remove(fPath); err == nil {
-						dbSaveRecord(indexPath, fid, time.Now().Unix())
-					} else {
-						log.Printf("[同步] 删除原文件失败: %v", err)
-						return err
-					}
-				}
-			} else {
-				dbSaveRecord(fPath, fid, size)
-			}
-		}
+		size = time.Now().Unix()
 	}
-	return err
+	dbSaveRecord(savePath, fid, size)
+	return nil
 }
-
-func handleStrmTask(ctx context.Context, fPath, cid, name, content string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
+func handleStrmTask(t task) error {
+	if err := context.Cause(t.ctx); err != nil {
+		return err
 	}
-	var err error
-	pickcode, fid := extractPickcode(content)
+	indexFid := dbGetFID(t.path)
+	if indexFid != "" {
+		if err := cleanCloud(t.ctx, t.path, indexFid, t.isStrm); err != nil {
+			return err
+		}
+	}
+	contentBytes, _ := os.ReadFile(t.path)
+	pickcode, fid := extractPickcode(string(contentBytes))
 	if pickcode == "" {
-		return "", fmt.Errorf("[同步] STRM内容无pickcode")
+		return fmt.Errorf("[同步] STRM内容无pickcode")
 	}
 	if fid == "" {
-		fid, _, _, err = open115.GetDownloadUrl(ctx, pickcode, "")
+		cloudFid, _, _, err := open115.GetDownloadUrl(t.ctx, pickcode, "")
 		if err != nil {
-			return "", fmt.Errorf("[同步] 获取strm内视频fid失败: %v", err)
+			return fmt.Errorf("[同步] 获取strm内视频fid失败: %v", err)
 		}
+		fid = cloudFid
 	}
 
-	if err := open115.MoveFile(ctx, fid, cid); err != nil {
-		return "", fmt.Errorf("[同步] 移动strm内视频失败: %v", err)
+	if err := open115.MoveFile(t.ctx, fid, t.cid); err != nil {
+		return fmt.Errorf("[同步] 移动strm内视频失败: %v", err)
 	}
 
-	targetPureName := strings.TrimSuffix(name, ".strm")
-	newName, err := open115.UpdataFile(ctx, fid, targetPureName)
+	targetPureName := strings.TrimSuffix(t.name, ".strm")
+	newName, err := open115.UpdataFile(t.ctx, fid, targetPureName)
 	if err != nil {
-		return "", fmt.Errorf("[同步] strm内视频改名失败: %v", err)
+		return fmt.Errorf("[同步] strm内视频改名失败: %v", err)
 	}
 
 	realExt := filepath.Ext(newName)
 	if strings.TrimSuffix(newName, realExt) != targetPureName {
-		_, err = open115.UpdataFile(ctx, fid, targetPureName+realExt)
+		_, err = open115.UpdataFile(t.ctx, fid, targetPureName+realExt)
 		if err != nil {
-			return "", fmt.Errorf("[同步] strm内视频二次改名失败: %v", err)
+			return fmt.Errorf("[同步] strm内视频二次改名失败: %v", err)
 		}
 	}
-
-	newContent := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", strmUrl, pickcode, fid)
-	if err := os.WriteFile(fPath, []byte(newContent), 0644); err != nil {
-		return "", fmt.Errorf("[同步] strm文件写入内容失败: %v", err)
+	if err := saveStrmFile(pickcode, fid, t.path); err != nil {
+		return fmt.Errorf("[同步] strm文件写入失败: %v", err)
+	}
+	dbSaveRecord(t.path, fid, time.Now().Unix())
+	return nil
+}
+func cleanUp(ctx context.Context, currentPath string, cloudFID string) {
+	select {
+	case scanSem <- struct{}{}:
+		defer func() { <-scanSem }()
+	case <-ctx.Done():
+		return
+	}
+	_, count, folderCount, err := open115.FolderInfo(ctx, currentPath)
+	if err != nil {
+		slog.Error("[清理] 获取文件夹信息失败", "path", currentPath, "error", err)
+		return
+	}
+	cloudTotal := count + folderCount
+	dbTotal := dbGetTotalCount(currentPath)
+	if cloudTotal == dbTotal {
+		return
+	}
+	slog.Info("[清理] 数量不一致", "path", currentPath, "云端数量", cloudTotal, "数据库数量", dbTotal)
+	items, err := open115.FileList(ctx, cloudFID)
+	if err != nil {
+		slog.Error("[清理] 获取文件列表失败", "path", currentPath, "error", err)
+		return
 	}
 
-	return fid, nil
+	for _, item := range items {
+		if err := context.Cause(ctx); err != nil {
+			return
+		}
+		if item.Aid != "1" {
+			continue
+		}
+		expectedPath := currentPath + "/" + item.Fn
+		if item.Isv == 1 {
+			expectedPath = expectedPath[:len(expectedPath)-len(filepath.Ext(expectedPath))] + ".strm"
+		}
+		recordedFid := dbGetFID(expectedPath)
+		if recordedFid != item.Fid {
+			slog.Info("[清理] 清理冗余项", "path", expectedPath)
+			cleanCloud(ctx, expectedPath, item.Fid, item.Fc == "0")
+		} else if item.Fc == "0" {
+			wg.Go(func() {
+				cleanUp(ctx, expectedPath, item.Fid)
+			})
+		}
+	}
 }
-
+func cleanCloud(ctx context.Context, fPath, fid string, safe bool) error {
+	var err error
+	if safe {
+		err = open115.MoveFile(ctx, fid, tempFid)
+	} else {
+		err = open115.DeleteFile(ctx, fid)
+	}
+	if err != nil && strings.Contains(err.Error(), "不存在或已经删除") {
+		slog.Warn("[同步] 清理云端文件失败", "path", fPath, "error", err)
+		err = nil
+	}
+	if err != nil {
+		slog.Error("[同步] 清理云端文件失败", "path", fPath, "error", err)
+		return err
+	}
+	dbClearPath(fPath)
+	return nil
+}
 func extractPickcode(content string) (string, string) {
 	u, err := url.Parse(strings.TrimSpace(content))
 	if err != nil {
@@ -533,7 +539,6 @@ func extractPickcode(content string) (string, string) {
 	}
 	return u.Query().Get("pickcode"), u.Query().Get("fid")
 }
-
 func checkVideo(ext string, size int64) bool {
 	if size < 10*1024*1024 {
 		return false
@@ -543,4 +548,11 @@ func checkVideo(ext string, size int64) bool {
 		return true
 	}
 	return false
+}
+func saveStrmFile(pickcode, fid, localPath string) error {
+	strmContent := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", strmUrl, pickcode, fid)
+	if err := os.WriteFile(localPath, []byte(strmContent), 0644); err != nil {
+		return err
+	}
+	return nil
 }

@@ -2,8 +2,7 @@ package syncFile
 
 import (
 	"bytes"
-	"log"
-	"os"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +20,7 @@ func initDB() {
 	var err error
 	boltDB, err = bbolt.Open(dBPath, 0600, nil)
 	if err != nil {
-		log.Fatalf("[数据库] 初始化失败: %v", err)
+		slog.Info("[数据库] 初始化失败", "error", err)
 	}
 	boltDB.MaxBatchDelay = 100 * time.Millisecond
 	boltDB.MaxBatchSize = 2000
@@ -33,16 +32,9 @@ func initDB() {
 
 func closeDB() {
 	if boltDB != nil {
-		log.Printf("[数据库] 正在关闭 bbolt...")
-		boltDB.Close()
-	}
-}
-
-func removeDB() {
-	if err := os.Remove(dBPath); err != nil {
-		log.Printf("[同步] 清理数据库失败: %v", err)
-	} else {
-		log.Printf("[同步] 已清理数据库文件")
+		if err := boltDB.Close(); err != nil {
+			slog.Error("[数据库] 关闭失败", "error", err)
+		}
 	}
 }
 
@@ -89,25 +81,27 @@ func dbListChildren(currentLocalPath string, res map[string]string) {
 }
 
 func dbClearPath(fPath string) {
-	prefix := fPath + "/"
-	prefixBytes := []byte(prefix)
+	selfBytes := []byte(fPath)
+	childPrefix := []byte(fPath + "/")
 
 	err := boltDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
-		b.Delete([]byte(fPath))
-
 		c := b.Cursor()
-		for k, _ := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); {
-			if err := c.Delete(); err != nil {
-				return err
+		for k, _ := c.Seek(selfBytes); k != nil; {
+			if bytes.Equal(k, selfBytes) || bytes.HasPrefix(k, childPrefix) {
+				if err := c.Delete(); err != nil {
+					return err
+				}
+				k, _ = c.Next()
+			} else {
+				break
 			}
-			k, _ = c.Next()
 		}
 		return nil
 	})
 
 	if err != nil {
-		log.Printf("[数据库] 清理路径失败 %s: %v", fPath, err)
+		slog.Error("[数据库] 清理路径失败", "path", fPath, "error", err)
 	}
 }
 

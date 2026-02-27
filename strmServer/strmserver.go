@@ -2,7 +2,7 @@ package strmServer
 
 import (
 	"115tools/open115"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -28,7 +28,7 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	})
 	pickCode := r.URL.Query().Get("pickcode")
 	if pickCode == "" {
-		log.Printf("[strm请求] 未找到pickcode")
+		slog.Warn("[strm请求] 未找到pickcode")
 		http.Error(w, "未找到pickcode", http.StatusBadRequest)
 		return
 	}
@@ -48,20 +48,18 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Vary", "User-Agent")
 	if val, ok := urlCache.Load(cacheKey); ok {
 		item := val.(cacheItem)
-		log.Printf("[strm请求:缓存命中]: %s | UA: %s", item.name, clientUA)
+		slog.Info("[strm请求:缓存命中]", "name", item.name, "ua", clientUA)
 		http.Redirect(w, r, item.url, http.StatusFound)
 		return
 	}
 	_, url, name, err := open115.GetDownloadUrl(r.Context(), pickCode, clientUA)
 	if err != nil || url == "" {
-		errMsg := "获取下载地址失败"
 		if err != nil {
-			log.Printf("[strm请求] 接口报错: %v", err)
+			slog.Error("[strm请求] 接口报错", "pickCode", pickCode, "error", err)
 		} else {
-			log.Printf("[strm请求] 接口返回链接为空")
-			errMsg = "115未返回有效链接"
+			slog.Error("[strm请求] 接口返回链接为空", "pickCode", pickCode)
 		}
-		http.Error(w, errMsg, http.StatusInternalServerError)
+		http.NotFound(w, r)
 		return
 	}
 	urlCache.Store(cacheKey, cacheItem{
@@ -70,5 +68,5 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 		name: name,
 	})
 	http.Redirect(w, r, url, http.StatusFound)
-	log.Printf("[strm请求:云端获取]:  %s | UA: %s", name, clientUA)
+	slog.Info("[strm请求:云端获取]", "name", name, "ua", clientUA)
 }

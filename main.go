@@ -2,14 +2,14 @@ package main
 
 import (
 	"115tools/addStrm"
+	"115tools/config"
 	"115tools/emby302"
-	"115tools/open115"
 	"115tools/strmServer"
 	"115tools/syncFile"
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,13 +19,16 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
-	open115.LoadConfig()
+	mainCtx, mainCancel := context.WithCancelCause(context.Background())
+
+	config.LoadConfig(mainCtx, "/app/data/config.yaml")
 
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./index.html")
 	})
@@ -58,19 +61,24 @@ func main() {
 			select {
 			case <-r.Context().Done():
 				return
+			case <-mainCtx.Done(): // 核心：服务器关了，主动掐断日志流
+				return
 			case <-ticker.C:
 				send()
 			}
 		}
 	})
 
-	mainCtx, mainCancel := context.WithCancelCause(context.Background())
-	var mainWg sync.WaitGroup
 	mux.HandleFunc("GET /download", strmServer.RedirectToRealURL)
 
+	var mainWg sync.WaitGroup
 	mux.HandleFunc("GET /sync", func(w http.ResponseWriter, r *http.Request) {
 		syncFile.StartSync(mainCtx, &mainWg)
 		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusAccepted)
+	})
+	mux.HandleFunc("POST /sync", func(w http.ResponseWriter, r *http.Request) {
+		syncFile.StartSync(mainCtx, &mainWg)
 		w.WriteHeader(http.StatusAccepted)
 	})
 	mux.HandleFunc("GET /stopsync", func(w http.ResponseWriter, r *http.Request) {
@@ -93,11 +101,8 @@ func main() {
 	go emby302.StartEmby302(mainCtx)
 
 	server := &http.Server{
-		Addr:         ":8080",
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 40 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:    ":8080",
+		Handler: mux,
 	}
 
 	go func() {
@@ -107,16 +112,16 @@ func main() {
 		defer cancel()
 
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			log.Printf("强制关闭 HTTP 服务器: %v", err)
+			slog.Warn("强制关闭 HTTP 服务器", "error", err)
 		}
 	}()
 
-	log.Printf("服务器启动在 :8080")
+	slog.Info("服务器启动在 :8080")
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("服务器异常退出: %v", err)
+		slog.Error("服务器异常退出", "error", err)
 	}
 
-	log.Printf("正在等待后台任务完成...")
+	slog.Info("正在等待后台任务完成...")
 	mainWg.Wait()
-	log.Printf("程序已安全退出。")
+	slog.Info("程序已安全退出。")
 }

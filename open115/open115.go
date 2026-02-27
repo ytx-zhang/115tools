@@ -1,6 +1,7 @@
 package open115
 
 import (
+	"115tools/config"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
@@ -8,148 +9,92 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 	"golang.org/x/time/rate"
-	yaml "gopkg.in/yaml.v3"
 )
 
-const (
-	baseDomain     = "https://proapi.115.com"
-	configFileName = "/app/data/config.yaml"
-)
+const baseDomain = "https://proapi.115.com"
 
 var (
-	Conf        atomic.Pointer[config]
-	mySafeTrans = &SafeTransport{
-		BaseTransport: http.DefaultTransport,
-		RateLimiter:   rate.NewLimiter(rate.Limit(2), 3),
-		Concurrency:   make(chan struct{}, 2),
-	}
-
-	httpClient = &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: mySafeTrans,
-	}
+	limiter = rate.NewLimiter(rate.Limit(2), 3)
+	sem     = make(chan struct{}, 1)
 )
 
-type SafeTransport struct {
-	BaseTransport http.RoundTripper
-	RateLimiter   *rate.Limiter
-	Concurrency   chan struct{}
-	PauseUntil    atomic.Int64
-}
-
-func (t *SafeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	t.Concurrency <- struct{}{}
-	defer func() { <-t.Concurrency }()
-
-	if sleepTime := time.Until(time.Unix(0, t.PauseUntil.Load())); sleepTime > 0 {
-		time.Sleep(sleepTime)
-	}
-
-	if err := t.RateLimiter.Wait(req.Context()); err != nil {
-		return nil, err
-	}
-
-	resp, err := t.BaseTransport.RoundTrip(req)
-
-	if err != nil || (resp != nil && resp.StatusCode == 429) {
-		t.PauseUntil.Store(time.Now().Add(10 * time.Second).UnixNano())
-	}
-
-	return resp, err
-}
 func request[T any](ctx context.Context, method, endpoint string, params url.Values, ua string) (*T, error) {
-	const maxRetries = 3
+	sem <- struct{}{}
+	defer func() { <-sem }()
 	var lastErr error
-
-	for i := range maxRetries {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	for range 3 {
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, context.Cause(ctx)
 		}
-
 		urlStr := baseDomain + endpoint
 		var reqBody io.Reader
-		var ct string
-		queryString := params.Encode()
-		if method == "GET" {
-			if queryString != "" {
-				urlStr += "?" + queryString
-			}
-		} else {
-			reqBody = strings.NewReader(queryString)
-			ct = "application/x-www-form-urlencoded"
+		if method == "POST" {
+			reqBody = strings.NewReader(params.Encode())
+		} else if params != nil {
+			urlStr += "?" + params.Encode()
 		}
-		req, err := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+Conf.Load().Token.AccessToken)
-		if ct != "" {
-			req.Header.Set("Content-Type", ct)
-		}
+		req, _ := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
+		req.Header.Set("Authorization", "Bearer "+config.Get().Token.AccessToken)
 		req.Header.Set("User-Agent", ua)
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			lastErr = err
-			time.Sleep(3 * time.Second)
-			continue
+		if method == "POST" {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		}
-
-		bodyBytes, err := io.ReadAll(resp.Body)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			if context.Cause(ctx) != nil {
+				return nil, context.Cause(ctx)
+			}
+			lastErr = err
+			select {
+			case <-time.After(2 * time.Second):
+				continue
+			case <-ctx.Done():
+				return nil, context.Cause(ctx)
+			}
+		}
+		var res apiResponse
+		err = json.NewDecoder(resp.Body).Decode(&res)
 		resp.Body.Close()
 		if err != nil {
-			lastErr = fmt.Errorf("read body failed: %w", err)
-			continue
-		}
-
-		var res apiResponse
-		if err := json.Unmarshal(bodyBytes, &res); err != nil {
-			return nil, fmt.Errorf("115报错: 接口响应格式非法: %w", err)
+			return nil, fmt.Errorf("解析响应失败: %w", err)
 		}
 		if !res.State {
-			lastErr = fmt.Errorf("115报错: %s (code: %d)", res.Message, res.Code)
+			lastErr = fmt.Errorf("115报错: %s code: %d", res.Message, res.Code)
 			if strings.Contains(res.Message, "稍后再试") {
-				log.Printf("115报错: %s (第 %d/%d 次重试): ", res.Message, i+1, maxRetries)
-				mySafeTrans.PauseUntil.Store(time.Now().Add(10 * time.Second).UnixNano())
+				slog.Warn("[115报错]", "message", res.Message)
 				select {
-				case <-time.After(10 * time.Second):
+				case <-time.After(5 * time.Second):
 					continue
 				case <-ctx.Done():
-					return nil, ctx.Err()
+					return nil, context.Cause(ctx)
 				}
 			}
 			return nil, lastErr
 		}
-		var actualData T
-		dataStr := string(res.Data)
-		if dataStr == "" || dataStr == "null" || dataStr == "[]" {
-			return &actualData, nil
+		var data T
+		if len(res.Data) > 0 && string(res.Data) != "null" {
+			_ = json.Unmarshal(res.Data, &data)
 		}
-
-		if err := json.Unmarshal(res.Data, &actualData); err != nil {
-			return nil, fmt.Errorf("115报错: 解析data出错: %w", err)
-		}
-
-		return &actualData, nil
+		return &data, nil
 	}
 
-	return nil, fmt.Errorf("115报错: %w", lastErr)
+	return nil, lastErr
 }
 
 func GetDownloadUrl(ctx context.Context, pickCode, ua string) (string, string, string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", "", "", err
+	if err := context.Cause(ctx); err != nil {
+		return "", "", "", context.Cause(ctx)
 	}
 	params := url.Values{}
 	params.Set("pick_code", pickCode)
@@ -164,8 +109,8 @@ func GetDownloadUrl(ctx context.Context, pickCode, ua string) (string, string, s
 }
 
 func AddFolder(ctx context.Context, pid, name string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
+	if err := context.Cause(ctx); err != nil {
+		return "", context.Cause(ctx)
 	}
 	params := url.Values{}
 	params.Set("pid", pid)
@@ -178,8 +123,8 @@ func AddFolder(ctx context.Context, pid, name string) (string, error) {
 }
 
 func MoveFile(ctx context.Context, fid, cid string) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	if err := context.Cause(ctx); err != nil {
+		return context.Cause(ctx)
 	}
 	params := url.Values{}
 	params.Set("file_ids", fid)
@@ -189,8 +134,8 @@ func MoveFile(ctx context.Context, fid, cid string) error {
 }
 
 func DeleteFile(ctx context.Context, fid string) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	if err := context.Cause(ctx); err != nil {
+		return context.Cause(ctx)
 	}
 	params := url.Values{}
 	params.Set("file_ids", fid)
@@ -199,8 +144,8 @@ func DeleteFile(ctx context.Context, fid string) error {
 }
 
 func UpdataFile(ctx context.Context, fid, name string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
+	if err := context.Cause(ctx); err != nil {
+		return "", context.Cause(ctx)
 	}
 	params := url.Values{}
 	params.Set("file_id", fid)
@@ -213,8 +158,8 @@ func UpdataFile(ctx context.Context, fid, name string) (string, error) {
 }
 
 func FolderInfo(ctx context.Context, path string) (string, int, int, error) {
-	if err := ctx.Err(); err != nil {
-		return "", 0, 0, err
+	if err := context.Cause(ctx); err != nil {
+		return "", 0, 0, context.Cause(ctx)
 	}
 	params := url.Values{}
 	params.Set("path", path)
@@ -226,15 +171,15 @@ func FolderInfo(ctx context.Context, path string) (string, int, int, error) {
 }
 
 func FileList(ctx context.Context, cid string) ([]filelistData, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if err := context.Cause(ctx); err != nil {
+		return nil, context.Cause(ctx)
 	}
 	offset := 0
 	limit := 1000
 	var allFiles []filelistData
 	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		if err := context.Cause(ctx); err != nil {
+			return nil, context.Cause(ctx)
 		}
 		params := url.Values{}
 		params.Set("cid", cid)
@@ -259,8 +204,8 @@ func FileList(ctx context.Context, cid string) ([]filelistData, error) {
 }
 
 func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (string, string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", "", err
+	if err := context.Cause(ctx); err != nil {
+		return "", "", context.Cause(ctx)
 	}
 	fileInfo, err := os.Stat(pathStr)
 	if err != nil {
@@ -287,6 +232,9 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (str
 		params.Set("sign_key", signKey)
 		params.Set("sign_val", signVal)
 	}
+	if err := context.Cause(ctx); err != nil {
+		return "", "", context.Cause(ctx)
+	}
 	initData, err := request[uploadInitData](ctx, "POST", "/open/upload/init", params, "")
 	if err != nil {
 		return "", "", err
@@ -304,8 +252,14 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (str
 		offset := stringToInt64(signParts[0])
 		length := stringToInt64(signParts[1])
 		signVal, _ := fileSHA1Partial(pathStr, offset, length)
+		if err := context.Cause(ctx); err != nil {
+			return "", "", context.Cause(ctx)
+		}
 		return UploadFile(ctx, pathStr, cid, initData.SignKey, signVal)
 	case 1:
+		if err := context.Cause(ctx); err != nil {
+			return "", "", context.Cause(ctx)
+		}
 		token, err := request[uploadtokenData](ctx, "GET", "/open/upload/get_token", url.Values{}, "")
 		if err != nil {
 			return "", "", err
@@ -316,7 +270,9 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (str
 			CallbackVar string `json:"callback_var"`
 		}{}
 		json.Unmarshal(initData.Callback, &cbInfo)
-
+		if err := context.Cause(ctx); err != nil {
+			return "", "", context.Cause(ctx)
+		}
 		res, err := ossUploadFile(ctx, token, initData, cbInfo.Callback, cbInfo.CallbackVar, pathStr)
 		if err != nil {
 			return "", "", err
@@ -341,6 +297,9 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (str
 }
 
 func ossUploadFile(ctx context.Context, t *uploadtokenData, init *uploadInitData, cb, cbVar, filePath string) (map[string]any, error) {
+	if err := context.Cause(ctx); err != nil {
+		return nil, context.Cause(ctx)
+	}
 	cfg := oss.LoadDefaultConfig().
 		WithCredentialsProvider(credentials.NewStaticCredentialsProvider(t.AccessKeyId, t.AccessKeySecret, t.SecurityToken)).
 		WithRegion("cn-shenzhen").
@@ -349,10 +308,10 @@ func ossUploadFile(ctx context.Context, t *uploadtokenData, init *uploadInitData
 	client := oss.NewClient(cfg)
 
 	putRequest := &oss.PutObjectRequest{
-		Bucket:      oss.Ptr(init.Bucket),
-		Key:         oss.Ptr(init.Object),
-		Callback:    oss.Ptr(base64.StdEncoding.EncodeToString([]byte(cb))),
-		CallbackVar: oss.Ptr(base64.StdEncoding.EncodeToString([]byte(cbVar))),
+		Bucket:      new(init.Bucket),
+		Key:         new(init.Object),
+		Callback:    new(base64.StdEncoding.EncodeToString([]byte(cb))),
+		CallbackVar: new(base64.StdEncoding.EncodeToString([]byte(cbVar))),
 	}
 
 	result, err := client.PutObjectFromFile(ctx, putRequest, filePath)
@@ -362,83 +321,6 @@ func ossUploadFile(ctx context.Context, t *uploadtokenData, init *uploadInitData
 	return result.CallbackResult, nil
 }
 
-func refreshToken() bool {
-	current := Conf.Load()
-	if current == nil || current.Token.RefreshToken == "" {
-		log.Printf("[TOKEN] 刷新失败: 缺少 RefreshToken")
-		return false
-	}
-	if time.Until(current.Token.ExpireAt) > 10*time.Minute {
-		return true
-	}
-	form := url.Values{"refresh_token": {strings.TrimSpace(current.Token.RefreshToken)}}
-	resp, err := http.PostForm("https://passportapi.115.com/open/refreshToken", form)
-	if err != nil {
-		log.Printf("[TOKEN] 网络请求失败: %v", err)
-		return false
-	}
-	defer resp.Body.Close()
-	var res struct {
-		State   int    `json:"state"`
-		Message string `json:"message"`
-		Data    struct {
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-			ExpiresIn    int    `json:"expires_in"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err == nil && res.State == 1 {
-		newConf := *current
-		newConf.Token.AccessToken = res.Data.AccessToken
-		newConf.Token.ExpireAt = time.Now().Add(time.Duration(res.Data.ExpiresIn) * time.Second)
-		if res.Data.RefreshToken != "" {
-			newConf.Token.RefreshToken = res.Data.RefreshToken
-		}
-
-		Conf.Store(&newConf)
-		d, _ := yaml.Marshal(&newConf)
-		_ = os.WriteFile(configFileName, d, 0644)
-		log.Printf("[TOKEN] 刷新成功! 有效期至: %v", newConf.Token.ExpireAt.Format("15:04:05"))
-		return true
-	}
-	log.Printf("[TOKEN] 刷新失败: %v", res.Message)
-	return false
-}
-
-func startCron() {
-	go func() {
-		for {
-			if refreshToken() {
-				time.Sleep(5 * time.Minute)
-			} else {
-				time.Sleep(1 * time.Minute)
-			}
-		}
-	}()
-}
-func LoadConfig() {
-	file, err := os.ReadFile(configFileName)
-	if err != nil {
-		Conf.Store(&config{})
-		log.Fatalf("[CONFIG] 配置文件不存在: %s", configFileName)
-	}
-
-	var initialConf config
-	if err := yaml.Unmarshal(file, &initialConf); err != nil {
-		Conf.Store(&config{})
-		log.Fatalf("[CONFIG] 配置文件格式解析失败: %v，使用空配置", err)
-	}
-
-	if initialConf.Token.RefreshToken == "" {
-		log.Fatalf("[CONFIG] 警告: 配置不完整，缺少 RefreshToken")
-	}
-	Conf.Store(&initialConf)
-	if initialConf.Token.ExpireAt.Unix() > 0 {
-		log.Printf("[CONFIG] 已加载配置，Token 有效期至: %v", initialConf.Token.ExpireAt.Format("2006-01-02 15:04:05"))
-	}
-
-	startCron()
-}
 func sha1Hash(s []byte) string {
 	hash := sha1.Sum(s)
 	return strings.ToUpper(hex.EncodeToString(hash[:]))
@@ -482,4 +364,77 @@ func stringToInt64(s string) int64 {
 		return 0
 	}
 	return i
+}
+
+type apiResponse struct {
+	State   bool            `json:"state"`
+	Message string          `json:"message"`
+	Code    int             `json:"code"`
+	Data    json.RawMessage `json:"data"`
+}
+
+type downloadUrlData map[string]struct {
+	FileName string `json:"file_name"`
+	Url      struct {
+		Url string `json:"url"`
+	} `json:"url"`
+}
+
+type addfolderData struct {
+	FileName string `json:"file_name"`
+	FileId   string `json:"file_id"`
+}
+
+type updatafileData struct {
+	FileName string `json:"file_name"`
+}
+
+type folderinfoData struct {
+	FileId      string `json:"file_id"`
+	Count       int    `json:"count"`
+	FolderCount int    `json:"folder_count"`
+}
+
+type filelistData struct {
+	Fid string `json:"fid"`
+	Aid string `json:"aid"`
+	Fc  string `json:"fc"`
+	Fn  string `json:"fn"`
+	Fs  int64  `json:"fs"`
+	Pc  string `json:"pc"`
+	Isv int    `json:"isv"`
+}
+
+type uploadInitData struct {
+	PickCode  string          `json:"pick_code"`
+	Status    int             `json:"status"`
+	FileId    string          `json:"file_id"`
+	Target    string          `json:"target"`
+	Bucket    string          `json:"bucket"`
+	Object    string          `json:"object"`
+	SignKey   string          `json:"sign_key"`
+	SignCheck string          `json:"sign_check"`
+	Callback  json.RawMessage `json:"callback"`
+}
+
+type callbackInfo struct {
+	Callback    string `json:"callback"`
+	CallbackVar string `json:"callback_var"`
+}
+
+type uploadtokenData struct {
+	Endpoint        string `json:"endpoint"`
+	AccessKeySecret string `json:"AccessKeySecret"`
+	SecurityToken   string `json:"SecurityToken"`
+	Expiration      string `json:"Expiration"`
+	AccessKeyId     string `json:"AccessKeyId"`
+}
+
+type ossCallbackResp struct {
+	State   bool   `json:"state"`
+	Message string `json:"message"`
+	Data    struct {
+		FileId   string `json:"file_id"`
+		PickCode string `json:"pick_code"`
+	} `json:"data"`
 }
