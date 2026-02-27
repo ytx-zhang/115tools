@@ -518,8 +518,10 @@ func cleanCloud(ctx context.Context, fPath, fid string, safe bool) error {
 	var err error
 	if safe {
 		err = open115.MoveFile(ctx, fid, tempFid)
+		slog.Info("[同步] 移动云端文件到临时目录", "path", fPath)
 	} else {
 		err = open115.DeleteFile(ctx, fid)
+		slog.Info("[同步] 删除云端文件", "path", fPath)
 	}
 	if err != nil && strings.Contains(err.Error(), "不存在或已经删除") {
 		slog.Warn("[同步] 清理云端文件失败", "path", fPath, "error", err)
