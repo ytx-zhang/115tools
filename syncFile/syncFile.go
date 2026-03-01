@@ -17,6 +17,7 @@ import (
 )
 
 var (
+	syncPath     string
 	tempFid      string
 	needRetry    atomic.Bool
 	wg           sync.WaitGroup
@@ -112,8 +113,8 @@ func runSync(parentCtx context.Context) {
 		return
 	}
 	config := config.Get()
-	rootPath := config.SyncPath
-	if rootPath == "" {
+	syncPath = config.SyncPath
+	if syncPath == "" {
 		slog.Error("[同步] SyncPath 未设置")
 		return
 	}
@@ -124,7 +125,7 @@ func runSync(parentCtx context.Context) {
 		closeDB()
 		slog.Info("[同步] 任务结束", "处理文件", stats.completed.Load(), "失败任务", stats.failed.Load())
 	}()
-	rootID, err := initRoot(ctx, config.SyncPath)
+	rootID, err := initRoot(ctx, syncPath)
 	if err != nil {
 		slog.Error("[同步] 初始化失败", "错误信息", err)
 		return
@@ -485,6 +486,7 @@ func cloudScan(ctx context.Context, currentPath string) {
 		}
 	}
 }
+
 func cloudSync(ctx context.Context, currentPath string, cloudFID string) {
 	select {
 	case sem <- struct{}{}:
@@ -492,6 +494,7 @@ func cloudSync(ctx context.Context, currentPath string, cloudFID string) {
 	case <-ctx.Done():
 		return
 	}
+	slog.Info("[同步] 获取文件夹信息", "路径", currentPath)
 	_, count, folderCount, err := open115.FolderInfo(ctx, currentPath)
 	if err != nil {
 		slog.Error("[同步] 获取文件夹信息失败", "路径", currentPath, "错误信息", err)
@@ -517,12 +520,6 @@ func cloudSync(ctx context.Context, currentPath string, cloudFID string) {
 			continue
 		}
 		cloudPath := currentPath + "/" + item.Fn
-		if item.Fc == "0" {
-			wg.Go(func() {
-				cloudSync(ctx, cloudPath, item.Fid)
-			})
-			continue
-		}
 		var savedPath string
 		isStrm := item.Isv == 1
 		if isStrm {
@@ -531,27 +528,37 @@ func cloudSync(ctx context.Context, currentPath string, cloudFID string) {
 			savedPath = cloudPath
 		}
 		dbFid := dbGetFid(savedPath)
-		if dbFid == "" {
-			stats.total.Add(1)
-			if isStrm {
-				open115.SaveStrmFile(item.Pc, item.Fid, savedPath)
-				slog.Info("[同步] 新增STRM文件", "路径", savedPath)
-			} else {
-				if err := open115.DownloadFile(ctx, item.Pc, savedPath); err != nil {
-					markFailed(fmt.Sprintf("[同步] [%s] 下载文件失败: %s (%v)", time.Now().Format("15:04"), savedPath, err))
-				} else {
-					slog.Info("[同步] 下载文件成功", "路径", savedPath)
-				}
+		if item.Fc == "0" {
+			if dbFid == "" {
+				_ = os.MkdirAll(savedPath, 0755)
+				dbSaveRecord(savedPath, item.Fid, -1)
 			}
-			dbSaveRecord(savedPath, item.Fid, item.Fs)
-			stats.completed.Add(1)
-			continue
-		}
-		if dbFid != item.Fid {
-			slog.Info("[同步] 清理云端冗余项", "路径", savedPath)
-			stats.total.Add(1)
-			if err := cloudCleanTask(ctx, savedPath); err != nil {
-				markFailed(fmt.Sprintf("[同步] [%s] 清理云端冗余项失败: %s (%v)", time.Now().Format("15:04"), savedPath, err))
+			wg.Go(func() {
+				cloudSync(ctx, cloudPath, item.Fid)
+			})
+		} else {
+			if dbFid == "" {
+				stats.total.Add(1)
+				if isStrm {
+					open115.SaveStrmFile(item.Pc, item.Fid, savedPath)
+					slog.Info("[同步] 新增STRM文件", "路径", savedPath)
+				} else {
+					if err := open115.DownloadFile(ctx, item.Pc, savedPath); err != nil {
+						markFailed(fmt.Sprintf("[同步] [%s] 下载文件失败: %s (%v)", time.Now().Format("15:04"), savedPath, err))
+					} else {
+						slog.Info("[同步] 下载文件成功", "路径", savedPath)
+					}
+				}
+				dbSaveRecord(savedPath, item.Fid, item.Fs)
+				stats.completed.Add(1)
+				continue
+			}
+			if dbFid != item.Fid {
+				slog.Info("[同步] 清理云端冗余项", "路径", savedPath)
+				stats.total.Add(1)
+				if err := cloudCleanTask(ctx, savedPath); err != nil {
+					markFailed(fmt.Sprintf("[同步] [%s] 清理云端冗余项失败: %s (%v)", time.Now().Format("15:04"), savedPath, err))
+				}
 			}
 		}
 	}

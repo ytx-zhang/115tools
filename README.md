@@ -1,183 +1,90 @@
+
 # 115tools
 
-> 一套围绕 115 网盘服务的 Go 工具，提供文件同步、`.strm` 文件生成/消费、Emby 302 转向和相关辅助功能。
+`115tools` 是一套面向 115 网盘的辅助工具集，主要功能包括本地与云端文件同步、`.strm` 文件的生成、以及为 Emby 提供 302 直连以优化播放体验。
 
----
+### 100% AI 编写
 
-## 🔍 项目概述
+## 本人没学过编程！
 
-`115tools` 由多个独立但互相协作的包组成，旨在简化与 115 网盘交互的常见任务：
+# 使用请注意：本项目由 AI 生成，功能可能不完善，风险自负
 
-- 自动**本地文件夹与115云盘**之间的双向同步
-- 在本地生成或下载 `.strm` 文件并管理云端资源
-- 提供 **HTTP API** 作为控制面板，同时包含 **Server‑Sent Events** 实时状态
-- 代理 Emby 请求并执行 302 重定向优化
-- 封装115的 REST API，含速率控制和重试逻辑
+## ✨ 核心功能
 
-适合家庭媒体服务器用户、Emby/Jellyfin 环境或想用脚本自动化 115 网盘操作的开发者。
+  - 本地目录与 115 云盘的双向一致性维护。
+  - 本地扫描：检测新增/变更文件并上传；对于大于 10MB 的视频，会在上传后在本地生成 `.strm` 索引并把原文件移动到云端。
+  - 云端扫描：检查云端是否有新文件或变更，必要时自动从云端下载并在本地生成 `.strm` 索引文件。
+  - 自动清理：对本地已删除的文件执行云端清理（视频文件和文件夹移入 `temp_path` 指定的临时目录）。
 
----
+- STRM 生成与管理（`addStrm`）
+  - 递归扫描指定云端目录，批量生成 `.strm` 文件，其他文件下载到本地。
 
-## 📂 目录结构
+- Emby 302 直链代理（`emby302`）
+  - 代理 Emby 请求，不需要转码的视频 302 指向 115 的直链。
+  - 支持字幕重定向到fontinass，使用他的noproxy标签镜像不用套娃反代了。
 
-```
-compose.yaml            # docker-compose 配置
-Dockerfile              # 镜像构建文件
-go.mod                  # Go 模块定义
-index.html              # Web 界面（简单控制面板）
-main.go                 # 程序入口
+## 🚀 快速上手
 
-addStrm/                # .strm 任务处理
-config/                 # 配置加载与 token 刷新
-emby302/                # Emby 代理与 302 逻辑
-open115/                # 115 平台 API 封装
-strmServer/             # 简单的 strm 文件下载重定向
-syncFile/               # 本地与云端同步逻辑 + BoltDB 存储
-```
+### 1) 获取凭据
 
----
+准备好 115 的 `refresh_token`（可通过openlist的115 Open 接口文档获取），用于在容器内的 `data/config.yaml` 中配置。
 
-## ⚙️ 配置说明
+### 2) 编辑配置
 
-配置文件位于 `data/config.yaml`，启动时由 `config.LoadConfig` 加载并在运行中定期刷新 Token。
-
-### 配置结构
+在 `data/config.yaml` 中填写必要字段，例如：
 
 ```yaml
 token:
-  access_token: ""
-  refresh_token: "<必填>"
-  expire_at: ""       # 自动写入
+  refresh_token: "你的_115_REFRESH_TOKEN"
 
-sync_path: "/path/to/local/folder"
-strm_path: "/Cloud/StrmFolder"
-temp_path: "/Cloud/TempFolder"
-strm_url: "http://your-server:8080"
-emby_url: "http://emby.local:8095"
-fontinass_url: "http://subtitle-proxy.local"
+sync_path: "/strm媒体库"     # 容器内用于同步的本地目录（必须映射到宿主并与云端路径一致）
+strm_path: "/待刮削"    # 容器内用于生成/存放 .strm 的共享目录（必须映射到宿主并与云端路径一致）
+temp_path: "/temp"             # 云端临时/回收目录
+strm_url: "http://ip:8080" # 本服务地址，用于 .strm 文件中的播放 URL和web页面
+emby_url: "http://ip:8095" # 原始 Emby 服务器地址（代理目标）
+fontinass_url: ""                  # 可选：外挂字幕代理地址
 ```
 
-- **token** – 115 API 凭据，必须提供 `refresh_token`。
-- **sync_path** – 本地待同步目录。将与云盘保持镜像状态。
-- **strm_path** – 云盘中用于生成 `.strm` 文件的根目录。
-- **temp_path** – 临时移动/清理操作使用的云盘目录。
-- **strm_url** – 服务器地址，用于生成 `.strm` 内容。
-- **emby_url** 与 **fontinass_url** – 代理 Emby 与字幕服务的地址。
+重要：`sync_path` 与 `strm_path` 是“宿主 ↔ 容器 ↔ 云端”三级关联的公用目录。使用 Docker 部署时，必须在卷映射中把宿主目录正确挂载到容器内的 `sync_path` 和 `strm_path`。容器内路径必须与配置中一致，否则同步与 STRM 功能无法正常工作。
 
-> 注意：`config` 包会自动在后台每隔 1–5 分钟刷新 Access Token。
+示例（docker-compose 中的卷映射示意）：
 
----
-
-## 🛠️ 模块详细说明
-
-### `config`
-
-- 管理配置结构与并发访问
-- 自动刷新 115 `access_token` (`refreshToken` 模式)
-- 提供 `config.Get()` 全局访问
-
-### `open115`
-
-115 REST API 封装，包含：
-
-- 通用 `request` 函数，带速率限制、重试与错误解析
-- 文件/文件夹操作：`UploadFile`、`AddFolder`、`MoveFile`、`DeleteFile`、`UpdataFile`
-- 列表与信息：`FolderInfo`、`FileList`、`GetDownloadUrl`
-- 支持 OSS 上传流程和 SHA1 校验
-
-内部使用了令牌桶速率限制与单例信号量保护，确保不触发 115 限制。
-
-### `syncFile`
-
-负责本地与 115 云盘目录的同步。核心特点：
-
-- 使用 BoltDB (`/app/data/files.db`) 缓存 `本地路径 -> (fid|size)`
-- 扫描云端与本地，比较差异并：
-  - 上传新文件（大于 10MB 的视频会转为 `.strm`）
-  - 创建缺失的云端文件夹
-  - 清理云盘上已删除/移动的项（可安全移至 `temp_path`）
-
-相关文件：`syncFile.go`、`db.go`。
-
-### `addStrm`
-
-用于在本地生成或下载 `.strm` 文件并移动相应的云盘资源：
-
-- 遍历 `strm_path` 目录
-- 对视频文件生成 `.strm` 内容，或者下载文件
-- 下载完成后（且无错误）将对应的云盘文件移动到 `temp_path`
-
-### `strmServer`
-
-- `RedirectToRealURL` HTTP 处理器
-- 接受 `?pickcode=...` 请求，使用 User-Agent 作为缓存键
-- 缓存 10 分钟，防止频繁查询 115 并减少带宽
-- 支持并发请求去重（pendingTasks map）
-
-### `emby302`
-
-为 Emby 提供智能代理：
-
-- 监听 `:8095`，将请求转发到真实 Emby
-- 在视频 `/original` 链接中尝试获取最终 CDN 地址并返回 302
-- 对字幕请求可重定向到独立服务
-- 注入自定义 JS 修复跨域/超时逻辑，增强播放稳定性
-
-### `main.go`
-
-入口程序：
-
-- 加载配置，启动日志化
-- 注册 `/sync`, `/strm`, `/logs`, `/download` 等接口
-- 启动 `emby302` 后台服务
-
----
-
-## 📡 HTTP 控制接口
-
-| 方法 | 路径         | 描述                            |
-|------|--------------|----------------------------------|
-| GET  | `/sync`      | 启动/重试同步任务              |
-| POST | `/sync`      | 同上                            |
-| GET  | `/stopsync`  | 取消正在进行的同步              |
-| GET  | `/strm`      | 启动/重试 `.strm` 添加任务      |
-| GET  | `/stopstrm`  | 停止 `.strm` 添加任务           |
-| GET  | `/logs`      | SSE 实时推送全局状态            |
-| GET  | `/download`  | `strmServer.RedirectToRealURL`  |
-
-服务器监听 `:8080`，`/logs` 返回的数据示例：
-
-```json
-{"sync":{"total":10,"completed":2,...},"strm":{...}}
+```yaml
+services:
+  115tools:
+    image: 115tools:latest
+    container_name: 115tools
+    restart: always
+    volumes:
+      - ./data:/app/data                    # 配置与 DB
+      - /media/strm媒体库:/strm媒体库       # 对应 config.sync_path
+      - /media/待刮削:/待刮削       # 对应 config.strm_path
+    ports:
+      - "8080:8080"  # 管理面板 & strm URL
+      - "8095:8095"  # emby302 代理端口
 ```
 
+## 🛠️ 使用说明
+
+- 管理面板：访问 `http://<host>:8080`，界面提供手动触发 `sync` / `strm` 任务以及 SSE 实时状态（`/logs`）。
+- 同步触发：调用 `GET /sync` 或 `POST /sync` 可启动同步任务；`GET /stopsync` 停止。
+- STRM 触发：调用 `GET /strm` 启动 `.strm` 生成任务；`GET /stopstrm` 停止。
+
+同步行为要点：
+- 本地上传或清理后，程序会对云端进行一致性校验；若云端出现新文件或需下载的资源，程序会自动从云端下载并在本地生成 `.strm`（若为视频）。
+- 对于本地的 `.strm` 文件，程序会读取其中的 pickcode 来关联云端真实文件，必要时执行移动/改名操作以保持云端目录整洁。
+
+## 注意事项
+115同步目录的操作除了把刮削好的文件丢到115，千万不能直接删除115文件，本程序完全没处理这种情况，需要删除直接本地删除然后同步到115。
+## 部署建议
+
+使用 Docker/Compose 部署，确保 `./data`、`sync_path`、`strm_path` 等目录在宿主机上已准备并映射到容器中。
+
+
+## 反馈与贡献
+
+有问题也可以在 issues 里描述你的部署环境与配置样例，便于定位问题。
+交流qq群:1025795951 尽量qq群里说 我几乎不看github
 ---
 
-## 🚀 运行方式
-
-### 本地运行
-
-```bash
-go run main.go
-```
-
-务必先编辑 `data/config.yaml` 并确保 `token.refresh_token` 可用。
-
-### Docker/Compose
-
-```bash
-docker build -t 115tools .
-docker-compose up -d
-```
-
-`compose.yaml` 已预定义数据卷和端口映射，配置文件与数据库位于宿主机 `./data`。
-
----
-
-## 📝 许可证
-
-本项目采用 **MIT 许可证**，你可以自由使用、修改并分发，详见 LICENSE 文件。
-
----
-
-> 有任何问题或功能建议，欢迎提出 Issue 或直接修改代码后发起 PR。
+> 免责声明：本项目用于学习和自助管理目的，请遵守 115 网盘的服务条款。
