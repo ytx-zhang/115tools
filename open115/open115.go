@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,8 +26,16 @@ import (
 const baseDomain = "https://proapi.115.com"
 
 var (
-	limiter = rate.NewLimiter(rate.Limit(2), 3)
-	sem     = make(chan struct{}, 1)
+	limiter   = rate.NewLimiter(rate.Limit(2), 3)
+	sem       = make(chan struct{}, 1)
+	apiClient = &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        10,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		Timeout: 30 * time.Second,
+	}
 )
 
 func request[T any](ctx context.Context, method, endpoint string, params url.Values, ua string) (*T, error) {
@@ -50,7 +59,7 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 		if method == "POST" {
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := apiClient.Do(req)
 		if err != nil {
 			if context.Cause(ctx) != nil {
 				return nil, context.Cause(ctx)
@@ -72,7 +81,7 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 		if !res.State {
 			lastErr = fmt.Errorf("115报错: %s code: %d", res.Message, res.Code)
 			if strings.Contains(res.Message, "稍后再试") {
-				slog.Warn("[115报错]", "message", res.Message)
+				slog.Warn("[115报错]", "接口消息", res.Message)
 				select {
 				case <-time.After(5 * time.Second):
 					continue
@@ -94,7 +103,7 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 
 func GetDownloadUrl(ctx context.Context, pickCode, ua string) (string, string, string, error) {
 	if err := context.Cause(ctx); err != nil {
-		return "", "", "", context.Cause(ctx)
+		return "", "", "", err
 	}
 	params := url.Values{}
 	params.Set("pick_code", pickCode)
@@ -110,7 +119,7 @@ func GetDownloadUrl(ctx context.Context, pickCode, ua string) (string, string, s
 
 func AddFolder(ctx context.Context, pid, name string) (string, error) {
 	if err := context.Cause(ctx); err != nil {
-		return "", context.Cause(ctx)
+		return "", err
 	}
 	params := url.Values{}
 	params.Set("pid", pid)
@@ -124,7 +133,7 @@ func AddFolder(ctx context.Context, pid, name string) (string, error) {
 
 func MoveFile(ctx context.Context, fid, cid string) error {
 	if err := context.Cause(ctx); err != nil {
-		return context.Cause(ctx)
+		return err
 	}
 	params := url.Values{}
 	params.Set("file_ids", fid)
@@ -135,7 +144,7 @@ func MoveFile(ctx context.Context, fid, cid string) error {
 
 func DeleteFile(ctx context.Context, fid string) error {
 	if err := context.Cause(ctx); err != nil {
-		return context.Cause(ctx)
+		return err
 	}
 	params := url.Values{}
 	params.Set("file_ids", fid)
@@ -145,7 +154,7 @@ func DeleteFile(ctx context.Context, fid string) error {
 
 func UpdataFile(ctx context.Context, fid, name string) (string, error) {
 	if err := context.Cause(ctx); err != nil {
-		return "", context.Cause(ctx)
+		return "", err
 	}
 	params := url.Values{}
 	params.Set("file_id", fid)
@@ -159,7 +168,7 @@ func UpdataFile(ctx context.Context, fid, name string) (string, error) {
 
 func FolderInfo(ctx context.Context, path string) (string, int, int, error) {
 	if err := context.Cause(ctx); err != nil {
-		return "", 0, 0, context.Cause(ctx)
+		return "", 0, 0, err
 	}
 	params := url.Values{}
 	params.Set("path", path)
@@ -172,10 +181,10 @@ func FolderInfo(ctx context.Context, path string) (string, int, int, error) {
 
 func FileList(ctx context.Context, cid string) ([]filelistData, error) {
 	if err := context.Cause(ctx); err != nil {
-		return nil, context.Cause(ctx)
+		return nil, err
 	}
 	offset := 0
-	limit := 1000
+	limit := 1150
 	var allFiles []filelistData
 	for {
 		if err := context.Cause(ctx); err != nil {
@@ -202,10 +211,64 @@ func FileList(ctx context.Context, cid string) ([]filelistData, error) {
 	}
 	return allFiles, nil
 }
+func DownloadFile(ctx context.Context, pickcode, localPath string) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	_, url, _, err := GetDownloadUrl(ctx, pickcode, "")
+	if err != nil {
+		return err
+	}
 
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP status: %d", resp.StatusCode)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		return err
+	}
+
+	out, err := os.Create(localPath)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		out.Close()
+		if err != nil {
+			os.Remove(localPath)
+		}
+	}()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+func SaveStrmFile(pickcode, fid, localPath string) error {
+	content := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", config.Get().StrmUrl, pickcode, fid)
+	contentBytes := []byte(content)
+	if err := os.WriteFile(localPath, contentBytes, 0644); err != nil {
+		return err
+	}
+	return nil
+}
 func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (string, string, error) {
 	if err := context.Cause(ctx); err != nil {
-		return "", "", context.Cause(ctx)
+		return "", "", err
 	}
 	fileInfo, err := os.Stat(pathStr)
 	if err != nil {

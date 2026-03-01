@@ -20,7 +20,7 @@ func initDB() {
 	var err error
 	boltDB, err = bbolt.Open(dBPath, 0600, nil)
 	if err != nil {
-		slog.Info("[数据库] 初始化失败", "error", err)
+		slog.Info("[数据库] 初始化失败", "错误信息", err)
 	}
 	boltDB.MaxBatchDelay = 100 * time.Millisecond
 	boltDB.MaxBatchSize = 2000
@@ -33,13 +33,13 @@ func initDB() {
 func closeDB() {
 	if boltDB != nil {
 		if err := boltDB.Close(); err != nil {
-			slog.Error("[数据库] 关闭失败", "error", err)
+			slog.Error("[数据库] 关闭失败", "错误信息", err)
 		}
 	}
 }
 
-func dbGetFID(localPath string) string {
-	var fid string
+func dbGetInfo(localPath string) (fid string, size int64) {
+	size = -2
 	boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		v := b.Get([]byte(localPath))
@@ -47,11 +47,16 @@ func dbGetFID(localPath string) string {
 			return nil
 		}
 		s := string(v)
-		if before, _, ok := strings.Cut(s, "|"); ok {
+		if before, after, ok := strings.Cut(s, "|"); ok {
 			fid = before
+			size, _ = strconv.ParseInt(after, 10, 64)
 		}
 		return nil
 	})
+	return fid, size
+}
+func dbGetFid(localPath string) string {
+	fid, _ := dbGetInfo(localPath)
 	return fid
 }
 
@@ -64,16 +69,16 @@ func dbSaveRecord(localPath string, fid string, size int64) {
 	})
 }
 
-func dbListChildren(currentLocalPath string, res map[string]string) {
+func dbListChildren(currentLocalPath string, res map[string]struct{}) {
 	prefix := currentLocalPath + "/"
 	prefixBytes := []byte(prefix)
 
 	boltDB.View(func(tx *bbolt.Tx) error {
 		c := tx.Bucket(bucketName).Cursor()
-		for k, v := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, v = c.Next() {
+		for k, _ := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, _ = c.Next() {
 			remain := k[len(prefixBytes):]
 			if !bytes.Contains(remain, []byte("/")) {
-				res[string(remain)] = string(v)
+				res[string(remain)] = struct{}{}
 			}
 		}
 		return nil
@@ -101,7 +106,7 @@ func dbClearPath(fPath string) {
 	})
 
 	if err != nil {
-		slog.Error("[数据库] 清理路径失败", "path", fPath, "error", err)
+		slog.Error("[数据库] 清理路径失败", "路径", fPath, "错误信息", err)
 	}
 }
 

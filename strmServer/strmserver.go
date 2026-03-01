@@ -48,14 +48,13 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Vary", "User-Agent")
 	if val, ok := urlCache.Load(cacheKey); ok {
 		item := val.(cacheItem)
-		slog.Info("[strm请求:缓存命中]", "name", item.name, "ua", clientUA)
 		http.Redirect(w, r, item.url, http.StatusFound)
 		return
 	}
 	_, url, name, err := open115.GetDownloadUrl(r.Context(), pickCode, clientUA)
 	if err != nil || url == "" {
 		if err != nil {
-			slog.Error("[strm请求] 接口报错", "pickCode", pickCode, "error", err)
+			slog.Error("[strm请求] 接口报错", "pickCode", pickCode, "错误信息", err)
 		} else {
 			slog.Error("[strm请求] 接口返回链接为空", "pickCode", pickCode)
 		}
@@ -68,5 +67,5 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 		name: name,
 	})
 	http.Redirect(w, r, url, http.StatusFound)
-	slog.Info("[strm请求:云端获取]", "name", name, "ua", clientUA)
+	slog.Info("[strm请求]", "媒体文件名", name, "UA", clientUA)
 }

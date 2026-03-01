@@ -19,19 +19,34 @@ import (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	opts := &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.String(slog.TimeKey, a.Value.Time().Format("15:04:05"))
+			}
+			return a
+		},
+	}
+	handler := slog.NewTextHandler(os.Stdout, opts)
+	slog.SetDefault(slog.New(handler))
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
-	mainCtx, mainCancel := context.WithCancelCause(context.Background())
+	ctx, mainCancel := context.WithCancelCause(context.Background())
+	var wg sync.WaitGroup
 
-	config.LoadConfig(mainCtx, "/app/data/config.yaml")
+	if err := config.LoadConfig(ctx, &wg, "/app/data/config.yaml"); err != nil {
+		slog.Error("加载配置失败", "错误信息", err)
+		os.Exit(1)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./index.html")
 	})
+
+	mux.HandleFunc("GET /download", strmServer.RedirectToRealURL)
 
 	type GlobalStatus struct {
 		Sync syncFile.TaskStatsJSON `json:"sync"`
@@ -61,7 +76,7 @@ func main() {
 			select {
 			case <-r.Context().Done():
 				return
-			case <-mainCtx.Done(): // 核心：服务器关了，主动掐断日志流
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				send()
@@ -69,16 +84,13 @@ func main() {
 		}
 	})
 
-	mux.HandleFunc("GET /download", strmServer.RedirectToRealURL)
-
-	var mainWg sync.WaitGroup
 	mux.HandleFunc("GET /sync", func(w http.ResponseWriter, r *http.Request) {
-		syncFile.StartSync(mainCtx, &mainWg)
+		wg.Go(func() { syncFile.StartSync(ctx) })
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusAccepted)
 	})
 	mux.HandleFunc("POST /sync", func(w http.ResponseWriter, r *http.Request) {
-		syncFile.StartSync(mainCtx, &mainWg)
+		wg.Go(func() { syncFile.StartSync(ctx) })
 		w.WriteHeader(http.StatusAccepted)
 	})
 	mux.HandleFunc("GET /stopsync", func(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +100,7 @@ func main() {
 	})
 
 	mux.HandleFunc("GET /strm", func(w http.ResponseWriter, r *http.Request) {
-		addStrm.StartAddStrm(mainCtx, &mainWg)
+		wg.Go(func() { addStrm.StartAddStrm(ctx) })
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusAccepted)
 	})
@@ -98,11 +110,14 @@ func main() {
 		w.WriteHeader(http.StatusAccepted)
 	})
 
-	go emby302.StartEmby302(mainCtx)
+	wg.Go(func() { emby302.StartEmby302(ctx) })
 
 	server := &http.Server{
-		Addr:    ":8080",
-		Handler: mux,
+		Addr:         ":8080",
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	go func() {
@@ -112,16 +127,16 @@ func main() {
 		defer cancel()
 
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			slog.Warn("强制关闭 HTTP 服务器", "error", err)
+			slog.Warn("强制关闭 HTTP 服务器", "错误信息", err)
 		}
 	}()
 
 	slog.Info("服务器启动在 :8080")
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("服务器异常退出", "error", err)
+		slog.Error("服务器异常退出", "错误信息", err)
 	}
 
 	slog.Info("正在等待后台任务完成...")
-	mainWg.Wait()
+	wg.Wait()
 	slog.Info("程序已安全退出。")
 }

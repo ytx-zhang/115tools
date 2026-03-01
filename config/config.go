@@ -3,11 +3,13 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -38,30 +40,43 @@ type tokenConfig struct {
 	ExpireAt     time.Time `yaml:"expire_at" json:"expire_at"`
 }
 
-func LoadConfig(ctx context.Context, p string) {
+func LoadConfig(ctx context.Context, wg *sync.WaitGroup, p string) error {
 	configPath = p
 	file, err := os.ReadFile(configPath)
 	if err != nil {
-		slog.Error("[CONFIG] 配置文件不存在", "path", configPath)
-		os.Exit(1)
+		return fmt.Errorf("配置文件不存在或无法读取: %v", err)
 	}
 
 	var initialConf config
 	if err := yaml.Unmarshal(file, &initialConf); err != nil {
-		slog.Error("[CONFIG] 配置文件格式解析失败", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("配置文件格式解析失败: %v", err)
 	}
 
 	if initialConf.Token.RefreshToken == "" {
-		slog.Error("[CONFIG] 配置不完整，缺少 RefreshToken")
-		os.Exit(1)
+		return fmt.Errorf("配置不完整，缺少 RefreshToken")
 	}
 	conf.Store(&initialConf)
 	if initialConf.Token.ExpireAt.Unix() > 0 {
 		slog.Info("[CONFIG] 配置已加载", "token有效期", initialConf.Token.ExpireAt.Format("2006-01-02 15:04:05"))
 	}
 
-	startCron(ctx)
+	wg.Go(func() {
+		for {
+			success := refreshToken(ctx)
+			duration := 1 * time.Minute
+			if success {
+				duration = 5 * time.Minute
+			}
+			select {
+			case <-time.After(duration):
+				continue
+			case <-ctx.Done():
+				slog.Info("Token 刷新任务已安全停止")
+				return
+			}
+		}
+	})
+	return nil
 }
 func refreshToken(ctx context.Context) bool {
 	if err := context.Cause(ctx); err != nil {
@@ -77,15 +92,11 @@ func refreshToken(ctx context.Context) bool {
 	}
 	form := url.Values{"refresh_token": {strings.TrimSpace(current.Token.RefreshToken)}}
 	body := strings.NewReader(form.Encode())
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://passportapi.115.com/open/refreshToken", body)
-	if err != nil {
-		slog.Error("[TOKEN] 创建请求对象失败", "error", err)
-		return false
-	}
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://passportapi.115.com/open/refreshToken", body)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		slog.Error("[TOKEN] 网络请求失败", "error", err)
+		slog.Error("[TOKEN] 网络请求失败", "错误信息", err)
 		return false
 	}
 	defer resp.Body.Close()
@@ -112,24 +123,6 @@ func refreshToken(ctx context.Context) bool {
 		slog.Info("[TOKEN] 刷新成功!", "有效期至", newConf.Token.ExpireAt.Format("15:04:05"))
 		return true
 	}
-	slog.Error("[TOKEN] 刷新失败", "message", res.Message)
+	slog.Error("[TOKEN] 刷新失败", "接口消息", res.Message)
 	return false
-}
-func startCron(ctx context.Context) {
-	go func() {
-		for {
-			success := refreshToken(ctx)
-			duration := 1 * time.Minute
-			if success {
-				duration = 5 * time.Minute
-			}
-			select {
-			case <-time.After(duration):
-				continue
-			case <-ctx.Done():
-				slog.Info("Token 刷新任务已安全停止")
-				return
-			}
-		}
-	}()
 }

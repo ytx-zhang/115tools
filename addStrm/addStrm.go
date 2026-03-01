@@ -5,9 +5,7 @@ import (
 	"115tools/open115"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,7 +18,6 @@ import (
 var (
 	strmPath   string
 	tempPath   string
-	strmUrl    string
 	rootFids   []string
 	needRetry  atomic.Bool
 	wg         sync.WaitGroup
@@ -83,20 +80,18 @@ type task struct {
 	LocalPath string
 }
 
-func StartAddStrm(parentCtx context.Context, mainWg *sync.WaitGroup) {
+func StartAddStrm(parentCtx context.Context) {
 	needRetry.Store(true)
 	if stats.running.CompareAndSwap(false, true) {
-		mainWg.Go(func() {
-			defer stats.running.Store(false)
-			stats.Reset()
-			for needRetry.Swap(false) {
-				if err := context.Cause(parentCtx); err != nil {
-					slog.Error("[同步] 任务中止", "error", err)
-					return
-				}
-				runAddStrm(parentCtx)
+		defer stats.running.Store(false)
+		stats.Reset()
+		for needRetry.Swap(false) {
+			if err := context.Cause(parentCtx); err != nil {
+				slog.Error("[同步] 任务中止", "错误信息", err)
+				return
 			}
-		})
+			runAddStrm(parentCtx)
+		}
 	}
 }
 func StopAddStrm() {
@@ -111,12 +106,11 @@ func runAddStrm(parentCtx context.Context) {
 	select {
 	case <-time.After(1 * time.Second):
 	case <-ctx.Done():
-		slog.Info("[任务中止] 添加strm", "error", context.Cause(ctx))
+		slog.Info("[任务中止] 添加strm", "错误信息", context.Cause(ctx))
 		return
 	}
 	conf := config.Get()
 	strmPath = conf.StrmPath
-	strmUrl = conf.StrmUrl
 	tempPath = conf.TempPath
 	defer func() {
 		cancelFunc(fmt.Errorf("[添加strm] 任务结束"))
@@ -125,7 +119,7 @@ func runAddStrm(parentCtx context.Context) {
 	}()
 	startFid, _, _, err := open115.FolderInfo(ctx, strmPath)
 	if err != nil {
-		slog.Error("[添加strm] 无法获取起始目录id", "error", err)
+		slog.Error("[添加strm] 无法获取起始目录id", "错误信息", err)
 		return
 	}
 	taskQueue := make(chan task, 1000)
@@ -135,29 +129,31 @@ func runAddStrm(parentCtx context.Context) {
 				if context.Cause(ctx) != nil {
 					continue
 				}
-				current := stats.completed.Add(1)
-				total := stats.total.Load()
 				var err error
 				if task.Strm {
-					err = doCreateStrm(ctx, task)
+					err = open115.SaveStrmFile(task.PC, task.FID, task.LocalPath)
 				} else {
-					err = doDownloadFile(ctx, task)
+					err = open115.DownloadFile(ctx, task.PC, task.LocalPath)
 				}
 				if err != nil {
 					markFailed(fmt.Sprintf("[添加STRM] [%s] 失败: %s (%v)", time.Now().Format("15:04"), task.LocalPath, err))
-					slog.Error("[添加STRM] 失败", "进度", fmt.Sprintf("%d/%d", current, total), "path", filepath.Base(task.LocalPath), "error", err)
+					slog.Error("[添加STRM] 失败", "路径", task.LocalPath, "错误信息", err)
 				} else {
-					slog.Info("[添加STRM] 成功", "进度", fmt.Sprintf("%d/%d", current, total), "path", filepath.Base(task.LocalPath))
+					stats.completed.Add(1)
+					slog.Info("[添加STRM] 成功", "路径", task.LocalPath)
 				}
 			}
 		})
 	}
-	cloudScan(ctx, startFid, strmPath, taskQueue)
+	if err := cloudScan(ctx, startFid, strmPath, taskQueue); err != nil {
+		slog.Error("[添加STRM] 云端扫描文件夹失败", "错误信息", err)
+		cancelFunc(fmt.Errorf("[添加STRM] 云端扫描文件夹失败: %v", err))
+	}
 	close(taskQueue)
 	wg.Wait()
 
 	if err := context.Cause(ctx); err != nil {
-		slog.Warn("[任务中止] 生成strm过程中被中止", "error", err)
+		slog.Warn("[任务中止] 生成strm过程中被中止", "错误信息", err)
 		return
 	}
 	if stats.total.Load() == 0 {
@@ -169,22 +165,19 @@ func runAddStrm(parentCtx context.Context) {
 	}
 }
 
-func cloudScan(ctx context.Context, fid string, currentPath string, taskQueue chan task) {
-	select {
-	case <-ctx.Done():
-		return
-	case scanSem <- struct{}{}:
-		defer func() { <-scanSem }()
+func cloudScan(ctx context.Context, fid string, currentPath string, taskQueue chan task) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
 	}
-	slog.Info("[添加strm] 获取云端列表", "path", currentPath)
+	slog.Info("[添加strm] 获取云端列表", "路径", currentPath)
 	list, err := open115.FileList(ctx, fid)
 	if err != nil {
-		slog.Error("[添加strm] 获取云端列表失败", "path", currentPath, "error", err)
-		return
+		slog.Error("[添加strm] 获取云端列表失败", "路径", currentPath, "错误信息", err)
+		return err
 	}
 	for _, item := range list {
 		if err := context.Cause(ctx); err != nil {
-			return
+			return err
 		}
 		currentLocalPath := filepath.Join(currentPath, item.Fn)
 		if currentPath == strmPath {
@@ -211,61 +204,7 @@ func cloudScan(ctx context.Context, fid string, currentPath string, taskQueue ch
 			stats.total.Add(1)
 		}
 	}
-
-}
-
-func doCreateStrm(ctx context.Context, t task) error {
-	if err := context.Cause(ctx); err != nil {
-		return err
-	}
-	content := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", strmUrl, t.PC, t.FID)
-	err := os.WriteFile(t.LocalPath, []byte(content), 0644)
-	return err
-}
-
-func doDownloadFile(ctx context.Context, t task) error {
-	if err := context.Cause(ctx); err != nil {
-		return err
-	}
-	_, url, _, err := open115.GetDownloadUrl(ctx, t.PC, "")
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", "")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP status: %d", resp.StatusCode)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(t.LocalPath), 0755); err != nil {
-		return err
-	}
-
-	out, err := os.Create(t.LocalPath)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		out.Close()
-		if err != nil {
-			os.Remove(t.LocalPath)
-		}
-	}()
-
-	_, err = io.Copy(out, resp.Body)
-	return err
+	return nil
 }
 
 func performMoveFiles(ctx context.Context) {
@@ -274,14 +213,14 @@ func performMoveFiles(ctx context.Context) {
 	}
 	targetCID, _, _, err := open115.FolderInfo(ctx, tempPath)
 	if err != nil {
-		slog.Error("[添加strm] 无法获取移动文件", "error", err)
+		slog.Error("[添加strm] 无法获取移动文件", "错误信息", err)
 		return
 	}
 	fidsStr := strings.Join(rootFids, ",")
 	if err := open115.MoveFile(ctx, fidsStr, targetCID); err != nil {
 		markFailed(fmt.Sprintf("[添加STRM] [%s] 移动云盘文件失败: %v", time.Now().Format("15:04"), err))
-		slog.Error("[添加strm] 移动云盘文件失败", "error", err)
+		slog.Error("[添加strm] 移动云盘文件失败", "错误信息", err)
 	} else {
-		slog.Info("[添加strm] 成功移动文件至 TempPath", "count", len(rootFids))
+		slog.Info("[添加strm] 成功移动文件至 TempPath", "文件数量", len(rootFids))
 	}
 }
