@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -22,11 +23,13 @@ const (
 )
 
 var (
-	embyURL         string
-	fontInAssURL    string
-	strmUrl         string
-	itemIDRegex     = regexp.MustCompile(`/videos/(\w+)/original`)
-	subtitleRegex   = regexp.MustCompile(`(?i)Subtitles/.*Stream\.`)
+	embyURL            string
+	fontInAssURL       string
+	strmUrl            string
+	forceOriginalImage bool
+	itemIDRegex        = regexp.MustCompile(`/videos/(\w+)/original`)
+	subtitleRegex      = regexp.MustCompile(`(?i)Subtitles/.*Stream\.`)
+
 	sharedTransport = &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
@@ -45,17 +48,14 @@ var (
 	}
 )
 
-type embyMedia struct {
-	Path string `json:"Path"`
-	Name string `json:"Name"`
-}
-
 func StartEmby302(ctx context.Context) {
 	conf := config.Get()
 	embyURL = conf.EmbyUrl
 	fontInAssURL = conf.FontInAssUrl
 	strmUrl = conf.StrmUrl
-
+	if os.Getenv("FORCE_ORIGINAL_IMAGE") == "true" {
+		forceOriginalImage = true
+	}
 	var subProxy *httputil.ReverseProxy
 	if fontInAssURL != "" {
 		subTarget, _ := url.Parse(fontInAssURL)
@@ -81,53 +81,28 @@ func StartEmby302(ctx context.Context) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.ToLower(r.URL.Path)
-
+		path := r.URL.Path
 		if path == "/web/modules/htmlvideoplayer/plugin.js" {
 			handleJSInject(w, r)
 			return
 		}
-
 		if subProxy != nil && subtitleRegex.MatchString(path) {
-			slog.Info("[重定向字幕]", "URLPath", path)
 			subProxy.ServeHTTP(w, r)
 			return
 		}
-
-		if strings.Contains(path, "/items/") && strings.Contains(path, "/images/") {
-			if r.URL.RawQuery != "" {
-				query := r.URL.Query()
-				if query.Get("quality") != "" {
-					query.Set("quality", "100")
-					r.URL.RawQuery = query.Encode()
-				}
-			}
-		}
-		if strings.HasSuffix(path, "/playbackinfo") {
-			handlePlaybackInfoLogic(r.Context(), w, r)
+		if forceOriginalImage && strings.Contains(path, "/Items/") && strings.Contains(path, "/Images/") {
+			handleImage(w, r)
 			return
 		}
-
+		if strings.HasSuffix(path, "/PlaybackInfo") {
+			handlePlaybackInfo(w, r)
+			return
+		}
 		if strings.Contains(path, "/videos/") && strings.Contains(path, "/original") {
-			matches := itemIDRegex.FindStringSubmatch(path)
-			if len(matches) > 1 {
-				itemID := matches[1]
-				media, err := fetchMediaFromEmby(r.Context(), itemID, r.URL.Query())
-				if err == nil && strings.HasPrefix(media.Path, strmUrl) {
-					finalURL, err := getFinalLocation(r.Context(), media.Path, r.Header.Get("User-Agent"))
-					if err == nil {
-						slog.Info("[302 成功]", "媒体名称", media.Name)
-						http.Redirect(w, r, finalURL, http.StatusFound)
-						return
-					} else {
-						slog.Error("[302 失败]", "媒体名称", media.Name, "错误信息", err)
-					}
-				} else {
-					slog.Info("[302 跳过] 不符合 302 条件", "媒体名称", media.Name)
-				}
+			if handleVideo302(w, r) {
+				return
 			}
 		}
-
 		proxy.ServeHTTP(w, r)
 	})
 
@@ -156,52 +131,6 @@ func StartEmby302(ctx context.Context) {
 
 	slog.Info("Emby 302 服务已退出")
 }
-
-func fetchMediaFromEmby(ctx context.Context, itemID string, query url.Values) (*embyMedia, error) {
-	baseUrl, _ := strings.CutSuffix(embyURL, "/")
-	apiURL := fmt.Sprintf("%s/emby/Items/%s/PlaybackInfo?%s",
-		baseUrl, itemID, query.Encode())
-
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := sharedClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		MediaSources []embyMedia `json:"MediaSources"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	if len(result.MediaSources) > 0 {
-		return &result.MediaSources[0], nil
-	}
-	return nil, fmt.Errorf("no source found for this itemID")
-}
-
-func getFinalLocation(ctx context.Context, targetURL, ua string) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
-	req.Header.Set("User-Agent", ua)
-	resp, err := redirectClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if loc := resp.Header.Get("Location"); loc != "" {
-		return loc, nil
-	}
-	return "", fmt.Errorf("no redirect location found")
-}
-
 func handleJSInject(w http.ResponseWriter, r *http.Request) {
 	req, _ := http.NewRequest("GET", embyURL+r.URL.Path, nil)
 	maps.Copy(req.Header, r.Header)
@@ -286,8 +215,7 @@ func handleJSInject(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write(newBody)
 }
-
-func handlePlaybackInfoLogic(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	baseUrl, _ := strings.CutSuffix(embyURL, "/")
 	var bodyBytes []byte
 	if r.Method == "POST" && r.Body != nil {
@@ -300,7 +228,7 @@ func handlePlaybackInfoLogic(ctx context.Context, w http.ResponseWriter, r *http
 		if len(bodyBytes) > 0 {
 			bodyReader = strings.NewReader(string(bodyBytes))
 		}
-		req, _ := http.NewRequestWithContext(ctx, r.Method, apiURL, bodyReader)
+		req, _ := http.NewRequestWithContext(r.Context(), r.Method, apiURL, bodyReader)
 		maps.Copy(req.Header, r.Header)
 		req.Header.Del("Accept-Encoding")
 		resp, err := sharedClient.Do(req)
@@ -314,7 +242,6 @@ func handlePlaybackInfoLogic(ctx context.Context, w http.ResponseWriter, r *http
 	origQuery := r.URL.Query()
 	resp1, resBody1, err := doRequest(origQuery)
 	if err != nil {
-		slog.Error("[PlaybackInfo] 原始请求失败", "错误信息", err)
 		http.Error(w, "Backend Error", http.StatusBadGateway)
 		return
 	}
@@ -339,4 +266,94 @@ func handlePlaybackInfoLogic(ctx context.Context, w http.ResponseWriter, r *http
 	maps.Copy(w.Header(), resp1.Header)
 	w.WriteHeader(resp1.StatusCode)
 	w.Write(resBody1)
+}
+func handleImage(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	pos := query.Get("PositionTicks")
+	newQuery := url.Values{}
+	if pos != "" {
+		newQuery.Set("PositionTicks", pos)
+	}
+	targetPath := fmt.Sprintf("%s%s", strings.TrimSuffix(embyURL, "/"), r.URL.Path)
+	if qStr := newQuery.Encode(); qStr != "" {
+		targetPath += "?" + qStr
+	}
+	req, _ := http.NewRequestWithContext(r.Context(), "GET", targetPath, nil)
+	maps.Copy(req.Header, r.Header)
+	resp, err := sharedClient.Do(req)
+	if err != nil {
+		http.Error(w, "Backend Error", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	maps.Copy(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+func handleVideo302(w http.ResponseWriter, r *http.Request) bool {
+	path := strings.ToLower(r.URL.Path)
+	matches := itemIDRegex.FindStringSubmatch(path)
+	if len(matches) > 1 {
+		itemID := matches[1]
+		mediaPath, mediaName, err := fetchMediaFromEmby(r.Context(), itemID, r.URL.Query())
+		if err != nil {
+			slog.Error("[302 失败] 获取媒体信息出错", "ItemID", itemID, "错误", err)
+			return false
+		}
+		if !strings.HasPrefix(mediaPath, strmUrl) {
+			slog.Info("[302 跳过] 非 strm 路径", "媒体名称", mediaName, "路径", mediaPath)
+			return false
+		}
+		finalURL, err := getFinalLocation(r.Context(), mediaPath, r.Header.Get("User-Agent"))
+		if err != nil {
+			slog.Error("[302 失败] 获取直链失败", "媒体名称", mediaName, "路径", mediaPath, "错误", err)
+			return false
+		}
+		slog.Info("[302 成功]", "媒体名称", mediaName)
+		http.Redirect(w, r, finalURL, http.StatusFound)
+		return true
+	}
+	return false
+}
+func fetchMediaFromEmby(ctx context.Context, itemID string, query url.Values) (string, string, error) {
+	apiURL := fmt.Sprintf("%s/emby/Items/%s/PlaybackInfo?%s", embyURL, itemID, query.Encode())
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return "", "", err
+	}
+
+	resp, err := sharedClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		MediaSources []struct {
+			Path string `json:"Path"`
+			Name string `json:"Name"`
+		} `json:"MediaSources"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", err
+	}
+	if len(result.MediaSources) > 0 {
+		source := result.MediaSources[0]
+		return source.Path, source.Name, nil
+	}
+	return "", "", fmt.Errorf("no source found for this itemID")
+}
+func getFinalLocation(ctx context.Context, targetURL, ua string) (string, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
+	req.Header.Set("User-Agent", ua)
+	resp, err := redirectClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if loc := resp.Header.Get("Location"); loc != "" {
+		return loc, nil
+	}
+	return "", fmt.Errorf("no redirect location found")
 }

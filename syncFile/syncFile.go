@@ -21,8 +21,7 @@ var (
 	tempFid      string
 	needRetry    atomic.Bool
 	wg           sync.WaitGroup
-	sem          = make(chan struct{}, 3)
-	isCloudScan  atomic.Bool
+	scanSem      = make(chan struct{}, 3)
 	cancelFunc   context.CancelCauseFunc
 	localMapPool = sync.Pool{
 		New: func() any { return make(map[string]struct{}, 256) },
@@ -169,6 +168,7 @@ func initRoot(ctx context.Context, rootPath string) (string, error) {
 	if fid != "" {
 		return fid, nil
 	}
+	var isCloudScan atomic.Bool
 	isCloudScan.Store(true)
 	defer isCloudScan.Store(false)
 	slog.Info("[同步] 初次运行，开始初始化云端数据库...")
@@ -252,13 +252,23 @@ func localScan(ctx context.Context, currentPath string, currentCID string, uploa
 		if entry.IsDir() {
 			if dbSize == -2 {
 				slog.Info("[同步] 创建云端文件夹", "路径", fullPath)
-				newFid, err := open115.AddFolder(ctx, currentCID, name)
-				if err != nil {
-					cancelFunc(fmt.Errorf("创建云端文件夹[%s]失败: %v", fullPath, err))
-					return err
+				fid, addFolderErr := open115.AddFolder(ctx, currentCID, name)
+				if addFolderErr != nil && strings.Contains(addFolderErr.Error(), "该目录名称已存在") {
+					slog.Warn("[同步] 云端文件夹已存在", "路径", fullPath, "错误信息", addFolderErr)
+					addFolderErr = nil
+					newfid, _, _, err := open115.FolderInfo(ctx, fullPath)
+					if err != nil {
+						cancelFunc(fmt.Errorf("获取文件夹信息失败[%s]: %v", fullPath, err))
+						return err
+					}
+					fid = newfid
 				}
-				dbSaveRecord(fullPath, newFid, -1)
-				dbFid = newFid
+				if addFolderErr != nil {
+					cancelFunc(fmt.Errorf("创建云端文件夹[%s]失败: %v", fullPath, addFolderErr))
+					return addFolderErr
+				}
+				dbSaveRecord(fullPath, fid, -1)
+				dbFid = fid
 			}
 			if err := localScan(ctx, fullPath, dbFid, uploadTasks, deleteTasks); err != nil {
 				return err
@@ -444,8 +454,8 @@ func cloudScan(ctx context.Context, currentPath string) {
 	select {
 	case <-ctx.Done():
 		return
-	case sem <- struct{}{}:
-		defer func() { <-sem }()
+	case scanSem <- struct{}{}:
+		defer func() { <-scanSem }()
 	}
 
 	fid := dbGetFid(currentPath)
@@ -489,8 +499,8 @@ func cloudScan(ctx context.Context, currentPath string) {
 
 func cloudSync(ctx context.Context, currentPath string, cloudFID string) {
 	select {
-	case sem <- struct{}{}:
-		defer func() { <-sem }()
+	case scanSem <- struct{}{}:
+		defer func() { <-scanSem }()
 	case <-ctx.Done():
 		return
 	}

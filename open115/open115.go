@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
@@ -36,6 +37,7 @@ var (
 		},
 		Timeout: 30 * time.Second,
 	}
+	waitSec atomic.Int64
 )
 
 func request[T any](ctx context.Context, method, endpoint string, params url.Values, ua string) (*T, error) {
@@ -46,6 +48,12 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 		if err := limiter.Wait(ctx); err != nil {
 			return nil, context.Cause(ctx)
 		}
+		select {
+		case <-time.After(time.Duration(waitSec.Load()) * time.Second):
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		}
+		waitSec.Store(0)
 		urlStr := baseDomain + endpoint
 		var reqBody io.Reader
 		if method == "POST" {
@@ -65,12 +73,8 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 				return nil, context.Cause(ctx)
 			}
 			lastErr = err
-			select {
-			case <-time.After(2 * time.Second):
-				continue
-			case <-ctx.Done():
-				return nil, context.Cause(ctx)
-			}
+			waitSec.Store(1)
+			continue
 		}
 		var res apiResponse
 		err = json.NewDecoder(resp.Body).Decode(&res)
@@ -82,12 +86,8 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 			lastErr = fmt.Errorf("115报错: %s code: %d", res.Message, res.Code)
 			if strings.Contains(res.Message, "稍后再试") {
 				slog.Warn("[115报错]", "接口消息", res.Message)
-				select {
-				case <-time.After(5 * time.Second):
-					continue
-				case <-ctx.Done():
-					return nil, context.Cause(ctx)
-				}
+				waitSec.Store(3)
+				continue
 			}
 			return nil, lastErr
 		}
@@ -100,7 +100,6 @@ func request[T any](ctx context.Context, method, endpoint string, params url.Val
 
 	return nil, lastErr
 }
-
 func GetDownloadUrl(ctx context.Context, pickCode, ua string) (string, string, string, error) {
 	if err := context.Cause(ctx); err != nil {
 		return "", "", "", err
@@ -116,7 +115,6 @@ func GetDownloadUrl(ctx context.Context, pickCode, ua string) (string, string, s
 	}
 	return "", "", "", fmt.Errorf("未提取到下载信息")
 }
-
 func AddFolder(ctx context.Context, pid, name string) (string, error) {
 	if err := context.Cause(ctx); err != nil {
 		return "", err
@@ -130,7 +128,6 @@ func AddFolder(ctx context.Context, pid, name string) (string, error) {
 	}
 	return res.FileId, nil
 }
-
 func MoveFile(ctx context.Context, fid, cid string) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
@@ -139,9 +136,9 @@ func MoveFile(ctx context.Context, fid, cid string) error {
 	params.Set("file_ids", fid)
 	params.Set("to_cid", cid)
 	_, err := request[any](ctx, "POST", "/open/ufile/move", params, "")
+	waitSec.Store(1)
 	return err
 }
-
 func DeleteFile(ctx context.Context, fid string) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
@@ -151,7 +148,6 @@ func DeleteFile(ctx context.Context, fid string) error {
 	_, err := request[any](ctx, "POST", "/open/ufile/delete", params, "")
 	return err
 }
-
 func UpdataFile(ctx context.Context, fid, name string) (string, error) {
 	if err := context.Cause(ctx); err != nil {
 		return "", err
@@ -165,7 +161,6 @@ func UpdataFile(ctx context.Context, fid, name string) (string, error) {
 	}
 	return res.FileName, nil
 }
-
 func FolderInfo(ctx context.Context, path string) (string, int, int, error) {
 	if err := context.Cause(ctx); err != nil {
 		return "", 0, 0, err
@@ -178,7 +173,6 @@ func FolderInfo(ctx context.Context, path string) (string, int, int, error) {
 	}
 	return res.FileId, res.Count, res.FolderCount, nil
 }
-
 func FileList(ctx context.Context, cid string) ([]filelistData, error) {
 	if err := context.Cause(ctx); err != nil {
 		return nil, err
@@ -358,7 +352,6 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (str
 	}
 	return "", "", fmt.Errorf("未知上传状态: %d", initData.Status)
 }
-
 func ossUploadFile(ctx context.Context, t *uploadtokenData, init *uploadInitData, cb, cbVar, filePath string) (map[string]any, error) {
 	if err := context.Cause(ctx); err != nil {
 		return nil, context.Cause(ctx)
@@ -383,7 +376,6 @@ func ossUploadFile(ctx context.Context, t *uploadtokenData, init *uploadInitData
 	}
 	return result.CallbackResult, nil
 }
-
 func sha1Hash(s []byte) string {
 	hash := sha1.Sum(s)
 	return strings.ToUpper(hex.EncodeToString(hash[:]))
@@ -400,7 +392,6 @@ func fileSHA1(filePath string) (string, error) {
 	}
 	return strings.ToUpper(hex.EncodeToString(hash.Sum(nil))), nil
 }
-
 func fileSHA1Partial(filePath string, offset int64, length int64) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
