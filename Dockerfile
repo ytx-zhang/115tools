@@ -25,9 +25,7 @@ ENV TZ=Asia/Shanghai
 
 WORKDIR /app
 
-# 从构建阶段拷贝编译好的二进制文件和 index.html
 COPY --from=builder /app/server .
-COPY --from=builder /app/index.html .
 
 # 暴露你的后端端口
 EXPOSE 8080 8095

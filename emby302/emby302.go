@@ -4,7 +4,7 @@ import (
 	"115tools/config"
 	"bytes"
 	"context"
-	"encoding/json"
+	_ "embed"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,10 +12,11 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -23,25 +24,21 @@ const (
 )
 
 var (
-	embyURL            string
-	fontInAssURL       string
-	strmUrl            string
-	forceOriginalImage bool
-	itemIDRegex        = regexp.MustCompile(`/videos/(\w+)/original`)
-	subtitleRegex      = regexp.MustCompile(`(?i)Subtitles/.*Stream\.`)
+	embyURL      string
+	embyApiKey   string
+	fontInAssURL string
+	strmUrl      string
 
 	sharedTransport = &http.Transport{
-		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
-		IdleConnTimeout:     90 * time.Second,
 	}
 	sharedClient = &http.Client{
 		Transport: sharedTransport,
-		Timeout:   15 * time.Second,
+		Timeout:   30 * time.Second,
 	}
 	redirectClient = &http.Client{
 		Transport: sharedTransport,
-		Timeout:   5 * time.Second,
+		Timeout:   30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -53,9 +50,7 @@ func StartEmby302(ctx context.Context) {
 	embyURL = conf.EmbyUrl
 	fontInAssURL = conf.FontInAssUrl
 	strmUrl = conf.StrmUrl
-	if os.Getenv("FORCE_ORIGINAL_IMAGE") == "true" {
-		forceOriginalImage = true
-	}
+
 	var subProxy *httputil.ReverseProxy
 	if fontInAssURL != "" {
 		subTarget, _ := url.Parse(fontInAssURL)
@@ -86,19 +81,15 @@ func StartEmby302(ctx context.Context) {
 			handleJSInject(w, r)
 			return
 		}
-		if subProxy != nil && subtitleRegex.MatchString(path) {
+		if subProxy != nil && strings.Contains(path, "/Subtitles/") && strings.Contains(path, "/Stream.") {
 			subProxy.ServeHTTP(w, r)
-			return
-		}
-		if forceOriginalImage && strings.Contains(path, "/Items/") && strings.Contains(path, "/Images/") {
-			handleImage(w, r)
 			return
 		}
 		if strings.HasSuffix(path, "/PlaybackInfo") {
 			handlePlaybackInfo(w, r)
 			return
 		}
-		if strings.Contains(path, "/videos/") && strings.Contains(path, "/original") {
+		if strings.Contains(path, "/videos/") && strings.Contains(path, "/original.") {
 			if handleVideo302(w, r) {
 				return
 			}
@@ -131,6 +122,10 @@ func StartEmby302(ctx context.Context) {
 
 	slog.Info("Emby 302 服务已退出")
 }
+
+//go:embed patch.js
+var jsPatch []byte
+
 func handleJSInject(w http.ResponseWriter, r *http.Request) {
 	req, _ := http.NewRequest("GET", embyURL+r.URL.Path, nil)
 	maps.Copy(req.Header, r.Header)
@@ -144,91 +139,23 @@ func handleJSInject(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	jsPatch := `
-;(function(){
-    var fixCross = function(){
-        var m = window.defined ? window.defined["modules/htmlvideoplayer/plugin.js"] : null;
-        if(m && m.default && m.default.prototype) {
-            m.default.prototype.getCrossOriginValue = function(){ return null; };
-        } else { setTimeout(fixCross, 100); }
-    };
-    fixCross();
-    var oldSetSrc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src').set;
-    Object.defineProperty(HTMLMediaElement.prototype, 'src', {
-        set: function(val) {
-            var self = this;
-            this._is302Resource = false;
-            if (val && val.indexOf('/videos/') !== -1 && val.indexOf('/original') !== -1) {
-                fetch(val, { 
-                    method: 'HEAD', 
-                    redirect: 'manual'
-                }).then(function(resp) {
-                    if (resp.type === 'opaqueredirect') {
-                        self._is302Resource = true;
-                        console.log("[302] 探测结果：CDN 直链资源，已激活超时监控");
-                    } else {
-                        console.log("[302] 探测结果：普通本地资源");
-                    }
-                }).catch(function(err) {
-                    self._is302Resource = false;
-                });
-            }
-            oldSetSrc.call(this, val);
-        }
-    });
-    var lastPauseTime = 0;
-    document.addEventListener('pause', function(e) {
-        if (e.target.tagName === 'VIDEO') {
-            lastPauseTime = Date.now();
-        }
-    }, true);
-    document.addEventListener('play', function(e) {
-        var v = e.target;
-        if (v.tagName !== 'VIDEO' || v._isRefreshing || !v._is302Resource) return;
-        var now = Date.now();
-        var idle = lastPauseTime ? (now - lastPauseTime) : 0;
-        if (lastPauseTime > 0 && idle > 300000) {
-            console.warn("[302] CDN 链接已超时，正在物理重载地址...");
-            e.stopImmediatePropagation();
-            e.preventDefault();
-            var t = v.currentTime;
-            var s = v.src; 
-            v._isRefreshing = true;
-            lastPauseTime = 0;
-            v.pause();
-            v.src = s;
-            v.load();
-            var onLoaded = function() {
-                v.currentTime = t;
-                v.play().then(function(){ 
-                    v._isRefreshing = false; 
-                });
-                v.removeEventListener("loadedmetadata", onLoaded);
-            };
-            v.addEventListener("loadedmetadata", onLoaded);
-        }
-    }, true);
-})();`
-
-	newBody := append(body, []byte(jsPatch)...)
 	w.Header().Set("Content-Type", "application/javascript")
 	w.WriteHeader(http.StatusOK)
-	w.Write(newBody)
+	w.Write(body)
+	w.Write(jsPatch)
 }
 func handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
-	baseUrl, _ := strings.CutSuffix(embyURL, "/")
 	var bodyBytes []byte
-	if r.Method == "POST" && r.Body != nil {
+	if r.Body != nil {
 		bodyBytes, _ = io.ReadAll(r.Body)
-		r.Body.Close()
 	}
-	doRequest := func(query url.Values) (*http.Response, []byte, error) {
-		apiURL := fmt.Sprintf("%s%s?%s", baseUrl, r.URL.Path, query.Encode())
-		var bodyReader io.Reader
-		if len(bodyBytes) > 0 {
-			bodyReader = strings.NewReader(string(bodyBytes))
-		}
-		req, _ := http.NewRequestWithContext(r.Context(), r.Method, apiURL, bodyReader)
+	query := r.URL.Query()
+	if query.Get("MaxStreamingBitrate") != "200000000" {
+		query.Set("MaxStreamingBitrate", "4000000")
+	}
+	proxyReq := func(query url.Values) (*http.Response, []byte, error) {
+		apiURL := fmt.Sprintf("%s%s?%s", embyURL, r.URL.Path, query.Encode())
+		req, _ := http.NewRequestWithContext(r.Context(), r.Method, apiURL, bytes.NewReader(bodyBytes))
 		maps.Copy(req.Header, r.Header)
 		req.Header.Del("Accept-Encoding")
 		resp, err := sharedClient.Do(req)
@@ -236,124 +163,106 @@ func handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 			return nil, nil, err
 		}
 		defer resp.Body.Close()
-		resBody, err := io.ReadAll(resp.Body)
-		return resp, resBody, err
+		body, err := io.ReadAll(resp.Body)
+		return resp, body, err
 	}
-	origQuery := r.URL.Query()
-	resp1, resBody1, err := doRequest(origQuery)
+	resp, resBody, err := proxyReq(query)
 	if err != nil {
-		http.Error(w, "Backend Error", http.StatusBadGateway)
+		http.Error(w, "Proxy Error", http.StatusBadGateway)
 		return
 	}
+	result := gjson.GetBytes(resBody, "MediaSources.0.DirectStreamUrl")
 
-	shouldRetry := false
-	if bytes.Contains(resBody1, []byte("DirectStreamUrl")) &&
-		bytes.Contains(resBody1, []byte("ContainerBitrateExceedsLimit")) {
-		shouldRetry = true
-	}
-	if shouldRetry {
+	if result.Exists() && strings.Contains(result.Raw, "ContainerBitrateExceedsLimit") {
 		newQuery := r.URL.Query()
 		newQuery.Set("MaxStreamingBitrate", "200000000")
-		resp2, resBody2, err := doRequest(newQuery)
-		if err == nil {
-			maps.Copy(w.Header(), resp2.Header)
-			w.WriteHeader(resp2.StatusCode)
-			w.Write(resBody2)
-			slog.Info("[PlaybackInfo] 检测到码率限制转码，重试高码率请求")
-			return
+		if r2, b2, err := proxyReq(newQuery); err == nil {
+			newResult := gjson.GetBytes(b2, "MediaSources.0.DirectStreamUrl")
+			if newResult.Exists() && strings.Contains(newResult.Raw, "original.") {
+				resp, resBody = r2, b2
+				slog.Info("[PlaybackInfo] 重试高码率成功，已获得 Original 路径")
+			} else {
+				slog.Warn("[PlaybackInfo] 强制码率重试失败（仍需转码），回退至原始请求")
+			}
 		}
 	}
-	maps.Copy(w.Header(), resp1.Header)
-	w.WriteHeader(resp1.StatusCode)
-	w.Write(resBody1)
+	res := gjson.GetBytes(resBody, "MediaSources.0")
+	path := res.Get("Path").String()
+	if path != "" && strings.HasPrefix(path, strmUrl) {
+		streamUrl := res.Get("DirectStreamUrl").String()
+		if streamUrl != "" {
+			newStreamUrl := streamUrl + "&is302=1"
+			updatedBody, err := sjson.SetBytes(resBody, "MediaSources.0.DirectStreamUrl", newStreamUrl)
+			if err == nil {
+				resBody = updatedBody
+			}
+		}
+	}
+	maps.Copy(w.Header(), resp.Header)
+	w.Header().Del("Content-Length")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(resBody)
 }
-func handleImage(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	pos := query.Get("PositionTicks")
-	newQuery := url.Values{}
-	if pos != "" {
-		newQuery.Set("PositionTicks", pos)
+func handleVideo302(w http.ResponseWriter, r *http.Request) bool {
+	parts := strings.Split(r.URL.Path, "/")
+	var itemID string
+	for i, segment := range parts {
+		if segment == "videos" && i+1 < len(parts) {
+			itemID = parts[i+1]
+			break
+		}
 	}
-	targetPath := fmt.Sprintf("%s%s", strings.TrimSuffix(embyURL, "/"), r.URL.Path)
-	if qStr := newQuery.Encode(); qStr != "" {
-		targetPath += "?" + qStr
+	if itemID == "" {
+		return false
 	}
-	req, _ := http.NewRequestWithContext(r.Context(), "GET", targetPath, nil)
-	maps.Copy(req.Header, r.Header)
-	resp, err := sharedClient.Do(req)
+	mediaPath, mediaName, err := fetchMediaFromEmby(r.Context(), itemID, r.URL.Query())
 	if err != nil {
-		http.Error(w, "Backend Error", http.StatusBadGateway)
+		slog.Error("[302 失败] 获取媒体信息出错", "ItemID", itemID, "错误", err)
+		return false
+	}
+	if !strings.HasPrefix(mediaPath, strmUrl) {
+		slog.Info("[302 跳过] 非 strm 路径", "媒体名称", mediaName, "路径", mediaPath)
+		return false
+	}
+	finalURL, err := getFinalLocation(r.Context(), mediaPath, r.Header.Get("User-Agent"))
+	if err != nil {
+		slog.Error("[302 失败] 获取直链失败", "媒体名称", mediaName, "路径", mediaPath, "错误", err)
+		return false
+	}
+	slog.Info("[302 成功]", "媒体名称", mediaName)
+	http.Redirect(w, r, finalURL, http.StatusFound)
+	return true
+}
+func fetchMediaFromEmby(ctx context.Context, itemID string, query url.Values) (mediaPath, mediaName string, err error) {
+	apiURL := fmt.Sprintf("%s/emby/Items/%s/PlaybackInfo?%s", embyURL, itemID, query.Encode())
+	req, _ := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	var resp *http.Response
+	if resp, err = sharedClient.Do(req); err != nil {
 		return
 	}
 	defer resp.Body.Close()
-	maps.Copy(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
-}
-func handleVideo302(w http.ResponseWriter, r *http.Request) bool {
-	path := strings.ToLower(r.URL.Path)
-	matches := itemIDRegex.FindStringSubmatch(path)
-	if len(matches) > 1 {
-		itemID := matches[1]
-		mediaPath, mediaName, err := fetchMediaFromEmby(r.Context(), itemID, r.URL.Query())
-		if err != nil {
-			slog.Error("[302 失败] 获取媒体信息出错", "ItemID", itemID, "错误", err)
-			return false
-		}
-		if !strings.HasPrefix(mediaPath, strmUrl) {
-			slog.Info("[302 跳过] 非 strm 路径", "媒体名称", mediaName, "路径", mediaPath)
-			return false
-		}
-		finalURL, err := getFinalLocation(r.Context(), mediaPath, r.Header.Get("User-Agent"))
-		if err != nil {
-			slog.Error("[302 失败] 获取直链失败", "媒体名称", mediaName, "路径", mediaPath, "错误", err)
-			return false
-		}
-		slog.Info("[302 成功]", "媒体名称", mediaName)
-		http.Redirect(w, r, finalURL, http.StatusFound)
-		return true
-	}
-	return false
-}
-func fetchMediaFromEmby(ctx context.Context, itemID string, query url.Values) (string, string, error) {
-	apiURL := fmt.Sprintf("%s/emby/Items/%s/PlaybackInfo?%s", embyURL, itemID, query.Encode())
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return "", "", err
+
+	var body []byte
+	if body, err = io.ReadAll(resp.Body); err != nil {
+		return
 	}
 
-	resp, err := sharedClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		MediaSources []struct {
-			Path string `json:"Path"`
-			Name string `json:"Name"`
-		} `json:"MediaSources"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", "", err
-	}
-	if len(result.MediaSources) > 0 {
-		source := result.MediaSources[0]
-		return source.Path, source.Name, nil
-	}
-	return "", "", fmt.Errorf("no source found for this itemID")
+	results := gjson.GetManyBytes(body, "MediaSources.0.Path", "MediaSources.0.Name")
+	mediaPath = results[0].String()
+	mediaName = results[1].String()
+	return
 }
-func getFinalLocation(ctx context.Context, targetURL, ua string) (string, error) {
+func getFinalLocation(ctx context.Context, targetURL, ua string) (finalUrl string, err error) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	req.Header.Set("User-Agent", ua)
-	resp, err := redirectClient.Do(req)
-	if err != nil {
-		return "", err
+	var resp *http.Response
+	if resp, err = redirectClient.Do(req); err != nil {
+		return
 	}
 	defer resp.Body.Close()
 
-	if loc := resp.Header.Get("Location"); loc != "" {
-		return loc, nil
+	if finalUrl = resp.Header.Get("Location"); finalUrl == "" {
+		err = fmt.Errorf("获取的重定向链接为空")
 	}
-	return "", fmt.Errorf("no redirect location found")
+	return
 }

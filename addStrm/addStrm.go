@@ -8,18 +8,18 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/tidwall/sjson"
 )
 
 var (
 	strmPath   string
 	tempPath   string
 	rootFids   []string
-	needRetry  atomic.Bool
 	wg         sync.WaitGroup
 	scanSem    = make(chan struct{}, 3)
 	cancelFunc context.CancelCauseFunc
@@ -47,24 +47,15 @@ func (s *taskStats) Reset() {
 	s.failedErrors = s.failedErrors[:0]
 }
 
-type TaskStatsJSON struct {
-	Total     int64    `json:"total"`
-	Completed int64    `json:"completed"`
-	Failed    int64    `json:"failed"`
-	Errors    []string `json:"errors"`
-	Running   bool     `json:"running"`
-}
-
-func GetStatus() TaskStatsJSON {
+func GetStatus() string {
 	stats.mu.Lock()
 	defer stats.mu.Unlock()
-	return TaskStatsJSON{
-		Total:     stats.total.Load(),
-		Completed: stats.completed.Load(),
-		Failed:    stats.failed.Load(),
-		Errors:    slices.Clone(stats.failedErrors),
-		Running:   stats.running.Load(),
-	}
+	data, _ := sjson.Set("", "total", stats.total.Load())
+	data, _ = sjson.Set(data, "completed", stats.completed.Load())
+	data, _ = sjson.Set(data, "failed", stats.failed.Load())
+	data, _ = sjson.Set(data, "running", stats.running.Load())
+	data, _ = sjson.Set(data, "errors", stats.failedErrors)
+	return data
 }
 func markFailed(reason string) {
 	stats.mu.Lock()
@@ -81,17 +72,10 @@ type task struct {
 }
 
 func StartAddStrm(parentCtx context.Context) {
-	needRetry.Store(true)
 	if stats.running.CompareAndSwap(false, true) {
 		defer stats.running.Store(false)
 		stats.Reset()
-		for needRetry.Swap(false) {
-			if err := context.Cause(parentCtx); err != nil {
-				slog.Error("[同步] 任务中止", "错误信息", err)
-				return
-			}
-			runAddStrm(parentCtx)
-		}
+		runAddStrm(parentCtx)
 	}
 }
 func StopAddStrm() {
@@ -115,7 +99,6 @@ func runAddStrm(parentCtx context.Context) {
 	defer func() {
 		cancelFunc(fmt.Errorf("[添加strm] 任务结束"))
 		rootFids = nil
-		slog.Info("[添加strm] 任务结束", "处理文件", stats.completed.Load(), "失败任务", stats.failed.Load())
 	}()
 	startFid, _, _, err := open115.FolderInfo(ctx, strmPath)
 	if err != nil {
@@ -163,6 +146,7 @@ func runAddStrm(parentCtx context.Context) {
 	if len(stats.failedErrors) == 0 && len(rootFids) > 0 {
 		performMoveFiles(ctx)
 	}
+	slog.Info("[添加strm] 任务结束", "总数", stats.total.Load())
 }
 
 func cloudScan(ctx context.Context, fid string, currentPath string, taskQueue chan task) error {
@@ -179,30 +163,32 @@ func cloudScan(ctx context.Context, fid string, currentPath string, taskQueue ch
 		if err := context.Cause(ctx); err != nil {
 			return err
 		}
-		currentLocalPath := filepath.Join(currentPath, item.Fn)
+		itemFid := item.Get("fid").String()
+		fullPath := filepath.Join(currentPath, item.Get("fn").String())
 		if currentPath == strmPath {
-			rootFids = append(rootFids, item.Fid)
+			rootFids = append(rootFids, itemFid)
 		}
+		if item.Get("fc").String() == "0" {
+			_ = os.MkdirAll(fullPath, 0755)
+			cloudScan(ctx, itemFid, fullPath, taskQueue)
+			continue
+		}
+		isStrm := item.Get("isv").Int() == 1
+		finalPath := fullPath
 
-		if item.Fc == "0" {
-			_ = os.MkdirAll(currentLocalPath, 0755)
-			cloudScan(ctx, item.Fid, currentLocalPath, taskQueue)
-		} else {
-			finalPath := currentLocalPath
-			if item.Isv == 1 {
-				finalPath = finalPath[:len(finalPath)-len(filepath.Ext(finalPath))] + ".strm"
-			}
-			if _, err := os.Stat(finalPath); err == nil {
-				continue
-			}
-			taskQueue <- task{
-				Strm:      item.Isv == 1,
-				PC:        item.Pc,
-				FID:       item.Fid,
-				LocalPath: finalPath,
-			}
-			stats.total.Add(1)
+		if isStrm {
+			finalPath = strings.TrimSuffix(fullPath, filepath.Ext(fullPath)) + ".strm"
 		}
+		if _, err := os.Stat(finalPath); err == nil {
+			continue
+		}
+		taskQueue <- task{
+			Strm:      isStrm,
+			PC:        item.Get("pc").String(),
+			FID:       itemFid,
+			LocalPath: finalPath,
+		}
+		stats.total.Add(1)
 	}
 	return nil
 }

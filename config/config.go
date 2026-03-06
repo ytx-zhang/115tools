@@ -2,8 +2,8 @@ package config
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tidwall/gjson"
 	"gopkg.in/yaml.v3"
 )
 
@@ -91,8 +92,8 @@ func refreshToken(ctx context.Context) bool {
 		return true
 	}
 	form := url.Values{"refresh_token": {strings.TrimSpace(current.Token.RefreshToken)}}
-	body := strings.NewReader(form.Encode())
-	req, _ := http.NewRequestWithContext(ctx, "POST", "https://passportapi.115.com/open/refreshToken", body)
+	reqBody := strings.NewReader(form.Encode())
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://passportapi.115.com/open/refreshToken", reqBody)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -100,21 +101,17 @@ func refreshToken(ctx context.Context) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	var res struct {
-		State   int    `json:"state"`
-		Message string `json:"message"`
-		Data    struct {
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-			ExpiresIn    int    `json:"expires_in"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err == nil && res.State == 1 {
+	body, _ := io.ReadAll(resp.Body)
+	result := gjson.ParseBytes(body)
+	data := result.Get("data")
+	if result.Get("state").Int() == 1 {
 		newConf := *current
-		newConf.Token.AccessToken = res.Data.AccessToken
-		newConf.Token.ExpireAt = time.Now().Add(time.Duration(res.Data.ExpiresIn) * time.Second)
-		if res.Data.RefreshToken != "" {
-			newConf.Token.RefreshToken = res.Data.RefreshToken
+
+		newConf.Token.AccessToken = data.Get("access_token").String()
+		newConf.Token.ExpireAt = time.Now().Add(time.Duration(data.Get("expires_in").Int()) * time.Second)
+		newRefreshToken := data.Get("refresh_token").String()
+		if newRefreshToken != "" {
+			newConf.Token.RefreshToken = newRefreshToken
 		}
 
 		conf.Store(&newConf)
@@ -123,6 +120,6 @@ func refreshToken(ctx context.Context) bool {
 		slog.Info("[TOKEN] 刷新成功!", "有效期至", newConf.Token.ExpireAt.Format("15:04:05"))
 		return true
 	}
-	slog.Error("[TOKEN] 刷新失败", "接口消息", res.Message)
+	slog.Error("[TOKEN] 刷新失败", "接口消息", result.Get("message"))
 	return false
 }

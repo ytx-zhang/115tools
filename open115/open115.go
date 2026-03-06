@@ -6,7 +6,6 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,112 +20,107 @@ import (
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
+	"github.com/go-resty/resty/v2"
+	"github.com/tidwall/gjson"
 	"golang.org/x/time/rate"
 )
 
 const baseDomain = "https://proapi.115.com"
 
 var (
-	limiter   = rate.NewLimiter(rate.Limit(2), 3)
-	sem       = make(chan struct{}, 1)
-	apiClient = &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConns:        10,
-			MaxIdleConnsPerHost: 10,
-			IdleConnTimeout:     90 * time.Second,
-		},
-		Timeout: 30 * time.Second,
-	}
-	waitSec atomic.Int64
+	limiter     = rate.NewLimiter(rate.Limit(2), 3)
+	sem         = make(chan struct{}, 2)
+	waitSec     atomic.Int64
+	restyClient = resty.New().
+			SetBaseURL(baseDomain).
+			SetTimeout(30 * time.Second).
+			SetRetryCount(2).
+			SetRetryWaitTime(1 * time.Second).
+			OnBeforeRequest(func(c *resty.Client, r *resty.Request) error {
+			if err := limiter.Wait(r.Context()); err != nil {
+				return err
+			}
+			if ws := waitSec.Load(); ws > 0 {
+				select {
+				case <-time.After(time.Duration(ws) * time.Second):
+				case <-r.Context().Done():
+					return r.Context().Err()
+				}
+			}
+			return nil
+		}).
+		AddRetryCondition(func(r *resty.Response, err error) bool {
+			if err != nil {
+				waitSec.Store(1)
+				return true
+			}
+			if strings.Contains(r.String(), "稍后再试") {
+				slog.Warn("[115报错]", "接口消息", "触发频率限制，等待3秒")
+				waitSec.Store(3)
+				return true
+			}
+			return false
+		})
 )
 
-func request[T any](ctx context.Context, method, endpoint string, params url.Values, ua string) (*T, error) {
+func request(ctx context.Context, method, endpoint string, params url.Values, ua string) (data gjson.Result, err error) {
 	sem <- struct{}{}
-	defer func() { <-sem }()
-	var lastErr error
-	for range 3 {
-		if err := limiter.Wait(ctx); err != nil {
-			return nil, context.Cause(ctx)
-		}
-		select {
-		case <-time.After(time.Duration(waitSec.Load()) * time.Second):
-		case <-ctx.Done():
-			return nil, context.Cause(ctx)
-		}
+	defer func() {
+		<-sem
 		waitSec.Store(0)
-		urlStr := baseDomain + endpoint
-		var reqBody io.Reader
-		if method == "POST" {
-			reqBody = strings.NewReader(params.Encode())
-		} else if params != nil {
-			urlStr += "?" + params.Encode()
-		}
-		req, _ := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
-		req.Header.Set("Authorization", "Bearer "+config.Get().Token.AccessToken)
-		req.Header.Set("User-Agent", ua)
-		if method == "POST" {
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		}
-		resp, err := apiClient.Do(req)
-		if err != nil {
-			if context.Cause(ctx) != nil {
-				return nil, context.Cause(ctx)
-			}
-			lastErr = err
-			waitSec.Store(1)
-			continue
-		}
-		var res apiResponse
-		err = json.NewDecoder(resp.Body).Decode(&res)
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("解析响应失败: %w", err)
-		}
-		if !res.State {
-			lastErr = fmt.Errorf("115报错: %s code: %d", res.Message, res.Code)
-			if strings.Contains(res.Message, "稍后再试") {
-				slog.Warn("[115报错]", "接口消息", res.Message)
-				waitSec.Store(3)
-				continue
-			}
-			return nil, lastErr
-		}
-		var data T
-		if len(res.Data) > 0 && string(res.Data) != "null" {
-			_ = json.Unmarshal(res.Data, &data)
-		}
-		return &data, nil
-	}
+	}()
+	var resp *resty.Response
+	resp, err = restyClient.R().
+		SetContext(ctx).
+		SetHeader("Authorization", "Bearer "+config.Get().Token.AccessToken).
+		SetHeader("User-Agent", ua).
+		SetQueryParamsFromValues(params).
+		SetFormDataFromValues(params).
+		Execute(method, endpoint)
 
-	return nil, lastErr
+	if err != nil {
+		return
+	}
+	res := gjson.ParseBytes(resp.Body())
+	if !res.Get("state").Bool() {
+		err = fmt.Errorf("115报错: %s code: %d", res.Get("message").String(), res.Get("code").Int())
+		return
+	}
+	data = res.Get("data")
+	return
 }
-func GetDownloadUrl(ctx context.Context, pickCode, ua string) (string, string, string, error) {
-	if err := context.Cause(ctx); err != nil {
-		return "", "", "", err
+func GetDownloadUrl(ctx context.Context, pickCode, ua string) (fid, downloadUrl, name string, err error) {
+	if err = context.Cause(ctx); err != nil {
+		return
 	}
 	params := url.Values{}
 	params.Set("pick_code", pickCode)
-	res, err := request[downloadUrlData](ctx, "POST", "/open/ufile/downurl", params, ua)
-	if err != nil {
-		return "", "", "", err
+	var data gjson.Result
+	if data, err = request(ctx, "POST", "/open/ufile/downurl", params, ua); err == nil {
+		firstItem := data.Get("@values|0")
+		fid = data.Get("@keys|0").String()
+
+		if !firstItem.Exists() || fid == "" {
+			err = fmt.Errorf("未提取到下载信息: %s", data.Raw)
+			return
+		}
+		downloadUrl = firstItem.Get("url.url").String()
+		name = firstItem.Get("file_name").String()
 	}
-	for fid, v := range *res {
-		return fid, v.Url.Url, v.FileName, nil
-	}
-	return "", "", "", fmt.Errorf("未提取到下载信息")
+	return
 }
-func AddFolder(ctx context.Context, pid, name string) (string, error) {
-	if err := context.Cause(ctx); err != nil {
-		return "", err
+func AddFolder(ctx context.Context, pid, name string) (fid string, err error) {
+	if err = context.Cause(ctx); err != nil {
+		return
 	}
 	params := url.Values{}
 	params.Set("pid", pid)
 	params.Set("file_name", name)
-	res, err := request[addfolderData](ctx, "POST", "/open/folder/add", params, "")
-	if err != nil {
-		return "", err
+	var data gjson.Result
+	if data, err = request(ctx, "POST", "/open/folder/add", params, ""); err == nil {
+		fid = data.Get("file_id").String()
 	}
-	return res.FileId, nil
+	return
 }
 func MoveFile(ctx context.Context, fid, cid string) error {
 	if err := context.Cause(ctx); err != nil {
@@ -135,7 +129,7 @@ func MoveFile(ctx context.Context, fid, cid string) error {
 	params := url.Values{}
 	params.Set("file_ids", fid)
 	params.Set("to_cid", cid)
-	_, err := request[any](ctx, "POST", "/open/ufile/move", params, "")
+	_, err := request(ctx, "POST", "/open/ufile/move", params, "")
 	waitSec.Store(1)
 	return err
 }
@@ -145,65 +139,69 @@ func DeleteFile(ctx context.Context, fid string) error {
 	}
 	params := url.Values{}
 	params.Set("file_ids", fid)
-	_, err := request[any](ctx, "POST", "/open/ufile/delete", params, "")
+	_, err := request(ctx, "POST", "/open/ufile/delete", params, "")
 	return err
 }
-func UpdataFile(ctx context.Context, fid, name string) (string, error) {
-	if err := context.Cause(ctx); err != nil {
-		return "", err
+func UpdateFile(ctx context.Context, fid, name string) (newName string, err error) {
+	if err = context.Cause(ctx); err != nil {
+		return
 	}
 	params := url.Values{}
 	params.Set("file_id", fid)
 	params.Set("file_name", name)
-	res, err := request[updatafileData](ctx, "POST", "/open/ufile/update", params, "")
-	if err != nil {
-		return "", err
+	var data gjson.Result
+	if data, err = request(ctx, "POST", "/open/ufile/update", params, ""); err == nil {
+		newName = data.Get("file_name").String()
 	}
-	return res.FileName, nil
+	return
 }
-func FolderInfo(ctx context.Context, path string) (string, int, int, error) {
-	if err := context.Cause(ctx); err != nil {
-		return "", 0, 0, err
+func FolderInfo(ctx context.Context, path string) (fid string, fileCount, folderCount int64, err error) {
+	if err = context.Cause(ctx); err != nil {
+		return
 	}
 	params := url.Values{}
 	params.Set("path", path)
-	res, err := request[folderinfoData](ctx, "GET", "/open/folder/get_info", params, "")
-	if err != nil {
-		return "", 0, 0, err
+	var data gjson.Result
+	if data, err = request(ctx, "GET", "/open/folder/get_info", params, ""); err == nil {
+		fid = data.Get("file_id").String()
+		fileCount = data.Get("count").Int()
+		folderCount = data.Get("folder_count").Int()
 	}
-	return res.FileId, res.Count, res.FolderCount, nil
+	return
 }
-func FileList(ctx context.Context, cid string) ([]filelistData, error) {
-	if err := context.Cause(ctx); err != nil {
-		return nil, err
+func FileList(ctx context.Context, cid string) (allFiles []gjson.Result, err error) {
+	if err = context.Cause(ctx); err != nil {
+		return
 	}
 	offset := 0
 	limit := 1150
-	var allFiles []filelistData
+	params := url.Values{}
+	params.Set("cid", cid)
+	params.Set("show_dir", "1")
+	params.Set("limit", strconv.Itoa(limit))
 	for {
-		if err := context.Cause(ctx); err != nil {
-			return nil, context.Cause(ctx)
-		}
-		params := url.Values{}
-		params.Set("cid", cid)
 		params.Set("offset", strconv.Itoa(offset))
-		params.Set("limit", strconv.Itoa(limit))
-		params.Set("show_dir", "1")
-		dataList, err := request[[]filelistData](ctx, "GET", "/open/ufile/files", params, "")
+
+		var data gjson.Result
+		data, err = request(ctx, "GET", "/open/ufile/files", params, "")
 		if err != nil {
-			return nil, err
+			return
 		}
-		count := len(*dataList)
+		items := data.Array()
+		count := len(items)
 		if count == 0 {
 			break
 		}
-		allFiles = append(allFiles, (*dataList)...)
+		allFiles = append(allFiles, items...)
 		offset += count
 		if count < limit {
 			break
 		}
+		if err = context.Cause(ctx); err != nil {
+			return
+		}
 	}
-	return allFiles, nil
+	return
 }
 func DownloadFile(ctx context.Context, pickcode, localPath string) error {
 	if err := context.Cause(ctx); err != nil {
@@ -260,114 +258,115 @@ func SaveStrmFile(pickcode, fid, localPath string) error {
 	}
 	return nil
 }
-func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (string, string, error) {
-	if err := context.Cause(ctx); err != nil {
-		return "", "", err
+func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (fid, pickCode string, err error) {
+	if err = context.Cause(ctx); err != nil {
+		return
 	}
 	fileInfo, err := os.Stat(pathStr)
 	if err != nil {
-		return "", "", fmt.Errorf("获取文件信息失败: %v", err)
+		err = fmt.Errorf("获取文件信息失败: %v", err)
+		return
 	}
 	fileName := fileInfo.Name()
 	fileSize := fileInfo.Size()
-	fileSha1, err := fileSHA1(pathStr)
-	if err != nil {
-		return "", "", fmt.Errorf("计算文件 SHA1 失败: %v", err)
+	var fileSha1 string
+	if fileSha1, err = fileSHA1(pathStr); err != nil {
+		err = fmt.Errorf("计算文件 SHA1 失败: %v", err)
+		return
 	}
-	preSha1, err := fileSHA1Partial(pathStr, 0, 128)
-	if err != nil {
-		return "", "", fmt.Errorf("计算文件前128位 SHA1 失败: %v", err)
+	var preSha1 string
+	if preSha1, err = fileSHA1Partial(pathStr, 0, 128); err != nil {
+		err = fmt.Errorf("计算文件前128位 SHA1 失败: %v", err)
+		return
 	}
+
 	params := url.Values{}
 	params.Set("file_name", fileName)
 	params.Set("file_size", fmt.Sprintf("%d", fileSize))
 	params.Set("target", fmt.Sprintf("U_1_%s", cid))
 	params.Set("fileid", fileSha1)
-	params.Set("pre_id", preSha1)
+	params.Set("preid", preSha1)
 	params.Set("topupload", "0")
 	if signKey != "" && signVal != "" {
 		params.Set("sign_key", signKey)
 		params.Set("sign_val", signVal)
 	}
-	if err := context.Cause(ctx); err != nil {
-		return "", "", context.Cause(ctx)
+	var initData gjson.Result
+	if initData, err = request(ctx, "POST", "/open/upload/init", params, ""); err != nil {
+		return
 	}
-	initData, err := request[uploadInitData](ctx, "POST", "/open/upload/init", params, "")
-	if err != nil {
-		return "", "", err
-	}
-
-	switch initData.Status {
+	status := initData.Get("status").Int()
+	switch status {
 	case 2:
-		return initData.FileId, initData.PickCode, nil
+		return initData.Get("file_id").String(), initData.Get("pick_code").String(), nil
+
 	case 7:
-		signCheck := initData.SignCheck
+		signCheck := initData.Get("sign_check").String()
 		signParts := strings.Split(signCheck, "-")
 		if len(signParts) != 2 {
-			return "", "", fmt.Errorf("签名检查格式错误: %v", signParts)
+			err = fmt.Errorf("签名检查格式错误: %v", signParts)
+			return
 		}
 		offset := stringToInt64(signParts[0])
 		length := stringToInt64(signParts[1])
-		signVal, _ := fileSHA1Partial(pathStr, offset, length)
-		if err := context.Cause(ctx); err != nil {
-			return "", "", context.Cause(ctx)
-		}
-		return UploadFile(ctx, pathStr, cid, initData.SignKey, signVal)
+		newSignVal, _ := fileSHA1Partial(pathStr, offset, length)
+		return UploadFile(ctx, pathStr, cid, initData.Get("sign_key").String(), newSignVal)
+
 	case 1:
-		if err := context.Cause(ctx); err != nil {
-			return "", "", context.Cause(ctx)
+		var tokenData gjson.Result
+		if tokenData, err = request(ctx, "GET", "/open/upload/get_token", url.Values{}, ""); err != nil {
+			return
 		}
-		token, err := request[uploadtokenData](ctx, "GET", "/open/upload/get_token", url.Values{}, "")
-		if err != nil {
-			return "", "", err
+		var cbResp map[string]any
+		if cbResp, err = ossUploadFile(ctx, tokenData, initData, pathStr); err != nil {
+			err = fmt.Errorf("OSS调用底层报错: %w", err)
+			return
 		}
+		state, ok := cbResp["state"].(bool)
+		if !ok || !state {
+			err = fmt.Errorf("OSS状态异常或格式错误: %+v", cbResp)
+			return
+		}
+		data, ok := cbResp["data"].(map[string]any)
+		if !ok || data == nil {
+			err = fmt.Errorf("响应中缺少有效的 data 节点: %+v", cbResp)
+			return
+		}
+		fid, _ = data["file_id"].(string)
+		pickCode, _ = data["pick_code"].(string)
 
-		cbInfo := struct {
-			Callback    string `json:"callback"`
-			CallbackVar string `json:"callback_var"`
-		}{}
-		json.Unmarshal(initData.Callback, &cbInfo)
-		if err := context.Cause(ctx); err != nil {
-			return "", "", context.Cause(ctx)
+		if fid == "" || pickCode == "" {
+			err = fmt.Errorf("data 节点中 fid/pickcode 缺失或类型错误: %+v", cbResp)
+			return
 		}
-		res, err := ossUploadFile(ctx, token, initData, cbInfo.Callback, cbInfo.CallbackVar, pathStr)
-		if err != nil {
-			return "", "", err
-		}
-		var cbResp ossCallbackResp
-		resBytes, _ := json.Marshal(res)
-		if err := json.Unmarshal(resBytes, &cbResp); err != nil {
-			return "", "", fmt.Errorf("解析OSS回调数据失败: %w", err)
-		}
-
-		if !cbResp.State {
-			return "", "", fmt.Errorf("OSS回调错误: %s", cbResp.Message)
-		}
-
-		if cbResp.Data.FileId == "" {
-			return "", "", fmt.Errorf("OSS回调成功但未获取到文件ID")
-		}
-
-		return cbResp.Data.FileId, cbResp.Data.PickCode, nil
+		return
+	default:
+		err = fmt.Errorf("未知上传状态: %d", status)
+		return
 	}
-	return "", "", fmt.Errorf("未知上传状态: %d", initData.Status)
 }
-func ossUploadFile(ctx context.Context, t *uploadtokenData, init *uploadInitData, cb, cbVar, filePath string) (map[string]any, error) {
+func ossUploadFile(ctx context.Context, t, init gjson.Result, filePath string) (map[string]any, error) {
 	if err := context.Cause(ctx); err != nil {
 		return nil, context.Cause(ctx)
 	}
 	cfg := oss.LoadDefaultConfig().
-		WithCredentialsProvider(credentials.NewStaticCredentialsProvider(t.AccessKeyId, t.AccessKeySecret, t.SecurityToken)).
+		WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			t.Get("AccessKeyId").String(),
+			t.Get("AccessKeySecret").String(),
+			t.Get("SecurityToken").String(),
+		)).
 		WithRegion("cn-shenzhen").
-		WithEndpoint(t.Endpoint)
-
+		WithEndpoint(t.Get("endpoint").String())
+	cb := init.Get("callback.callback").String()
+	cbVar := init.Get("callback.callback_var").String()
+	cbBase64 := base64.StdEncoding.EncodeToString([]byte(cb))
+	cbVarBase64 := base64.StdEncoding.EncodeToString([]byte(cbVar))
 	client := oss.NewClient(cfg)
-
 	putRequest := &oss.PutObjectRequest{
-		Bucket:      new(init.Bucket),
-		Key:         new(init.Object),
-		Callback:    new(base64.StdEncoding.EncodeToString([]byte(cb))),
-		CallbackVar: new(base64.StdEncoding.EncodeToString([]byte(cbVar))),
+		Bucket:      new(init.Get("bucket").String()),
+		Key:         new(init.Get("object").String()),
+		Callback:    new(cbBase64),
+		CallbackVar: new(cbVarBase64),
 	}
 
 	result, err := client.PutObjectFromFile(ctx, putRequest, filePath)
@@ -418,77 +417,4 @@ func stringToInt64(s string) int64 {
 		return 0
 	}
 	return i
-}
-
-type apiResponse struct {
-	State   bool            `json:"state"`
-	Message string          `json:"message"`
-	Code    int             `json:"code"`
-	Data    json.RawMessage `json:"data"`
-}
-
-type downloadUrlData map[string]struct {
-	FileName string `json:"file_name"`
-	Url      struct {
-		Url string `json:"url"`
-	} `json:"url"`
-}
-
-type addfolderData struct {
-	FileName string `json:"file_name"`
-	FileId   string `json:"file_id"`
-}
-
-type updatafileData struct {
-	FileName string `json:"file_name"`
-}
-
-type folderinfoData struct {
-	FileId      string `json:"file_id"`
-	Count       int    `json:"count"`
-	FolderCount int    `json:"folder_count"`
-}
-
-type filelistData struct {
-	Fid string `json:"fid"`
-	Aid string `json:"aid"`
-	Fc  string `json:"fc"`
-	Fn  string `json:"fn"`
-	Fs  int64  `json:"fs"`
-	Pc  string `json:"pc"`
-	Isv int    `json:"isv"`
-}
-
-type uploadInitData struct {
-	PickCode  string          `json:"pick_code"`
-	Status    int             `json:"status"`
-	FileId    string          `json:"file_id"`
-	Target    string          `json:"target"`
-	Bucket    string          `json:"bucket"`
-	Object    string          `json:"object"`
-	SignKey   string          `json:"sign_key"`
-	SignCheck string          `json:"sign_check"`
-	Callback  json.RawMessage `json:"callback"`
-}
-
-type callbackInfo struct {
-	Callback    string `json:"callback"`
-	CallbackVar string `json:"callback_var"`
-}
-
-type uploadtokenData struct {
-	Endpoint        string `json:"endpoint"`
-	AccessKeySecret string `json:"AccessKeySecret"`
-	SecurityToken   string `json:"SecurityToken"`
-	Expiration      string `json:"Expiration"`
-	AccessKeyId     string `json:"AccessKeyId"`
-}
-
-type ossCallbackResp struct {
-	State   bool   `json:"state"`
-	Message string `json:"message"`
-	Data    struct {
-		FileId   string `json:"file_id"`
-		PickCode string `json:"pick_code"`
-	} `json:"data"`
 }

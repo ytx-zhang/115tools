@@ -1,4 +1,4 @@
-package syncFile
+package db
 
 import (
 	"bytes"
@@ -16,7 +16,7 @@ var (
 	dBPath     = `/app/data/files.db`
 )
 
-func initDB() {
+func Init() {
 	var err error
 	boltDB, err = bbolt.Open(dBPath, 0600, nil)
 	if err != nil {
@@ -30,7 +30,7 @@ func initDB() {
 	})
 }
 
-func closeDB() {
+func Close() {
 	if boltDB != nil {
 		if err := boltDB.Close(); err != nil {
 			slog.Error("[数据库] 关闭失败", "错误信息", err)
@@ -38,7 +38,7 @@ func closeDB() {
 	}
 }
 
-func dbGetInfo(localPath string) (fid string, size int64) {
+func GetInfo(localPath string) (fid string, size int64) {
 	size = -2
 	boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
@@ -53,14 +53,14 @@ func dbGetInfo(localPath string) (fid string, size int64) {
 		}
 		return nil
 	})
-	return fid, size
+	return
 }
-func dbGetFid(localPath string) string {
-	fid, _ := dbGetInfo(localPath)
-	return fid
+func GetFid(localPath string) (fid string) {
+	fid, _ = GetInfo(localPath)
+	return
 }
 
-func dbSaveRecord(localPath string, fid string, size int64) {
+func SaveRecord(localPath string, fid string, size int64) {
 	val := fid + "|" + strconv.FormatInt(size, 10)
 
 	boltDB.Batch(func(tx *bbolt.Tx) error {
@@ -69,7 +69,7 @@ func dbSaveRecord(localPath string, fid string, size int64) {
 	})
 }
 
-func dbListChildren(currentLocalPath string, res map[string]struct{}) {
+func ListChildren(currentLocalPath string, res map[string]struct{}) {
 	prefix := currentLocalPath + "/"
 	prefixBytes := []byte(prefix)
 
@@ -85,7 +85,7 @@ func dbListChildren(currentLocalPath string, res map[string]struct{}) {
 	})
 }
 
-func dbClearPath(fPath string) {
+func ClearPath(fPath string) {
 	selfBytes := []byte(fPath)
 	childPrefix := []byte(fPath + "/")
 
@@ -110,8 +110,7 @@ func dbClearPath(fPath string) {
 	}
 }
 
-func dbGetTotalCount(parentPath string) int {
-	count := 0
+func GetTotalCount(parentPath string) (count int64) {
 	prefix := parentPath + "/"
 	prefixBytes := []byte(prefix)
 	boltDB.View(func(tx *bbolt.Tx) error {
@@ -125,5 +124,5 @@ func dbGetTotalCount(parentPath string) int {
 		}
 		return nil
 	})
-	return count
+	return
 }
