@@ -8,14 +8,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
@@ -30,49 +28,34 @@ const baseDomain = "https://proapi.115.com"
 var (
 	limiter     = rate.NewLimiter(rate.Limit(2), 3)
 	sem         = make(chan struct{}, 2)
-	waitSec     atomic.Int64
 	restyClient = resty.New().
 			SetBaseURL(baseDomain).
 			SetTimeout(30 * time.Second).
 			SetRetryCount(2).
-			SetRetryWaitTime(1 * time.Second).
+			SetRetryWaitTime(5 * time.Second).
+			SetRetryMaxWaitTime(10 * time.Second).
 			OnBeforeRequest(func(c *resty.Client, r *resty.Request) error {
 			if err := limiter.Wait(r.Context()); err != nil {
 				return err
 			}
-			if ws := waitSec.Load(); ws > 0 {
-				select {
-				case <-time.After(time.Duration(ws) * time.Second):
-				case <-r.Context().Done():
-					return r.Context().Err()
-				}
-			}
+			r.SetHeader("Authorization", "Bearer "+config.Get().Token.AccessToken)
 			return nil
 		}).
 		AddRetryCondition(func(r *resty.Response, err error) bool {
 			if err != nil {
-				waitSec.Store(1)
 				return true
 			}
-			if strings.Contains(r.String(), "稍后再试") {
-				slog.Warn("[115报错]", "接口消息", "触发频率限制，等待3秒")
-				waitSec.Store(3)
-				return true
-			}
-			return false
+			res := gjson.ParseBytes(r.Body())
+			return strings.Contains(res.Get("message").String(), "稍后再试")
 		})
 )
 
 func request(ctx context.Context, method, endpoint string, params url.Values, ua string) (data gjson.Result, err error) {
 	sem <- struct{}{}
-	defer func() {
-		<-sem
-		waitSec.Store(0)
-	}()
+	defer func() { <-sem }()
 	var resp *resty.Response
 	resp, err = restyClient.R().
 		SetContext(ctx).
-		SetHeader("Authorization", "Bearer "+config.Get().Token.AccessToken).
 		SetHeader("User-Agent", ua).
 		SetQueryParamsFromValues(params).
 		SetFormDataFromValues(params).
@@ -130,7 +113,6 @@ func MoveFile(ctx context.Context, fid, cid string) error {
 	params.Set("file_ids", fid)
 	params.Set("to_cid", cid)
 	_, err := request(ctx, "POST", "/open/ufile/move", params, "")
-	waitSec.Store(1)
 	return err
 }
 func DeleteFile(ctx context.Context, fid string) error {

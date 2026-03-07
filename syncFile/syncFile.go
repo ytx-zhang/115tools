@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sgtdi/fswatcher"
 	"github.com/tidwall/sjson"
 )
 
@@ -121,6 +122,52 @@ func InitSync(parentCtx context.Context) (err error) {
 	go startWatch(ctx)
 	slog.Info("初始化结束")
 	return
+}
+func startWatch(ctx context.Context) {
+	watcher, err := fswatcher.New(
+		fswatcher.WithPath(syncPath),
+		fswatcher.WithEventBatching(1*time.Second),
+	)
+	if err != nil {
+		slog.Error("文件监听器初始化失败", "错误信息", err)
+		return
+	}
+	slog.Info("文件监听器启动", "路径", syncPath)
+	go watcher.Watch(ctx)
+	for event := range watcher.Events() {
+		if err := context.Cause(ctx); err != nil {
+			return
+		}
+		todoTasks := make(map[string]string)
+
+		d := filepath.Dir(event.Path)
+		if f := db.GetFid(d); f != "" {
+			todoTasks[d] = f
+		}
+	collect:
+		for {
+			select {
+			case nextE, ok := <-watcher.Events():
+				if !ok {
+					break collect
+				}
+				nextDir := filepath.Dir(nextE.Path)
+				if _, exists := todoTasks[nextDir]; !exists {
+					if nextFid := db.GetFid(nextDir); nextFid != "" {
+						todoTasks[nextDir] = nextFid
+					}
+				}
+			default:
+				break collect
+			}
+		}
+		for path, fid := range todoTasks {
+			if _, err := os.Stat(path); err == nil {
+				slog.Info("监视到文件夹内变更", "路径", path)
+				localSync(ctx, path, fid)
+			}
+		}
+	}
 }
 func initRoot(ctx context.Context) (fid string, err error) {
 	if err = context.Cause(ctx); err != nil {
@@ -323,6 +370,7 @@ func upFileTask(ctx context.Context, t uploadTask) error {
 		if indexFid != "" {
 			stats.total.Add(1)
 			if err := cloudCleanTask(ctx, savePath); err != nil {
+				slog.Error("清理过时视频失败", "路径", savePath, "错误信息", err)
 				return err
 			}
 		}

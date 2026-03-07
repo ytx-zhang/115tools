@@ -44,20 +44,35 @@ func main() {
 		slog.Error("加载配置失败", "错误信息", err)
 		return
 	}
+	mux := http.NewServeMux()
+	server := &http.Server{
+		Addr:         ":8080",
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
+	}
+	mux.HandleFunc("GET /download", strmServer.RedirectToRealURL)
+
+	go func() {
+		slog.Info("HTTP服务启动在 :8080")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("服务器异常退出", "错误信息", err)
+		}
+	}()
+
+	wg.Go(func() { emby302.StartEmby302(ctx) })
 
 	if err := syncFile.InitSync(ctx); err != nil {
 		slog.Error("初始化同步失败", "错误信息", err)
 		return
 	}
-
-	mux := http.NewServeMux()
+	defer db.Close()
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		data, _ := indexHTML.ReadFile("index.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(data)
 	})
-
-	mux.HandleFunc("GET /download", strmServer.RedirectToRealURL)
 
 	mux.HandleFunc("GET /logs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -112,34 +127,14 @@ func main() {
 		w.WriteHeader(http.StatusAccepted)
 	})
 
-	server := &http.Server{
-		Addr:         ":8080",
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 0,
-		IdleTimeout:  60 * time.Second,
+	sig := <-sigChan
+	mainCancel(fmt.Errorf("收到系统信号: %v,准备退出...", sig))
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("强制关闭 HTTP 服务器", "错误信息", err)
 	}
-	slog.Info("http服务启动在 :8080")
-
-	wg.Go(func() { emby302.StartEmby302(ctx) })
-
-	go func() {
-		sig := <-sigChan
-		mainCancel(fmt.Errorf("收到系统信号: %v,准备退出...", sig))
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			slog.Warn("强制关闭 HTTP 服务器", "错误信息", err)
-		}
-	}()
-
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("服务器异常退出", "错误信息", err)
-	}
-
-	db.Close()
-
 	slog.Info("正在等待后台任务完成...")
 	wg.Wait()
 	slog.Info("程序已安全退出。")

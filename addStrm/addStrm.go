@@ -139,10 +139,6 @@ func runAddStrm(parentCtx context.Context) {
 		slog.Warn("[任务中止] 生成strm过程中被中止", "错误信息", err)
 		return
 	}
-	if stats.total.Load() == 0 {
-		slog.Info("[添加strm] 没有需要处理的文件")
-		return
-	}
 	if len(stats.failedErrors) == 0 && len(rootFids) > 0 {
 		performMoveFiles(ctx)
 	}
