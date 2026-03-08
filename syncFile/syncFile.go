@@ -119,52 +119,75 @@ func InitSync(parentCtx context.Context) (err error) {
 	if err := localSync(ctx, syncPath, syncFid); err != nil {
 		slog.Warn("本地文件同步失败", "错误信息", err)
 	}
-	go startWatch(ctx)
+	wm := &WatchManager{}
+	go wm.startWatch(ctx)
 	slog.Info("初始化结束")
 	return
 }
-func startWatch(ctx context.Context) {
+
+type WatchManager struct {
+	mu           sync.Mutex
+	pendingTasks map[string]struct{}
+	isRunning    bool
+}
+
+func (m *WatchManager) startWatch(ctx context.Context) {
+	m.pendingTasks = make(map[string]struct{})
 	watcher, err := fswatcher.New(
 		fswatcher.WithPath(syncPath),
-		fswatcher.WithEventBatching(1*time.Second),
+		fswatcher.WithEventBatching(2*time.Second),
 	)
 	if err != nil {
-		slog.Error("文件监听器初始化失败", "错误信息", err)
+		slog.Error("监听器启动失败", "err", err)
 		return
 	}
 	slog.Info("文件监听器启动", "路径", syncPath)
 	go watcher.Watch(ctx)
+
 	for event := range watcher.Events() {
-		if err := context.Cause(ctx); err != nil {
+		dir := filepath.Dir(event.Path)
+
+		m.mu.Lock()
+		m.pendingTasks[dir] = struct{}{}
+		if !m.isRunning {
+			m.isRunning = true
+			go m.runWatchTask(ctx)
+		}
+		m.mu.Unlock()
+	}
+}
+
+func (m *WatchManager) runWatchTask(ctx context.Context) {
+	defer func() {
+		m.mu.Lock()
+		m.isRunning = false
+		m.mu.Unlock()
+	}()
+
+	for {
+		m.mu.Lock()
+		if len(m.pendingTasks) == 0 {
+			m.mu.Unlock()
 			return
 		}
-		todoTasks := make(map[string]string)
-
-		d := filepath.Dir(event.Path)
-		if f := db.GetFid(d); f != "" {
-			todoTasks[d] = f
+		todo := make([]string, 0, len(m.pendingTasks))
+		for p := range m.pendingTasks {
+			todo = append(todo, p)
+			delete(m.pendingTasks, p)
 		}
-	collect:
-		for {
+		m.mu.Unlock()
+		for _, path := range todo {
 			select {
-			case nextE, ok := <-watcher.Events():
-				if !ok {
-					break collect
-				}
-				nextDir := filepath.Dir(nextE.Path)
-				if _, exists := todoTasks[nextDir]; !exists {
-					if nextFid := db.GetFid(nextDir); nextFid != "" {
-						todoTasks[nextDir] = nextFid
+			case <-ctx.Done():
+				return
+			default:
+				fid := db.GetFid(path)
+				if fid != "" {
+					if _, err := os.Stat(path); err == nil {
+						slog.Info("执行目录同步", "路径", path)
+						localSync(ctx, path, fid)
 					}
 				}
-			default:
-				break collect
-			}
-		}
-		for path, fid := range todoTasks {
-			if _, err := os.Stat(path); err == nil {
-				slog.Info("监视到文件夹内变更", "路径", path)
-				localSync(ctx, path, fid)
 			}
 		}
 	}
