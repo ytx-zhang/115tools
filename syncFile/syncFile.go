@@ -560,7 +560,7 @@ func cloudSync(ctx context.Context, cloudPath string, cloudFID string) {
 		if dbFid != "" && dbFid != fid {
 			slog.Info("[同步] 清理云端冗余项", "路径", savedPath)
 			stats.total.Add(1)
-			if err := cloudCleanTask(ctx, savedPath); err != nil {
+			if err := open115.DeleteFile(ctx, fid); err != nil {
 				markFailed(fmt.Sprintf("[同步] [%s] 清理云端冗余项失败: %s (%v)", time.Now().Format("15:04"), savedPath, err))
 			}
 			continue
