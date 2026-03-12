@@ -28,9 +28,11 @@ jobs:
         uses: anothrNick/github-tag-action@master
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WITH_V: true             # 标签带 v 前缀，如 v1.0.2
-          DEFAULT_BUMP: patch      # 默认每次提交增加最后一位 (0.0.x)
+          WITH_V: true
+          DEFAULT_BUMP: patch
           RELEASE_BRANCHES: main
+          PRERELEASE: false    # 关闭预发布模式
+          INITIAL_VERSION: 0.0.1
 
       - name: Set up Go
         uses: actions/setup-go@main
@@ -56,7 +58,6 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=${{ steps.tag_version.outputs.new_tag }} # 使用刚才生成的新标签
-            type=sha,format=short
 
       - name: Build and push
         uses: docker/build-push-action@master
