@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # 监控 Go 依赖更新 (go.mod)
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+
+  # 监控 GitHub Actions 插件更新
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
