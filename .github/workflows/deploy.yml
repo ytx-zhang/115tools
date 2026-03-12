@@ -30,9 +30,6 @@ jobs:
           WITH_V: true
           DEFAULT_BUMP: patch
           RELEASE_BRANCHES: main
-          PRERELEASE: false
-          FORCE_WITHOUT_PRERELEASE: true 
-          INITIAL_VERSION: 0.0.1
 
       - name: Set up Go
         uses: actions/setup-go@main
