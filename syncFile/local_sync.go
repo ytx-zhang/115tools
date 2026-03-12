@@ -38,16 +38,19 @@ func localSync(parentCtx context.Context, workPath, workFid string) error {
 	defer localCancelFunc(nil)
 
 	var uploadTasks []uploadTask
-	if err := localScan(ctx, workPath, workFid, &uploadTasks); err != nil {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		localScan(ctx, workPath, workFid, &uploadTasks, &mu, &wg)
+	})
+	wg.Wait()
+	if err := context.Cause(ctx); err != nil {
 		return err
 	}
 	if len(uploadTasks) == 0 {
 		return nil
 	}
-	var wg sync.WaitGroup
-	if err := context.Cause(ctx); err != nil {
-		return err
-	}
+
 	for _, t := range uploadTasks {
 		select {
 		case <-ctx.Done():
@@ -70,19 +73,24 @@ func localSync(parentCtx context.Context, workPath, workFid string) error {
 	wg.Wait()
 	return nil
 }
-func localScan(ctx context.Context, workPath string, workFid string, uploadTasks *[]uploadTask) error {
-	if err := context.Cause(ctx); err != nil {
-		return err
+func localScan(ctx context.Context, workPath string, workFid string, uploadTasks *[]uploadTask, mu *sync.Mutex, wg *sync.WaitGroup) {
+	select {
+	case <-ctx.Done():
+		return
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
 	}
 
 	f, err := os.Open(workPath)
 	if err != nil {
-		return err
+		localCancelFunc(err)
+		return
 	}
 	names, err := f.Readdirnames(-1)
 	f.Close()
 	if err != nil {
-		return err
+		localCancelFunc(err)
+		return
 	}
 	localFiles := make(map[string]struct{}, len(names))
 	for _, name := range names {
@@ -90,13 +98,13 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 	}
 	var deleteFilePaths []string
 
-	db.ScanChildren(ctx, workPath, func(name string, valStr string) error {
+	db.ScanChildren(ctx, workPath, func(name string, valStr string) {
 		_, exists := localFiles[name]
 		fullPath := filepath.Join(workPath, name)
 		//云端存在,本地不存在
 		if !exists {
 			deleteFilePaths = append(deleteFilePaths, fullPath)
-			return nil
+			return
 		}
 
 		delete(localFiles, name)
@@ -110,12 +118,14 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 
 		info, err := os.Lstat(fullPath)
 		if err != nil {
-			return nil
+			return
 		}
 
 		if info.IsDir() {
 			if dbSize == -1 {
-				return localScan(ctx, fullPath, dbFid, uploadTasks)
+				wg.Go(func() {
+					localScan(ctx, fullPath, dbFid, uploadTasks, mu, wg)
+				})
 			}
 		}
 
@@ -129,6 +139,7 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 		//文件大小不匹配的文件
 		if dbSize != -1 && currentSize != dbSize {
 			deleteFilePaths = append(deleteFilePaths, fullPath)
+			mu.Lock()
 			*uploadTasks = append(*uploadTasks, uploadTask{
 				path:   fullPath,
 				cid:    workFid,
@@ -136,12 +147,13 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 				size:   currentSize,
 				isStrm: isStrm,
 			})
+			mu.Unlock()
 		}
-		return nil
 	})
 	//批量删除文件
 	if err := cloudCleanTask(ctx, deleteFilePaths, workPath); err != nil {
-		return err
+		localCancelFunc(err)
+		return
 	}
 	//本地新增
 	for name := range localFiles {
@@ -155,11 +167,12 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 		if info.IsDir() {
 			fid, err := addCloudFolder(ctx, workFid, name, fullPath)
 			if err != nil {
-				return fmt.Errorf("创建[%s]失败: %s", fullPath, err)
+				localCancelFunc(err)
+				return
 			}
-			if err := localScan(ctx, fullPath, fid, uploadTasks); err != nil {
-				return err
-			}
+			wg.Go(func() {
+				localScan(ctx, fullPath, fid, uploadTasks, mu, wg)
+			})
 			continue
 		}
 
@@ -168,7 +181,7 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 		if isStrm {
 			size = info.ModTime().Unix()
 		}
-
+		mu.Lock()
 		*uploadTasks = append(*uploadTasks, uploadTask{
 			path:   fullPath,
 			cid:    workFid,
@@ -176,9 +189,8 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 			size:   size,
 			isStrm: isStrm,
 		})
+		mu.Unlock()
 	}
-
-	return nil
 }
 func upFileTask(ctx context.Context, t uploadTask) error {
 	fid, pickcode, err := open115.UploadFile(ctx, t.path, t.cid, "", "")

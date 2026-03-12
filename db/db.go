@@ -111,14 +111,14 @@ func GetTotalCount(parentPath string) (count int64) {
 	return
 }
 
-func ScanChildren(ctx context.Context, parentPath string, handler func(name string, valStr string) error) error {
+func ScanChildren(ctx context.Context, parentPath string, handler func(name string, valStr string)) {
 	prefix := parentPath
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
 	prefixBytes := []byte(prefix)
 
-	return boltDB.View(func(tx *bbolt.Tx) error {
+	boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		if b == nil {
 			return nil
@@ -138,9 +138,7 @@ func ScanChildren(ctx context.Context, parentPath string, handler func(name stri
 				continue
 			}
 
-			if err := handler(relPath, string(v)); err != nil {
-				return err
-			}
+			handler(relPath, string(v))
 		}
 		return nil
 	})
