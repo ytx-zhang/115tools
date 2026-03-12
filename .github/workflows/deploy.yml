@@ -13,16 +13,15 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # 必须有 write 权限才能创建 Tag
+      contents: write
       packages: write 
 
     steps:
       - name: Checkout code
         uses: actions/checkout@main
         with:
-          fetch-depth: 0 # 必须拉取完整历史，否则无法计算版本号
+          fetch-depth: 0
 
-      # --- 新增：自动生成版本号步骤 ---
       - name: Auto Tagging
         id: tag_version
         uses: anothrNick/github-tag-action@master
@@ -31,7 +30,8 @@ jobs:
           WITH_V: true
           DEFAULT_BUMP: patch
           RELEASE_BRANCHES: main
-          PRERELEASE: false    # 关闭预发布模式
+          PRERELEASE: false
+          FORCE_WITHOUT_PRERELEASE: true 
           INITIAL_VERSION: 0.0.1
 
       - name: Set up Go
@@ -57,7 +57,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest
-            type=raw,value=${{ steps.tag_version.outputs.new_tag }} # 使用刚才生成的新标签
+            type=raw,value=${{ steps.tag_version.outputs.new_tag }}
 
       - name: Build and push
         uses: docker/build-push-action@master
@@ -66,4 +66,4 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: false
