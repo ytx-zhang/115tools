@@ -67,5 +67,4 @@ func RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 		name: name,
 	})
 	http.Redirect(w, r, url, http.StatusFound)
-	slog.Info("[strm请求]", "媒体文件名", name, "UA", clientUA)
 }

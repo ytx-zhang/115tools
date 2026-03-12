@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,7 +40,7 @@ type tokenConfig struct {
 	ExpireAt     time.Time `yaml:"expire_at" json:"expire_at"`
 }
 
-func LoadConfig(ctx context.Context, wg *sync.WaitGroup, p string) error {
+func LoadConfig(ctx context.Context, p string) error {
 	configPath = p
 	file, err := os.ReadFile(configPath)
 	if err != nil {
@@ -61,23 +60,23 @@ func LoadConfig(ctx context.Context, wg *sync.WaitGroup, p string) error {
 		slog.Info("[CONFIG] 配置已加载", "token有效期", initialConf.Token.ExpireAt.Format("2006-01-02 15:04:05"))
 	}
 
-	wg.Go(func() {
-		for {
-			success := refreshToken(ctx)
-			duration := 1 * time.Minute
-			if success {
-				duration = 5 * time.Minute
-			}
-			select {
-			case <-time.After(duration):
-				continue
-			case <-ctx.Done():
-				slog.Info("Token 刷新任务已安全停止")
-				return
-			}
-		}
-	})
 	return nil
+}
+func StartRefresh(ctx context.Context) {
+	for {
+		success := refreshToken(ctx)
+		duration := 1 * time.Minute
+		if success {
+			duration = 5 * time.Minute
+		}
+		select {
+		case <-time.After(duration):
+			continue
+		case <-ctx.Done():
+			slog.Info("Token 刷新任务已安全停止")
+			return
+		}
+	}
 }
 func refreshToken(ctx context.Context) bool {
 	if err := context.Cause(ctx); err != nil {

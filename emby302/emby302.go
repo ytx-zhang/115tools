@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -150,8 +151,12 @@ func handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ = io.ReadAll(r.Body)
 	}
 	query := r.URL.Query()
-	if query.Get("MaxStreamingBitrate") != "200000000" {
-		query.Set("MaxStreamingBitrate", "4000000")
+	maxBitrateStr := query.Get("MaxStreamingBitrate")
+	if maxBitrateStr != "" {
+		bitrate, err := strconv.ParseInt(maxBitrateStr, 10, 64)
+		if err == nil && bitrate < 200000000 {
+			query.Set("MaxStreamingBitrate", "4000000")
+		}
 	}
 	proxyReq := func(query url.Values) (*http.Response, []byte, error) {
 		apiURL := fmt.Sprintf("%s%s?%s", embyURL, r.URL.Path, query.Encode())
@@ -174,15 +179,11 @@ func handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	result := gjson.GetBytes(resBody, "MediaSources.0.DirectStreamUrl")
 
 	if result.Exists() && strings.Contains(result.Raw, "ContainerBitrateExceedsLimit") {
-		newQuery := r.URL.Query()
-		newQuery.Set("MaxStreamingBitrate", "200000000")
-		if r2, b2, err := proxyReq(newQuery); err == nil {
+		query.Del("MaxStreamingBitrate")
+		if r2, b2, err := proxyReq(query); err == nil {
 			newResult := gjson.GetBytes(b2, "MediaSources.0.DirectStreamUrl")
 			if newResult.Exists() && strings.Contains(newResult.Raw, "original.") {
 				resp, resBody = r2, b2
-				slog.Info("[PlaybackInfo] 重试高码率成功，已获得 Original 路径")
-			} else {
-				slog.Warn("[PlaybackInfo] 强制码率重试失败（仍需转码），回退至原始请求")
 			}
 		}
 	}
@@ -221,7 +222,6 @@ func handleVideo302(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	if !strings.HasPrefix(mediaPath, strmUrl) {
-		slog.Info("[302 跳过] 非 strm 路径", "媒体名称", mediaName, "路径", mediaPath)
 		return false
 	}
 	finalURL, err := getFinalLocation(r.Context(), mediaPath, r.Header.Get("User-Agent"))

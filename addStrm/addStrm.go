@@ -10,10 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
-
-	"github.com/tidwall/sjson"
 )
 
 var (
@@ -25,45 +22,6 @@ var (
 	cancelFunc context.CancelCauseFunc
 )
 
-type taskStats struct {
-	total        atomic.Int64
-	completed    atomic.Int64
-	failed       atomic.Int64
-	mu           sync.Mutex
-	failedErrors []string
-	running      atomic.Bool
-}
-
-var stats = &taskStats{
-	failedErrors: []string{},
-}
-
-func (s *taskStats) Reset() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.total.Store(0)
-	s.completed.Store(0)
-	s.failed.Store(0)
-	s.failedErrors = s.failedErrors[:0]
-}
-
-func GetStatus() string {
-	stats.mu.Lock()
-	defer stats.mu.Unlock()
-	data, _ := sjson.Set("", "total", stats.total.Load())
-	data, _ = sjson.Set(data, "completed", stats.completed.Load())
-	data, _ = sjson.Set(data, "failed", stats.failed.Load())
-	data, _ = sjson.Set(data, "running", stats.running.Load())
-	data, _ = sjson.Set(data, "errors", stats.failedErrors)
-	return data
-}
-func markFailed(reason string) {
-	stats.mu.Lock()
-	defer stats.mu.Unlock()
-	stats.failed.Add(1)
-	stats.failedErrors = append(stats.failedErrors, reason)
-}
-
 type task struct {
 	Strm      bool
 	PC        string
@@ -73,7 +31,10 @@ type task struct {
 
 func StartAddStrm(parentCtx context.Context) {
 	if stats.running.CompareAndSwap(false, true) {
-		defer stats.running.Store(false)
+		defer func() {
+			stats.running.Store(false)
+			cancelFunc(nil)
+		}()
 		stats.Reset()
 		runAddStrm(parentCtx)
 	}

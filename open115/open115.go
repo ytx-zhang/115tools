@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,17 +22,14 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const baseDomain = "https://proapi.115.com"
-
 var (
-	limiter     = rate.NewLimiter(rate.Limit(2), 3)
-	sem         = make(chan struct{}, 2)
+	limiter     = rate.NewLimiter(rate.Limit(3), 5)
 	restyClient = resty.New().
-			SetBaseURL(baseDomain).
+			SetBaseURL("https://proapi.115.com").
 			SetTimeout(30 * time.Second).
 			SetRetryCount(2).
-			SetRetryWaitTime(5 * time.Second).
-			SetRetryMaxWaitTime(10 * time.Second).
+			SetRetryWaitTime(3 * time.Second).
+			SetRetryMaxWaitTime(3 * time.Second).
 			OnBeforeRequest(func(c *resty.Client, r *resty.Request) error {
 			if err := limiter.Wait(r.Context()); err != nil {
 				return err
@@ -41,114 +37,122 @@ var (
 			r.SetHeader("Authorization", "Bearer "+config.Get().Token.AccessToken)
 			return nil
 		}).
-		AddRetryCondition(func(r *resty.Response, err error) bool {
-			if err != nil {
-				return true
+		OnAfterResponse(func(c *resty.Client, r *resty.Response) error {
+			if r.Error() != nil {
+				return nil
 			}
 			res := gjson.ParseBytes(r.Body())
-			return strings.Contains(res.Get("message").String(), "稍后再试")
+			if !res.Get("state").Bool() {
+				msg := res.Get("message").String()
+				code := res.Get("code").Int()
+				return fmt.Errorf("[115报错]: %s code: %d", msg, code)
+			}
+			return nil
+		}).
+		AddRetryCondition(func(r *resty.Response, err error) bool {
+			if err != nil {
+				return strings.Contains(err.Error(), "稍后再试")
+			}
+			return false
 		})
 )
 
-func request(ctx context.Context, method, endpoint string, params url.Values, ua string) (data gjson.Result, err error) {
-	sem <- struct{}{}
-	defer func() { <-sem }()
-	var resp *resty.Response
-	resp, err = restyClient.R().
-		SetContext(ctx).
-		SetHeader("User-Agent", ua).
-		SetQueryParamsFromValues(params).
-		SetFormDataFromValues(params).
-		Execute(method, endpoint)
-
-	if err != nil {
-		return
-	}
-	res := gjson.ParseBytes(resp.Body())
-	if !res.Get("state").Bool() {
-		err = fmt.Errorf("115报错: %s code: %d", res.Get("message").String(), res.Get("code").Int())
-		return
-	}
-	data = res.Get("data")
-	return
-}
 func GetDownloadUrl(ctx context.Context, pickCode, ua string) (fid, downloadUrl, name string, err error) {
 	if err = context.Cause(ctx); err != nil {
 		return
 	}
-	params := url.Values{}
-	params.Set("pick_code", pickCode)
-	var data gjson.Result
-	if data, err = request(ctx, "POST", "/open/ufile/downurl", params, ua); err == nil {
-		firstItem := data.Get("@values|0")
-		fid = data.Get("@keys|0").String()
-
-		if !firstItem.Exists() || fid == "" {
-			err = fmt.Errorf("未提取到下载信息: %s", data.Raw)
-			return
-		}
-		downloadUrl = firstItem.Get("url.url").String()
-		name = firstItem.Get("file_name").String()
+	req := restyClient.R().SetContext(ctx)
+	req.SetHeader("User-Agent", ua)
+	req.SetFormData(map[string]string{
+		"pick_code": pickCode,
+	})
+	var resp *resty.Response
+	if resp, err = req.Post("/open/ufile/downurl"); err != nil {
+		return
 	}
+	data := gjson.GetBytes(resp.Body(), "data")
+	firstItem := data.Get("@values|0")
+	fid = data.Get("@keys|0").String()
+
+	if !firstItem.Exists() || fid == "" {
+		err = fmt.Errorf("未提取到下载信息: %s", data.Raw)
+		return
+	}
+	downloadUrl = firstItem.Get("url.url").String()
+	name = firstItem.Get("file_name").String()
 	return
 }
 func AddFolder(ctx context.Context, pid, name string) (fid string, err error) {
 	if err = context.Cause(ctx); err != nil {
 		return
 	}
-	params := url.Values{}
-	params.Set("pid", pid)
-	params.Set("file_name", name)
-	var data gjson.Result
-	if data, err = request(ctx, "POST", "/open/folder/add", params, ""); err == nil {
-		fid = data.Get("file_id").String()
+	req := restyClient.R().SetContext(ctx)
+	req.SetFormData(map[string]string{
+		"pid":       pid,
+		"file_name": name,
+	})
+	var resp *resty.Response
+	if resp, err = req.Post("/open/folder/add"); err != nil {
+		return
 	}
+	data := gjson.GetBytes(resp.Body(), "data")
+	fid = data.Get("file_id").String()
 	return
 }
 func MoveFile(ctx context.Context, fid, cid string) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
-	params := url.Values{}
-	params.Set("file_ids", fid)
-	params.Set("to_cid", cid)
-	_, err := request(ctx, "POST", "/open/ufile/move", params, "")
+	req := restyClient.R().SetContext(ctx)
+	req.SetFormData(map[string]string{
+		"file_ids": fid,
+		"to_cid":   cid,
+	})
+	_, err := req.Post("/open/ufile/move")
 	return err
 }
 func DeleteFile(ctx context.Context, fid string) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
-	params := url.Values{}
-	params.Set("file_ids", fid)
-	_, err := request(ctx, "POST", "/open/ufile/delete", params, "")
+	req := restyClient.R().SetContext(ctx)
+	req.SetFormData(map[string]string{
+		"file_ids": fid,
+	})
+	_, err := req.Post("/open/ufile/delete")
 	return err
 }
 func UpdateFile(ctx context.Context, fid, name string) (newName string, err error) {
 	if err = context.Cause(ctx); err != nil {
 		return
 	}
-	params := url.Values{}
-	params.Set("file_id", fid)
-	params.Set("file_name", name)
-	var data gjson.Result
-	if data, err = request(ctx, "POST", "/open/ufile/update", params, ""); err == nil {
-		newName = data.Get("file_name").String()
+	req := restyClient.R().SetContext(ctx)
+	req.SetFormData(map[string]string{
+		"file_id":   fid,
+		"file_name": name,
+	})
+	var resp *resty.Response
+	if resp, err = req.Post("/open/ufile/update"); err != nil {
+		return
 	}
+	data := gjson.GetBytes(resp.Body(), "data")
+	newName = data.Get("file_name").String()
 	return
 }
 func FolderInfo(ctx context.Context, path string) (fid string, fileCount, folderCount int64, err error) {
 	if err = context.Cause(ctx); err != nil {
 		return
 	}
-	params := url.Values{}
-	params.Set("path", path)
-	var data gjson.Result
-	if data, err = request(ctx, "GET", "/open/folder/get_info", params, ""); err == nil {
-		fid = data.Get("file_id").String()
-		fileCount = data.Get("count").Int()
-		folderCount = data.Get("folder_count").Int()
+	req := restyClient.R().SetContext(ctx)
+	req.SetQueryParam("path", path)
+	var resp *resty.Response
+	if resp, err = req.Get("/open/folder/get_info"); err != nil {
+		return
 	}
+	data := gjson.GetBytes(resp.Body(), "data")
+	fid = data.Get("file_id").String()
+	fileCount = data.Get("count").Int()
+	folderCount = data.Get("folder_count").Int()
 	return
 }
 func FileList(ctx context.Context, cid string) (allFiles []gjson.Result, err error) {
@@ -156,29 +160,35 @@ func FileList(ctx context.Context, cid string) (allFiles []gjson.Result, err err
 		return
 	}
 	offset := 0
-	limit := 1150
-	params := url.Values{}
-	params.Set("cid", cid)
-	params.Set("show_dir", "1")
-	params.Set("limit", strconv.Itoa(limit))
+	req := restyClient.R().SetContext(ctx)
+	req.SetQueryParam("cid", cid)
+	req.SetQueryParam("show_dir", "1")
+	req.SetQueryParam("limit", "1150")
 	for {
-		params.Set("offset", strconv.Itoa(offset))
-
-		var data gjson.Result
-		data, err = request(ctx, "GET", "/open/ufile/files", params, "")
-		if err != nil {
+		req.SetQueryParam("offset", strconv.Itoa(offset))
+		var resp *resty.Response
+		if resp, err = req.Get("/open/ufile/files"); err != nil {
 			return
 		}
+
+		res := gjson.ParseBytes(resp.Body())
+		data := res.Get("data")
+		totalCount := res.Get("count").Int()
+		if offset == 0 {
+			allFiles = make([]gjson.Result, 0, totalCount)
+		}
 		items := data.Array()
-		count := len(items)
-		if count == 0 {
+		currentCount := len(items)
+		if currentCount == 0 {
 			break
 		}
+
 		allFiles = append(allFiles, items...)
-		offset += count
-		if count < limit {
+		offset += currentCount
+		if len(allFiles) >= cap(allFiles) {
 			break
 		}
+
 		if err = context.Cause(ctx); err != nil {
 			return
 		}
@@ -189,10 +199,7 @@ func DownloadFile(ctx context.Context, pickcode, localPath string) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
-	if err := context.Cause(ctx); err != nil {
-		return err
-	}
-	_, url, _, err := GetDownloadUrl(ctx, pickcode, "")
+	_, url, _, err := GetDownloadUrl(ctx, pickcode, "115tools")
 	if err != nil {
 		return err
 	}
@@ -201,7 +208,7 @@ func DownloadFile(ctx context.Context, pickcode, localPath string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "")
+	req.Header.Set("User-Agent", "115tools")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -262,21 +269,26 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (fid
 		return
 	}
 
-	params := url.Values{}
-	params.Set("file_name", fileName)
-	params.Set("file_size", fmt.Sprintf("%d", fileSize))
-	params.Set("target", fmt.Sprintf("U_1_%s", cid))
-	params.Set("fileid", fileSha1)
-	params.Set("preid", preSha1)
-	params.Set("topupload", "0")
+	req := restyClient.R().SetContext(ctx)
+	req.SetFormData(map[string]string{
+		"file_name": fileName,
+		"file_size": fmt.Sprintf("%d", fileSize),
+		"target":    fmt.Sprintf("U_1_%s", cid),
+		"fileid":    fileSha1,
+		"preid":     preSha1,
+		"topupload": "0",
+	})
 	if signKey != "" && signVal != "" {
-		params.Set("sign_key", signKey)
-		params.Set("sign_val", signVal)
+		req.SetFormData(map[string]string{
+			"sign_key": signKey,
+			"sign_val": signVal,
+		})
 	}
-	var initData gjson.Result
-	if initData, err = request(ctx, "POST", "/open/upload/init", params, ""); err != nil {
+	var resp *resty.Response
+	if resp, err = req.Post("/open/upload/init"); err != nil {
 		return
 	}
+	initData := gjson.GetBytes(resp.Body(), "data")
 	status := initData.Get("status").Int()
 	switch status {
 	case 2:
@@ -295,10 +307,11 @@ func UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (fid
 		return UploadFile(ctx, pathStr, cid, initData.Get("sign_key").String(), newSignVal)
 
 	case 1:
-		var tokenData gjson.Result
-		if tokenData, err = request(ctx, "GET", "/open/upload/get_token", url.Values{}, ""); err != nil {
+		req := restyClient.R().SetContext(ctx)
+		if resp, err = req.Get("/open/upload/get_token"); err != nil {
 			return
 		}
+		tokenData := gjson.GetBytes(resp.Body(), "data")
 		var cbResp map[string]any
 		if cbResp, err = ossUploadFile(ctx, tokenData, initData, pathStr); err != nil {
 			err = fmt.Errorf("OSS调用底层报错: %w", err)

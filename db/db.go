@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -23,7 +24,6 @@ func Init() {
 		slog.Info("[数据库] 初始化失败", "错误信息", err)
 	}
 	boltDB.MaxBatchDelay = 100 * time.Millisecond
-	boltDB.MaxBatchSize = 2000
 	boltDB.Update(func(tx *bbolt.Tx) error {
 		_, err := tx.CreateBucketIfNotExists(bucketName)
 		return err
@@ -69,27 +69,11 @@ func SaveRecord(localPath string, fid string, size int64) {
 	})
 }
 
-func ListChildren(currentLocalPath string, res map[string]struct{}) {
-	prefix := currentLocalPath + "/"
-	prefixBytes := []byte(prefix)
-
-	boltDB.View(func(tx *bbolt.Tx) error {
-		c := tx.Bucket(bucketName).Cursor()
-		for k, _ := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, _ = c.Next() {
-			remain := k[len(prefixBytes):]
-			if !bytes.Contains(remain, []byte("/")) {
-				res[string(remain)] = struct{}{}
-			}
-		}
-		return nil
-	})
-}
-
 func ClearPath(fPath string) {
 	selfBytes := []byte(fPath)
 	childPrefix := []byte(fPath + "/")
 
-	err := boltDB.Update(func(tx *bbolt.Tx) error {
+	err := boltDB.Batch(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		c := b.Cursor()
 		for k, _ := c.Seek(selfBytes); k != nil; {
@@ -125,4 +109,39 @@ func GetTotalCount(parentPath string) (count int64) {
 		return nil
 	})
 	return
+}
+
+func ScanChildren(ctx context.Context, parentPath string, handler func(name string, valStr string) error) error {
+	prefix := parentPath
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	prefixBytes := []byte(prefix)
+
+	return boltDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		if b == nil {
+			return nil
+		}
+
+		c := b.Cursor()
+		for k, v := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, v = c.Next() {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			fullPath := string(k)
+			relPath := strings.TrimPrefix(fullPath, prefix)
+			if strings.Contains(relPath, "/") {
+				continue
+			}
+
+			if err := handler(relPath, string(v)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

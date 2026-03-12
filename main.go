@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,27 +24,17 @@ import (
 var indexHTML embed.FS
 
 func main() {
-	opts := &slog.HandlerOptions{
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				return slog.String(slog.TimeKey, a.Value.Time().Format("15:04:05"))
-			}
-			return a
-		},
-	}
-	handler := slog.NewTextHandler(os.Stdout, opts)
-	slog.SetDefault(slog.New(handler))
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
-
-	ctx, mainCancel := context.WithCancelCause(context.Background())
+	setupLogger()
+	ctx, mainCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer mainCancel()
 	var wg sync.WaitGroup
 
-	if err := config.LoadConfig(ctx, &wg, "/app/data/config.yaml"); err != nil {
+	if err := config.LoadConfig(ctx, "/app/data/config.yaml"); err != nil {
 		slog.Error("加载配置失败", "错误信息", err)
 		return
 	}
+	wg.Go(func() { config.StartRefresh(ctx) })
+
 	mux := http.NewServeMux()
 	server := &http.Server{
 		Addr:         ":8080",
@@ -54,20 +45,24 @@ func main() {
 	}
 	mux.HandleFunc("GET /download", strmServer.RedirectToRealURL)
 
-	go func() {
+	wg.Go(func() {
 		slog.Info("HTTP服务启动在 :8080")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("服务器异常退出", "错误信息", err)
 		}
-	}()
+	})
 
 	wg.Go(func() { emby302.StartEmby302(ctx) })
+
+	db.Init()
+	defer db.Close()
 
 	if err := syncFile.InitSync(ctx); err != nil {
 		slog.Error("初始化同步失败", "错误信息", err)
 		return
 	}
-	defer db.Close()
+	wg.Go(func() { syncFile.StartWatch(ctx, &wg) })
+
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		data, _ := indexHTML.ReadFile("index.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -127,8 +122,8 @@ func main() {
 		w.WriteHeader(http.StatusAccepted)
 	})
 
-	sig := <-sigChan
-	mainCancel(fmt.Errorf("收到系统信号: %v,准备退出...", sig))
+	<-ctx.Done()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -138,4 +133,30 @@ func main() {
 	slog.Info("正在等待后台任务完成...")
 	wg.Wait()
 	slog.Info("程序已安全退出。")
+}
+func setupLogger() {
+	levelStr := strings.ToUpper(os.Getenv("LOG_LEVEL"))
+	var level slog.Level
+
+	switch levelStr {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+
+	opts := &slog.HandlerOptions{
+		Level: level,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.String(slog.TimeKey, a.Value.Time().Format("15:04:05"))
+			}
+			return a
+		},
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, opts)))
 }
