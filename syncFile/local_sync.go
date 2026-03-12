@@ -38,29 +38,13 @@ func localSync(parentCtx context.Context, workPath, workFid string) error {
 	defer localCancelFunc(nil)
 
 	var uploadTasks []uploadTask
-	var deleteTasks []string
-	if err := localScan(ctx, workPath, workFid, &uploadTasks, &deleteTasks); err != nil {
+	if err := localScan(ctx, workPath, workFid, &uploadTasks); err != nil {
 		return err
 	}
-	if len(uploadTasks) == 0 && len(deleteTasks) == 0 {
+	if len(uploadTasks) == 0 {
 		return nil
 	}
 	var wg sync.WaitGroup
-	for _, fPath := range deleteTasks {
-		select {
-		case <-ctx.Done():
-			return context.Cause(ctx)
-		case sem <- struct{}{}:
-		}
-
-		wg.Go(func() {
-			defer func() { <-sem }()
-			if err := cloudCleanTask(ctx, fPath); err != nil {
-				slog.Error("清理失败", "路径", fPath, "错误信息", err)
-			}
-		})
-	}
-	wg.Wait()
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
@@ -86,7 +70,7 @@ func localSync(parentCtx context.Context, workPath, workFid string) error {
 	wg.Wait()
 	return nil
 }
-func localScan(ctx context.Context, workPath string, workFid string, uploadTasks *[]uploadTask, deleteTasks *[]string) error {
+func localScan(ctx context.Context, workPath string, workFid string, uploadTasks *[]uploadTask) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
@@ -104,13 +88,14 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 	for _, name := range names {
 		localFiles[name] = struct{}{}
 	}
+	var deleteFilePaths []string
 
 	db.ScanChildren(ctx, workPath, func(name string, valStr string) error {
 		_, exists := localFiles[name]
 		fullPath := filepath.Join(workPath, name)
-
+		//云端存在,本地不存在
 		if !exists {
-			*deleteTasks = append(*deleteTasks, fullPath)
+			deleteFilePaths = append(deleteFilePaths, fullPath)
 			return nil
 		}
 
@@ -130,7 +115,7 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 
 		if info.IsDir() {
 			if dbSize == -1 {
-				return localScan(ctx, fullPath, dbFid, uploadTasks, deleteTasks)
+				return localScan(ctx, fullPath, dbFid, uploadTasks)
 			}
 		}
 
@@ -141,9 +126,9 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 		} else {
 			currentSize = info.Size()
 		}
-
+		//文件大小不匹配的文件
 		if dbSize != -1 && currentSize != dbSize {
-			*deleteTasks = append(*deleteTasks, fullPath)
+			deleteFilePaths = append(deleteFilePaths, fullPath)
 			*uploadTasks = append(*uploadTasks, uploadTask{
 				path:   fullPath,
 				cid:    workFid,
@@ -154,7 +139,11 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 		}
 		return nil
 	})
-
+	//批量删除文件
+	if err := cloudCleanTask(ctx, deleteFilePaths, workPath); err != nil {
+		return err
+	}
+	//本地新增
 	for name := range localFiles {
 		fullPath := filepath.Join(workPath, name)
 
@@ -168,7 +157,7 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 			if err != nil {
 				return fmt.Errorf("创建[%s]失败: %s", fullPath, err)
 			}
-			if err := localScan(ctx, fullPath, fid, uploadTasks, deleteTasks); err != nil {
+			if err := localScan(ctx, fullPath, fid, uploadTasks); err != nil {
 				return err
 			}
 			continue
@@ -204,7 +193,7 @@ func upFileTask(ctx context.Context, t uploadTask) error {
 		savePath = t.path[:len(t.path)-len(ext)] + ".strm"
 		indexFid := db.GetFid(savePath)
 		if indexFid != "" {
-			if err := cloudCleanTask(ctx, savePath); err != nil {
+			if err := open115.MoveFile(ctx, indexFid, tempFid); err != nil {
 				return fmt.Errorf("[%s]清理过时视频失败: %s", savePath, err)
 			}
 		}
@@ -280,23 +269,49 @@ func addCloudFolder(ctx context.Context, currentCID, name, fullPath string) (fid
 	}
 	return
 }
-func cloudCleanTask(ctx context.Context, fPath string) error {
-	fid, size := db.GetInfo(fPath)
-	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
+func cloudCleanTask(ctx context.Context, fPaths []string, workPath string) error {
+	var moveFids []string
+	var deleteFids []string
 
-	var err error
-	if isStrm || size == -1 {
-		slog.Info("移动云端文件到临时目录", "路径", fPath)
-		err = open115.MoveFile(ctx, fid, tempFid)
-	} else {
-		slog.Info("删除云端文件", "路径", fPath)
-		err = open115.DeleteFile(ctx, fid)
+	for _, fPath := range fPaths {
+		fid, size := db.GetInfo(fPath)
+		if fid == "" {
+			continue
+		}
+
+		isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
+		// 如果是 strm 文件或文件夹 (size == -1)，准备移动
+		if isStrm || size == -1 {
+			moveFids = append(moveFids, fid)
+		} else {
+			deleteFids = append(deleteFids, fid)
+		}
 	}
 
-	if err != nil && !strings.Contains(err.Error(), "不存在或已经删除") {
-		return err
+	// 1. 批量移动
+	if len(moveFids) > 0 {
+		fidsJoin := strings.Join(moveFids, ",")
+		slog.Info("批量移动云端文件到临时目录", "处理目录", workPath, "数量", len(moveFids))
+		err := open115.MoveFile(ctx, fidsJoin, tempFid)
+		if err != nil && !strings.Contains(err.Error(), "不存在或已经删除") {
+			return fmt.Errorf("批量移动[%s]内文件失败: %w", workPath, err)
+		}
 	}
 
-	db.ClearPath(fPath)
+	// 2. 批量删除
+	if len(deleteFids) > 0 {
+		fidsJoin := strings.Join(deleteFids, ",")
+		slog.Info("批量删除云端文件", "处理目录", workPath, "数量", len(deleteFids))
+		err := open115.DeleteFile(ctx, fidsJoin)
+		if err != nil && !strings.Contains(err.Error(), "不存在或已经删除") {
+			return fmt.Errorf("批量删除[%s]内文件失败: %w", workPath, err)
+		}
+	}
+
+	// 3. 清理数据库记录
+	for _, fPath := range fPaths {
+		db.ClearPath(fPath)
+	}
+
 	return nil
 }
