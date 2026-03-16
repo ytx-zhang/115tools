@@ -42,18 +42,22 @@ func InitSync(parentCtx context.Context) (err error) {
 	if tempFid, err = initTemp(parentCtx); err != nil {
 		return
 	}
+	localSync(parentCtx, syncPath, syncFid)
 
-	if err := localSync(parentCtx, syncPath, syncFid); err != nil {
-		slog.Warn("本地文件同步失败", "错误信息", err)
-	}
 	slog.Info("初始化结束")
 	return
 }
 
-func initRoot(ctx context.Context) (fid string, err error) {
-	if err = context.Cause(ctx); err != nil {
+func initRoot(parentCtx context.Context) (fid string, err error) {
+	if err = context.Cause(parentCtx); err != nil {
 		slog.Warn("[任务中止] 初始化同步", "错误信息", err)
 		return
+	}
+	var ctx context.Context
+	ctx, cancel := context.WithCancelCause(parentCtx)
+	defer cancel(nil)
+	stopWithErr := func(err error) {
+		cancel(err)
 	}
 	fid = db.GetFid(syncPath)
 	if fid != "" {
@@ -69,14 +73,14 @@ func initRoot(ctx context.Context) (fid string, err error) {
 	db.SaveRecord(syncPath, fid, -1)
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		cloudScan(ctx, syncPath, fid, &wg)
+		cloudScan(ctx, syncPath, fid, &wg, stopWithErr)
 	})
 	wg.Wait()
 
 	if err = context.Cause(ctx); err != nil {
 		if isCloudScan.Load() {
 			slog.Error("云端扫描被中止，正在清理数据库", "错误信息", err)
-			db.ClearPath(syncPath)
+			db.BatchClearPaths([]string{syncPath})
 		}
 		return
 	}
@@ -101,7 +105,7 @@ func initTemp(ctx context.Context) (fid string, err error) {
 	return
 }
 
-func cloudScan(ctx context.Context, cloudPath, cloudFid string, wg *sync.WaitGroup) {
+func cloudScan(ctx context.Context, cloudPath, cloudFid string, wg *sync.WaitGroup, stop func(error)) {
 	select {
 	case <-ctx.Done():
 		return
@@ -109,9 +113,12 @@ func cloudScan(ctx context.Context, cloudPath, cloudFid string, wg *sync.WaitGro
 		defer func() { <-sem }()
 	}
 	start := time.Now()
+	defer func() {
+		slog.Info("[初始化] 文件夹处理完成", "路径", cloudPath, "耗时", time.Since(start))
+	}()
 	list, err := open115.FileList(ctx, cloudFid)
 	if err != nil {
-		localCancelFunc(fmt.Errorf("[初始化] 获取云端列表[%s]失败: %w", cloudPath, err))
+		stop(fmt.Errorf("[初始化] 获取云端列表[%s]失败: %w", cloudPath, err))
 		return
 	}
 
@@ -127,7 +134,7 @@ func cloudScan(ctx context.Context, cloudPath, cloudFid string, wg *sync.WaitGro
 		if item.Get("fc").String() == "0" {
 			go db.SaveRecord(fullPath, itemFid, -1)
 			wg.Go(func() {
-				cloudScan(ctx, fullPath, itemFid, wg)
+				cloudScan(ctx, fullPath, itemFid, wg, stop)
 			})
 			continue
 		}
@@ -147,5 +154,4 @@ func cloudScan(ctx context.Context, cloudPath, cloudFid string, wg *sync.WaitGro
 		}
 		go db.SaveRecord(savePath, itemFid, saveSize)
 	}
-	slog.Info("[初始化] 文件夹处理完成", "路径", cloudPath, "耗时", time.Since(start))
 }

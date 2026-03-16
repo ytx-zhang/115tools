@@ -14,29 +14,31 @@ import (
 )
 
 var cloudCancelFunc context.CancelCauseFunc
-var syncCond = sync.NewCond(&sync.Mutex{})
+var syncLocker sync.RWMutex
 
 func StartCloudSync(parentCtx context.Context) {
 	if stats.running.CompareAndSwap(false, true) {
+		syncLocker.Lock()
+		start := time.Now()
 		defer func() {
+			slog.Info("云端文件同步完成", "总数", stats.total.Load(), "耗时", time.Since(start))
+			syncLocker.Unlock()
 			stats.running.Store(false)
-			syncCond.Broadcast()
 			cloudCancelFunc(nil)
 		}()
 		stats.Reset()
 		var ctx context.Context
 		ctx, cloudCancelFunc = context.WithCancelCause(parentCtx)
-		slog.Info("[同步] 开始同步云端文件...")
+		slog.Info("开始同步云端文件...")
 		var wg sync.WaitGroup
 		wg.Go(func() { cloudSync(ctx, syncPath, syncFid, &wg) })
 		wg.Wait()
-		slog.Info("[同步] 任务结束", "总数", stats.total.Load())
 	}
 }
 
 func StopCloudSync() {
 	if stats.running.Load() && cloudCancelFunc != nil {
-		cloudCancelFunc(fmt.Errorf("[同步] 用户请求停止同步"))
+		cloudCancelFunc(fmt.Errorf("用户请求停止同步"))
 	}
 }
 func cloudSync(ctx context.Context, cloudPath string, cloudFID string, wg *sync.WaitGroup) {
@@ -49,7 +51,7 @@ func cloudSync(ctx context.Context, cloudPath string, cloudFID string, wg *sync.
 
 	_, count, folderCount, err := open115.FolderInfo(ctx, cloudPath)
 	if err != nil {
-		slog.Error("[同步] 获取文件夹信息失败", "路径", cloudPath, "错误信息", err)
+		slog.Error("获取文件夹信息失败", "路径", cloudPath, "错误信息", err)
 		return
 	}
 	cloudTotal := count + folderCount
@@ -60,7 +62,7 @@ func cloudSync(ctx context.Context, cloudPath string, cloudFID string, wg *sync.
 
 	items, err := open115.FileList(ctx, cloudFID)
 	if err != nil {
-		slog.Error("[同步] 获取文件列表失败", "路径", cloudPath, "错误信息", err)
+		slog.Error("获取文件列表失败", "路径", cloudPath, "错误信息", err)
 		return
 	}
 
@@ -98,7 +100,7 @@ func cloudSync(ctx context.Context, cloudPath string, cloudFID string, wg *sync.
 		dbFid := db.GetFid(savedPath)
 		if dbFid != "" && dbFid != fid {
 			if err := open115.DeleteFile(ctx, fid); err != nil {
-				markFailed(fmt.Sprintf("[同步] [%s] 清理云端冗余项失败: %s (%v)", time.Now().Format("15:04"), savedPath, err))
+				markFailed(fmt.Sprintf("[%s] 清理云端冗余项失败: %s (%v)", time.Now().Format("15:04"), savedPath, err))
 			}
 			continue
 		}
@@ -107,14 +109,20 @@ func cloudSync(ctx context.Context, cloudPath string, cloudFID string, wg *sync.
 		}
 		stats.total.Add(1)
 		if isStrm {
-			open115.SaveStrmFile(pc, fid, savedPath)
-			slog.Info("[同步] 新增STRM文件", "路径", savedPath)
-		} else {
-			if err := open115.DownloadFile(ctx, pc, savedPath); err != nil {
-				markFailed(fmt.Sprintf("[同步] [%s] 下载文件失败: %s (%v)", time.Now().Format("15:04"), savedPath, err))
+			if err := open115.SaveStrmFile(pc, fid, savedPath); err != nil {
+
+				slog.Error("创建strm文件失败", "文件", savedPath, "错误", err)
+				markFailed(fmt.Sprintf("[%s] 创建strm文件失败: %s (%v)", time.Now().Format("15:04"), savedPath, err))
 				continue
 			}
-			slog.Info("[同步] 下载文件成功", "路径", savedPath)
+			slog.Info("新增STRM文件", "文件", savedPath)
+		} else {
+			if err := open115.DownloadFile(ctx, pc, savedPath); err != nil {
+				slog.Error("下载文件失败", "文件", savedPath, "错误", err)
+				markFailed(fmt.Sprintf("[%s] 下载文件失败: %s (%v)", time.Now().Format("15:04"), savedPath, err))
+				continue
+			}
+			slog.Info("下载文件成功", "文件", savedPath)
 		}
 		db.SaveRecord(savedPath, fid, saveSize)
 		stats.completed.Add(1)
