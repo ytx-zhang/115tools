@@ -38,25 +38,20 @@ func localSync(ctx context.Context, workPath string, workFid string) {
 					continue
 				}
 
-				isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
-				var size int64
-				if isStrm {
-					size = fileInfo.ModTime().Unix()
-				} else {
-					size = fileInfo.Size()
-				}
 				cid := db.GetFid(filepath.Dir(fPath))
+				isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
 
-				uploadFunc := upFileTask
 				if isStrm {
-					uploadFunc = upStrmTask
+					err = upStrmTask(ctx, cid, fPath)
+				} else {
+					err = upFileTask(ctx, cid, fPath, fileInfo)
 				}
-
-				if err := uploadFunc(ctx, cid, fPath, size); err != nil {
+				if err != nil {
 					slog.Error("同步失败", "文件", fPath, "错误", err)
 				} else {
 					slog.Info("同步成功", "文件", fPath)
 				}
+
 			}
 		})
 	}
@@ -157,11 +152,12 @@ func localScan(ctx context.Context, workPath string, workFid string, uploadTasks
 		*uploadTasks = append(*uploadTasks, fullPath)
 	}
 }
-func upFileTask(ctx context.Context, cid, fPath string, size int64) error {
+func upFileTask(ctx context.Context, cid, fPath string, fileInfo os.FileInfo) error {
 	fid, pickcode, err := open115.UploadFile(ctx, fPath, cid, "", "")
 	if err != nil {
 		return err
 	}
+	size := fileInfo.Size()
 	savePath := fPath
 	ext := filepath.Ext(fPath)
 	isVideo := checkVideo(ext, size)
@@ -170,21 +166,21 @@ func upFileTask(ctx context.Context, cid, fPath string, size int64) error {
 		indexFid := db.GetFid(savePath)
 		if indexFid != "" {
 			if err := open115.MoveFile(ctx, indexFid, tempFid); err != nil {
-				return fmt.Errorf("[%s]: 清理旧视频失败: %s", savePath, err)
+				return fmt.Errorf("[%s]: 清理旧视频失败: %w", savePath, err)
 			}
 		}
 		if err := open115.SaveStrmFile(pickcode, fid, savePath); err != nil {
-			return fmt.Errorf("[%s]: 写入strm文件失败: %s", savePath, err)
+			return fmt.Errorf("[%s]: 写入strm文件失败: %w", savePath, err)
 		}
 		if err := os.Remove(fPath); err != nil {
-			return fmt.Errorf("[%s]: 删除视频文件失败: %s", fPath, err)
+			return fmt.Errorf("[%s]: 删除视频文件失败: %w", fPath, err)
 		}
 		size = time.Now().Unix()
 	}
 	db.SaveRecord(savePath, fid, size)
 	return nil
 }
-func upStrmTask(ctx context.Context, cid, fPath string, size int64) error {
+func upStrmTask(ctx context.Context, cid, fPath string) error {
 	contentBytes, _ := os.ReadFile(fPath)
 	pickcode, fid := extractPickcode(string(contentBytes))
 	if pickcode == "" {
@@ -193,34 +189,30 @@ func upStrmTask(ctx context.Context, cid, fPath string, size int64) error {
 	if fid == "" {
 		cloudFid, _, _, err := open115.GetDownloadUrl(ctx, pickcode, "")
 		if err != nil {
-			return fmt.Errorf("[%s]: 获取fid失败: %v", fPath, err)
+			return fmt.Errorf("[%s]: 获取fid失败: %w", fPath, err)
 		}
 		fid = cloudFid
 	}
-	if fid == db.GetFid(fPath) {
-		db.SaveRecord(fPath, fid, size)
-		return nil
-	}
 
 	if err := open115.MoveFile(ctx, fid, cid); err != nil {
-		return fmt.Errorf("[%s]: 移动云端视频失败: %v", fPath, err)
+		return fmt.Errorf("[%s]: 移动云端视频失败: %w", fPath, err)
 	}
 
 	targetPureName := strings.TrimSuffix(filepath.Base(fPath), ".strm")
 	newName, err := open115.UpdateFile(ctx, fid, targetPureName)
 	if err != nil {
-		return fmt.Errorf("[%s]: 云端视频改名失败: %v", fPath, err)
+		return fmt.Errorf("[%s]: 云端视频改名失败: %w", fPath, err)
 	}
 
-	realExt := filepath.Ext(newName)
-	if strings.TrimSuffix(newName, realExt) != targetPureName {
-		_, err = open115.UpdateFile(ctx, fid, targetPureName+realExt)
+	trueName := targetPureName + filepath.Ext(newName)
+	if newName != trueName {
+		_, err = open115.UpdateFile(ctx, fid, trueName)
 		if err != nil {
-			return fmt.Errorf("[%s]: 云端视频二次改名失败: %v", fPath, err)
+			return fmt.Errorf("[%s]: 云端视频二次改名失败: %w", fPath, err)
 		}
 	}
 	if err := open115.SaveStrmFile(pickcode, fid, fPath); err != nil {
-		return fmt.Errorf("[%s]: 文件写入失败: %v", fPath, err)
+		return fmt.Errorf("[%s]: 文件写入失败: %w", fPath, err)
 	}
 	db.SaveRecord(fPath, fid, time.Now().Unix())
 	return nil
