@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/tidwall/sjson"
+	"github.com/bytedance/sonic"
 )
 
 type taskStats struct {
@@ -16,8 +16,12 @@ type taskStats struct {
 	running      atomic.Bool
 }
 
-var stats = &taskStats{
-	failedErrors: []string{},
+type statsSnapshot struct {
+	Total     int64    `json:"total"`
+	Completed int64    `json:"completed"`
+	Failed    int64    `json:"failed"`
+	Running   bool     `json:"running"`
+	Errors    []string `json:"errors"`
 }
 
 func (s *taskStats) Reset() {
@@ -29,19 +33,27 @@ func (s *taskStats) Reset() {
 	s.failedErrors = s.failedErrors[:0]
 }
 
-func GetStatus() string {
-	stats.mu.Lock()
-	defer stats.mu.Unlock()
-	data, _ := sjson.Set("", "total", stats.total.Load())
-	data, _ = sjson.Set(data, "completed", stats.completed.Load())
-	data, _ = sjson.Set(data, "failed", stats.failed.Load())
-	data, _ = sjson.Set(data, "running", stats.running.Load())
-	data, _ = sjson.Set(data, "errors", stats.failedErrors)
+func (s *taskStats) GetStatus() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot := statsSnapshot{
+		Total:     s.total.Load(),
+		Completed: s.completed.Load(),
+		Failed:    s.failed.Load(),
+		Running:   s.running.Load(),
+		Errors:    s.failedErrors,
+	}
+
+	data, err := sonic.MarshalString(snapshot)
+	if err != nil {
+		return "{}"
+	}
 	return data
 }
-func markFailed(reason string) {
-	stats.mu.Lock()
-	defer stats.mu.Unlock()
-	stats.failed.Add(1)
-	stats.failedErrors = append(stats.failedErrors, reason)
+
+func (s *taskStats) markFailed(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failed.Add(1)
+	s.failedErrors = append(s.failedErrors, reason)
 }

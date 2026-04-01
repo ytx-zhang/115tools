@@ -11,7 +11,7 @@
     var oldSetSrc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src').set;
     Object.defineProperty(HTMLMediaElement.prototype, 'src', {
         set: function (url) {
-            this._isCDN = url && url.includes('is302=1');
+            this._isCDN = url && url.includes('mediaPath=');
 
             if (this._isCDN) {
                 console.log("[302] 超时监控已开启");

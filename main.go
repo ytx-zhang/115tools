@@ -1,9 +1,9 @@
 package main
 
 import (
-	"115tools/addStrm"
 	"115tools/config"
 	"115tools/db"
+	"115tools/drive"
 	"115tools/emby302"
 	"115tools/strmServer"
 	"115tools/syncFile"
@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -28,40 +29,52 @@ func main() {
 	ctx, mainCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer mainCancel()
 	var wg sync.WaitGroup
-
-	if err := config.LoadConfig(ctx, "/app/data/config.yaml"); err != nil {
-		slog.Error("加载配置失败", "错误信息", err)
+	wg.Go(func() {
+		startNginx(ctx)
+	})
+	cfg, err := config.New("/app/data/config.yaml")
+	if err != nil {
+		slog.Error("[CONFIG] 配置文件错误", "错误信息", err)
 		return
 	}
-	wg.Go(func() { config.StartRefresh(ctx) })
+	apiClient := drive.New115Drive(cfg)
 
 	mux := http.NewServeMux()
 	server := &http.Server{
-		Addr:         ":8080",
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 0,
-		IdleTimeout:  60 * time.Second,
+		Addr:    ":8080",
+		Handler: mux,
 	}
+	strmServer := strmServer.New(apiClient)
 	mux.HandleFunc("GET /download", strmServer.RedirectToRealURL)
 
 	wg.Go(func() {
 		slog.Info("HTTP服务启动在 :8080")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			mainCancel()
 			slog.Error("服务器异常退出", "错误信息", err)
+			return
 		}
 	})
+	embyURL := os.Getenv("EMBY_URL")
+	if embyURL != "" {
+		wg.Go(func() {
+			emby302.StartEmby302(ctx, embyURL)
+		})
+	}
 
-	wg.Go(func() { emby302.StartEmby302(ctx) })
+	boltDB, err := db.New(`/app/data/files.db`)
+	if err != nil {
+		mainCancel()
+		slog.Error("数据库初始化失败", "错误信息", err)
+		return
+	}
+	defer boltDB.Close()
 
-	db.Init()
-	defer db.Close()
-
-	if err := syncFile.InitSync(ctx); err != nil {
+	syncFile, err := syncFile.New(ctx, cfg, apiClient, boltDB, &wg)
+	if err != nil {
 		slog.Error("初始化同步失败", "错误信息", err)
 		return
 	}
-	wg.Go(func() { syncFile.StartWatch(ctx, &wg) })
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		data, _ := indexHTML.ReadFile("index.html")
@@ -77,8 +90,8 @@ func main() {
 		f, ok := w.(http.Flusher)
 		send := func() {
 			data := fmt.Sprintf(`{"sync":%s,"strm":%s}`,
-				syncFile.GetStatus(),
-				addStrm.GetStatus(),
+				syncFile.CloudSyncStats.GetStatus(),
+				syncFile.AddStrmStats.GetStatus(),
 			)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			if ok {
@@ -101,23 +114,31 @@ func main() {
 	})
 
 	mux.HandleFunc("GET /sync", func(w http.ResponseWriter, r *http.Request) {
-		wg.Go(func() { syncFile.StartCloudSync(ctx) })
+		wg.Go(func() {
+			syncFile.StartCloudSync(ctx)
+		})
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusAccepted)
 	})
 	mux.HandleFunc("GET /stopsync", func(w http.ResponseWriter, r *http.Request) {
-		syncFile.StopCloudSync()
+		wg.Go(func() {
+			syncFile.StopCloudSync()
+		})
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusAccepted)
 	})
 
 	mux.HandleFunc("GET /strm", func(w http.ResponseWriter, r *http.Request) {
-		wg.Go(func() { addStrm.StartAddStrm(ctx) })
+		wg.Go(func() {
+			syncFile.StartAddStrm(ctx)
+		})
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusAccepted)
 	})
 	mux.HandleFunc("GET /stopstrm", func(w http.ResponseWriter, r *http.Request) {
-		addStrm.StopAddStrm()
+		wg.Go(func() {
+			syncFile.StopAddStrm()
+		})
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusAccepted)
 	})
@@ -153,10 +174,41 @@ func setupLogger() {
 		Level: level,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
-				return slog.String(slog.TimeKey, a.Value.Time().Format("15:04:05"))
+				return slog.String(slog.TimeKey, a.Value.Time().Format("15:04:05.000"))
 			}
 			return a
 		},
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, opts)))
+}
+
+// startNginx 负责启动并监控 Nginx 进程
+func startNginx(ctx context.Context) {
+	// 确保缓存目录存在
+	os.MkdirAll("/app/data/cache", 0755)
+
+	// -g "daemon off;" 确保 Nginx 前台运行，这样 Go 才能捕获其输出
+	cmd := exec.CommandContext(ctx, "nginx", "-g", "daemon off;")
+
+	// 将 Nginx 的标准输出和错误输出直接导向 Go 的标准输出
+	// 这样在 docker logs 里就能直接看到 Nginx 日志
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	slog.Debug("[NGINX] 正在启动缓存代理...")
+	if err := cmd.Start(); err != nil {
+		slog.Error("[NGINX] 启动失败", "错误", err)
+		return
+	}
+	slog.Info("[NGINX] 启动完成")
+
+	// 进程启动后，cmd.Wait 会在进程结束或 ctx 被取消时返回
+	// CommandContext 会在 ctx Done 时自动向 Nginx 发送 SIGKILL
+	// 如果想更优雅，可以在 ctx.Done() 后手动发送 SIGQUIT，但通常 SIGTERM 足够
+	err := cmd.Wait()
+	if err != nil && !strings.Contains(err.Error(), "signal: killed") {
+		slog.Warn("[NGINX] 进程已退出", "状态", err)
+	} else {
+		slog.Info("[NGINX] 进程已安全关闭")
+	}
 }

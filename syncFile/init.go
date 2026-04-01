@@ -3,7 +3,7 @@ package syncFile
 import (
 	"115tools/config"
 	"115tools/db"
-	"115tools/open115"
+	"115tools/drive"
 	"context"
 	"fmt"
 	"log/slog"
@@ -15,43 +15,82 @@ import (
 	"time"
 )
 
-var (
+type SyncFile struct {
+	api *drive.Open115
+	db  *db.DB
+
 	syncPath string
 	syncFid  string
+
 	tempPath string
 	tempFid  string
 
-	sem = make(chan struct{}, 5)
-)
+	strmPath string
+	strmUrl  string
 
-func InitSync(parentCtx context.Context) (err error) {
-	slog.Info("开始初始化...")
+	sem chan struct{}
 
-	config := config.Get()
-	syncPath = config.SyncPath
-	tempPath = config.TempPath
+	localSyncMu    sync.Mutex
+	localSyncPaths map[string]struct{}
+	localSyncChan  chan struct{}
 
-	if syncPath == "" {
-		return fmt.Errorf("SyncPath 未设置")
-	}
+	cloudCancelFunc context.CancelCauseFunc
+	cloudSyncLocker sync.RWMutex
+	CloudSyncStats  taskStats
 
-	if syncFid, err = initRoot(parentCtx); err != nil {
-		return
-	}
-
-	if tempFid, err = initTemp(parentCtx); err != nil {
-		return
-	}
-	localSync(parentCtx, syncPath, syncFid)
-
-	slog.Info("初始化结束")
-	return
+	addStrmCancelFunc context.CancelCauseFunc
+	moveFids          []string
+	AddStrmStats      taskStats
 }
 
-func initRoot(parentCtx context.Context) (fid string, err error) {
-	if err = context.Cause(parentCtx); err != nil {
+func New(ctx context.Context, cfg *config.Config, api *drive.Open115, db *db.DB, wg *sync.WaitGroup) (*SyncFile, error) {
+	s := &SyncFile{
+		api: api,
+		db:  db,
+
+		syncPath: cfg.SyncPath,
+		tempPath: cfg.TempPath,
+
+		strmPath: cfg.StrmPath,
+		strmUrl:  cfg.StrmUrl,
+
+		sem: make(chan struct{}, 5),
+
+		localSyncPaths: make(map[string]struct{}),
+		localSyncChan:  make(chan struct{}, 1),
+
+		CloudSyncStats: taskStats{
+			failedErrors: []string{},
+		},
+		AddStrmStats: taskStats{
+			failedErrors: []string{},
+		},
+	}
+
+	if err := s.initRoot(ctx); err != nil {
+		return nil, err
+	}
+
+	if err := s.initTemp(ctx); err != nil {
+		return nil, err
+	}
+	s.addLocalSyncTask(s.syncPath)
+	wg.Go(func() {
+		s.startLocalSyncWorker(ctx)
+	})
+	wg.Go(func() {
+		s.watchSyncPath(ctx)
+	})
+	wg.Go(func() {
+		s.cronSync(ctx)
+	})
+	return s, nil
+}
+
+func (s *SyncFile) initRoot(parentCtx context.Context) error {
+	if err := context.Cause(parentCtx); err != nil {
 		slog.Warn("[任务中止] 初始化同步", "错误信息", err)
-		return
+		return err
 	}
 	var ctx context.Context
 	ctx, cancel := context.WithCancelCause(parentCtx)
@@ -59,99 +98,112 @@ func initRoot(parentCtx context.Context) (fid string, err error) {
 	stopWithErr := func(err error) {
 		cancel(err)
 	}
-	fid = db.GetFid(syncPath)
-	if fid != "" {
-		return
+	dbFid := s.db.GetFid(s.syncPath)
+	if dbFid != "" {
+		s.syncFid = dbFid
+		return nil
 	}
 	var isCloudScan atomic.Bool
 	isCloudScan.Store(true)
 	defer isCloudScan.Store(false)
 	slog.Info("初次运行，开始初始化云端数据库...")
-	if fid, _, _, err = open115.FolderInfo(ctx, syncPath); err != nil {
-		return
+	info, err := s.api.GetDirInfo(ctx, s.syncPath)
+	if err != nil {
+		return err
 	}
-	db.SaveRecord(syncPath, fid, -1)
+	s.syncFid = info.Fid
+	s.db.SaveRecord(s.syncPath, s.syncFid, -1)
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		cloudScan(ctx, syncPath, fid, &wg, stopWithErr)
+		s.cloudScan(ctx, s.syncPath, s.syncFid, &wg, stopWithErr)
 	})
 	wg.Wait()
 
-	if err = context.Cause(ctx); err != nil {
+	if err := context.Cause(ctx); err != nil {
 		if isCloudScan.Load() {
 			slog.Error("云端扫描被中止，正在清理数据库", "错误信息", err)
-			db.BatchClearPaths([]string{syncPath})
+			s.db.BatchClearPaths([]string{s.syncPath})
 		}
-		return
+		return err
 	}
 
 	slog.Info("[初始化] 云端数据库初始化完成")
-	return
+	return nil
 }
-func initTemp(ctx context.Context) (fid string, err error) {
-	if err = context.Cause(ctx); err != nil {
+func (s *SyncFile) initTemp(ctx context.Context) error {
+	if err := context.Cause(ctx); err != nil {
 		slog.Warn("[任务中止] Temp目录初始化", "错误信息", err)
-		return
+		return err
 	}
-	fid = db.GetFid(tempPath)
-	if fid != "" {
-		return
+	dbFid := s.db.GetFid(s.tempPath)
+	if dbFid != "" {
+		s.tempFid = dbFid
+		return nil
 	}
-	fid, _, _, err = open115.FolderInfo(ctx, tempPath)
+	info, err := s.api.GetDirInfo(ctx, s.tempPath)
 	if err != nil {
-		return
+		return err
 	}
-	db.SaveRecord(tempPath, fid, -1)
-	return
+	s.tempFid = info.Fid
+	s.db.SaveRecord(s.tempPath, s.tempFid, -1)
+	return nil
 }
 
-func cloudScan(ctx context.Context, cloudPath, cloudFid string, wg *sync.WaitGroup, stop func(error)) {
+func (s *SyncFile) cloudScan(ctx context.Context, currentPath, currentFid string, wg *sync.WaitGroup, stop func(error)) {
 	select {
 	case <-ctx.Done():
 		return
-	case sem <- struct{}{}:
-		defer func() { <-sem }()
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
 	}
 	start := time.Now()
 	defer func() {
-		slog.Info("[初始化] 文件夹处理完成", "路径", cloudPath, "耗时", time.Since(start))
+		slog.Debug("[初始化] 文件夹处理完成", "路径", currentPath, "耗时", time.Since(start))
 	}()
-	list, err := open115.FileList(ctx, cloudFid)
+	flieList, err := s.api.GetFileList(ctx, currentFid)
 	if err != nil {
-		stop(fmt.Errorf("[初始化] 获取云端列表[%s]失败: %w", cloudPath, err))
+		stop(fmt.Errorf("[初始化] 获取云端列表[%s]失败: %w", currentPath, err))
 		return
 	}
 
-	for _, item := range list {
+	for _, cloudFile := range flieList {
 		if err := context.Cause(ctx); err != nil {
 			return
 		}
-		itemFid := item.Get("fid").String()
-		if item.Get("aid").String() != "1" {
-			continue
-		}
-		fullPath := filepath.Join(cloudPath, item.Get("fn").String())
-		if item.Get("fc").String() == "0" {
-			go db.SaveRecord(fullPath, itemFid, -1)
+		cloudFid := cloudFile.Fid
+		savePath := filepath.Join(currentPath, cloudFile.Name)
+		if cloudFile.IsDir {
+			go s.db.SaveRecord(savePath, cloudFid, -1)
 			wg.Go(func() {
-				cloudScan(ctx, fullPath, itemFid, wg, stop)
+				s.cloudScan(ctx, savePath, cloudFid, wg, stop)
 			})
 			continue
 		}
-		savePath := fullPath
-		saveSize := item.Get("fs").Int()
-		if item.Get("isv").Int() == 1 {
-			savePath = strings.TrimSuffix(fullPath, filepath.Ext(fullPath)) + ".strm"
+		saveSize := cloudFile.Size
+		if cloudFile.IsVideo {
+			savePath = strings.TrimSuffix(savePath, filepath.Ext(savePath)) + ".strm"
 			saveSize = 0
 			if info, err := os.Stat(savePath); err == nil {
-				content, err := os.ReadFile(savePath)
-				if err == nil {
-					if _, localFid := extractPickcode(string(content)); localFid == itemFid {
-						saveSize = info.ModTime().Unix()
-					}
+				if _, localFid := extractPickcode(savePath); localFid == cloudFid {
+					saveSize = info.ModTime().Unix()
 				}
 			}
 		}
-		go db.SaveRecord(savePath, itemFid, saveSize)
+		go s.db.SaveRecord(savePath, cloudFid, saveSize)
+	}
+}
+func (s *SyncFile) cronSync(ctx context.Context) {
+	ticker := time.NewTicker(12 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			slog.Info("触发定时全量同步任务")
+			s.addLocalSyncTask(s.syncPath)
+			s.StartCloudSync(ctx)
+		case <-ctx.Done():
+			return
+		}
 	}
 }

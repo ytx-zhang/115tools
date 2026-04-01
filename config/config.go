@@ -1,124 +1,122 @@
 package config
 
 import (
-	"context"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
-	"net/url"
 	"os"
-	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
-	"github.com/tidwall/gjson"
 	"gopkg.in/yaml.v3"
 )
 
-func Get() *config {
-	return conf.Load()
+// Config 包含所有业务路径和 Token 操作方法
+type Config struct {
+	// 静态配置字段：外部直接通过 cfg.SyncPath 访问
+	SyncPath string `yaml:"sync_path"`
+	StrmPath string `yaml:"strm_path"`
+	TempPath string `yaml:"temp_path"`
+	StrmUrl  string `yaml:"strm_url"`
+
+	// 内部私有属性
+	path  string
+	mu    sync.RWMutex
+	token tokenData
 }
 
-var (
-	conf       atomic.Pointer[config]
-	configPath string
-)
-
-type config struct {
-	Token        tokenConfig `yaml:"token" json:"token"`
-	SyncPath     string      `yaml:"sync_path" json:"sync_path"`
-	StrmPath     string      `yaml:"strm_path" json:"strm_path"`
-	TempPath     string      `yaml:"temp_path" json:"temp_path"`
-	StrmUrl      string      `yaml:"strm_url" json:"strm_url"`
-	EmbyUrl      string      `yaml:"emby_url" json:"emby_url"`
-	FontInAssUrl string      `yaml:"fontinass_url" json:"fontinass_url"`
-}
-type tokenConfig struct {
-	AccessToken  string    `yaml:"access_token" json:"access_token"`
-	RefreshToken string    `yaml:"refresh_token" json:"refresh_token"`
-	ExpireAt     time.Time `yaml:"expire_at" json:"expire_at"`
+type tokenData struct {
+	AccessToken  string    `yaml:"access_token"`
+	RefreshToken string    `yaml:"refresh_token"`
+	ExpireAt     time.Time `yaml:"expire_at"`
 }
 
-func LoadConfig(ctx context.Context, p string) error {
-	configPath = p
-	file, err := os.ReadFile(configPath)
+// New 初始化并执行必须字段检查
+func New(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("配置文件不存在或无法读取: %v", err)
+		return nil, fmt.Errorf("读取配置文件失败: %w", err)
 	}
 
-	var initialConf config
-	if err := yaml.Unmarshal(file, &initialConf); err != nil {
-		return fmt.Errorf("配置文件格式解析失败: %v", err)
+	var tmp struct {
+		Config `yaml:",inline"`
+		Token  tokenData `yaml:"token"`
 	}
 
-	if initialConf.Token.RefreshToken == "" {
-		return fmt.Errorf("配置不完整，缺少 RefreshToken")
-	}
-	conf.Store(&initialConf)
-	if initialConf.Token.ExpireAt.Unix() > 0 {
-		slog.Info("[CONFIG] 配置已加载", "token有效期", initialConf.Token.ExpireAt.Format("2006-01-02 15:04:05"))
+	if err := yaml.Unmarshal(data, &tmp); err != nil {
+		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
+	cfg := &tmp.Config
+	cfg.path = path
+	cfg.token = tmp.Token
+
+	// 执行必须字段检查
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
+}
+
+// validate 检查核心参数是否为空
+func (c *Config) validate() error {
+	if c.token.RefreshToken == "" {
+		return fmt.Errorf("配置错误: token.refresh_token 不能为空")
+	}
+	if c.SyncPath == "" {
+		return fmt.Errorf("配置错误: sync_path 不能为空")
+	}
+	if c.StrmPath == "" {
+		return fmt.Errorf("配置错误: strm_path 不能为空")
+	}
+	if c.TempPath == "" {
+		return fmt.Errorf("配置错误: temp_path 不能为空")
+	}
+	if c.StrmUrl == "" {
+		return fmt.Errorf("配置错误: strm_url 不能为空")
+	}
 	return nil
 }
-func StartRefresh(ctx context.Context) {
-	for {
-		success := refreshToken(ctx)
-		duration := 1 * time.Minute
-		if success {
-			duration = 5 * time.Minute
-		}
-		select {
-		case <-time.After(duration):
-			continue
-		case <-ctx.Done():
-			slog.Info("Token 刷新任务已安全停止")
-			return
-		}
-	}
+
+func (c *Config) GetAccessToken() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token.AccessToken
 }
-func refreshToken(ctx context.Context) bool {
-	if err := context.Cause(ctx); err != nil {
-		return false
-	}
-	current := conf.Load()
-	if current == nil || current.Token.RefreshToken == "" {
-		slog.Error("[TOKEN] 刷新失败: 缺少 RefreshToken")
-		os.Exit(1)
-	}
-	if time.Until(current.Token.ExpireAt) > 10*time.Minute {
-		return true
-	}
-	form := url.Values{"refresh_token": {strings.TrimSpace(current.Token.RefreshToken)}}
-	reqBody := strings.NewReader(form.Encode())
-	req, _ := http.NewRequestWithContext(ctx, "POST", "https://passportapi.115.com/open/refreshToken", reqBody)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		slog.Error("[TOKEN] 网络请求失败", "错误信息", err)
-		return false
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	result := gjson.ParseBytes(body)
-	data := result.Get("data")
-	if result.Get("state").Int() == 1 {
-		newConf := *current
 
-		newConf.Token.AccessToken = data.Get("access_token").String()
-		newConf.Token.ExpireAt = time.Now().Add(time.Duration(data.Get("expires_in").Int()) * time.Second)
-		newRefreshToken := data.Get("refresh_token").String()
-		if newRefreshToken != "" {
-			newConf.Token.RefreshToken = newRefreshToken
-		}
+func (c *Config) GetRefreshToken() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token.RefreshToken
+}
 
-		conf.Store(&newConf)
-		d, _ := yaml.Marshal(&newConf)
-		_ = os.WriteFile(configPath, d, 0644)
-		slog.Info("[TOKEN] 刷新成功!", "有效期至", newConf.Token.ExpireAt.Format("15:04:05"))
-		return true
+func (c *Config) GetExpireAt() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token.ExpireAt
+}
+
+func (c *Config) SaveToken(access, refresh string, expiresIn int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.token.AccessToken = access
+	if refresh != "" {
+		c.token.RefreshToken = refresh
 	}
-	slog.Error("[TOKEN] 刷新失败", "接口消息", result.Get("message"))
-	return false
+
+	// 计算下次到期时间
+	expireAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
+	c.token.ExpireAt = expireAt
+
+	// 序列化并存盘
+	out, _ := yaml.Marshal(struct {
+		*Config `yaml:",inline"`
+		Token   tokenData `yaml:"token"`
+	}{c, c.token})
+
+	_ = os.WriteFile(c.path, out, 0644)
+
+	// 显示直观的到期时间日志
+	slog.Info("[CONFIG] Token 已更新", "到期时间", expireAt.Format("2006-01-02 15:04:05"))
 }

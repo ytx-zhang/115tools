@@ -12,3 +12,5 @@ services:
       - 8095:8095 #emby302的端口
     environment:
       - TZ=Asia/Shanghai
+      - LOG_LEVEL=info
+      - EMBY_URL=http://emby:8096

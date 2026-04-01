@@ -16,9 +16,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 # --- 第二阶段：运行时 (Run) ---
 FROM alpine:latest AS runner
 
-# 1. 关键修改点：安装 tzdata，但不要在构建时写死硬链接
-# 只需要保证 tzdata 存在，剩下的交给环境变量 TZ
-RUN apk add --no-cache tzdata ca-certificates
+
+RUN apk add --no-cache nginx tzdata ca-certificates
 
 # 2. 设置默认时区（如果运行时不指定 TZ 参数，则默认使用上海）
 ENV TZ=Asia/Shanghai
@@ -26,6 +25,7 @@ ENV TZ=Asia/Shanghai
 WORKDIR /app
 
 COPY --from=builder /app/server .
+COPY nginx.conf /etc/nginx/nginx.conf
 
 # 暴露你的后端端口
 EXPOSE 8080 8095

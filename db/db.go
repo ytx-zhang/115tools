@@ -3,6 +3,7 @@ package db
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -11,50 +12,66 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-var (
-	boltDB     *bbolt.DB
-	bucketName = []byte("FileIndex")
-	dBPath     = `/app/data/files.db`
-)
-
 // Init 初始化数据库连接并创建 Bucket
-func Init() {
-	var err error
-	boltDB, err = bbolt.Open(dBPath, 0600, nil)
+type DB struct {
+	boltDB     *bbolt.DB
+	bucketName []byte
+}
+
+// New 初始化数据库实例
+func New(path string) (*DB, error) {
+	// 1. 打开数据库
+	db, err := bbolt.Open(path, 0600, nil)
 	if err != nil {
-		slog.Error("[数据库] 初始化失败", "错误信息", err)
-		return
+		return nil, fmt.Errorf("[数据库] 开启失败: %w", err)
 	}
-	// 优化高频写入性能
-	boltDB.MaxBatchDelay = 100 * time.Millisecond
-	boltDB.Update(func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(bucketName)
+
+	// 2. 优化性能设置
+	db.MaxBatchDelay = 100 * time.Millisecond
+
+	instance := &DB{
+		boltDB:     db,
+		bucketName: []byte("FileIndex"),
+	}
+
+	// 3. 确保 Bucket 存在
+	err = db.Update(func(tx *bbolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(instance.bucketName)
 		return err
 	})
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("[数据库] 创建 Bucket 失败: %w", err)
+	}
+
+	slog.Info("[数据库] 初始化成功", "路径", path)
+	return instance, nil
 }
 
 // Close 关闭数据库
-func Close() {
-	if boltDB != nil {
-		if err := boltDB.Close(); err != nil {
+func (d *DB) Close() {
+	if d.boltDB != nil {
+		if err := d.boltDB.Close(); err != nil {
 			slog.Error("[数据库] 关闭失败", "错误信息", err)
+		} else {
+			slog.Info("[数据库] 关闭成功")
 		}
 	}
 }
 
 // GetInfo 获取单个路径的信息
-func GetInfo(localPath string) (fid string, size int64) {
+func (d *DB) GetInfo(localPath string) (fid string, size int64) {
 	size = -2
-	boltDB.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketName)
+	d.boltDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(d.bucketName)
 		v := b.Get([]byte(localPath))
 		if v == nil {
 			return nil
 		}
-		s := string(v)
-		if before, after, ok := strings.Cut(s, "|"); ok {
-			fid = before
-			size, _ = strconv.ParseInt(after, 10, 64)
+
+		if before, after, ok := bytes.Cut(v, []byte("|")); ok {
+			fid = string(before)
+			size, _ = strconv.ParseInt(string(after), 10, 64)
 		}
 		return nil
 	})
@@ -62,26 +79,26 @@ func GetInfo(localPath string) (fid string, size int64) {
 }
 
 // GetFid 快捷获取文件 FID
-func GetFid(localPath string) (fid string) {
-	fid, _ = GetInfo(localPath)
+func (d *DB) GetFid(localPath string) (fid string) {
+	fid, _ = d.GetInfo(localPath)
 	return
 }
 
 // SaveRecord 使用 Batch 批量保存记录
-func SaveRecord(localPath string, fid string, size int64) {
+func (d *DB) SaveRecord(localPath string, fid string, size int64) {
 	val := fid + "|" + strconv.FormatInt(size, 10)
-	boltDB.Batch(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketName)
+	d.boltDB.Batch(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(d.bucketName)
 		return b.Put([]byte(localPath), []byte(val))
 	})
 }
 
-func BatchClearPaths(fPaths []string) {
+func (d *DB) BatchClearPaths(fPaths []string) {
 	if len(fPaths) == 0 {
 		return
 	}
-	err := boltDB.Batch(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketName)
+	err := d.boltDB.Batch(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(d.bucketName)
 		if b == nil {
 			return nil
 		}
@@ -129,14 +146,14 @@ func BatchClearPaths(fPaths []string) {
 }
 
 // GetTotalCount 统计子项总数 (仅限统计，不建议在高频逻辑中使用)
-func GetTotalCount(parentPath string) (count int64) {
+func (d *DB) GetTotalCount(parentPath string) (count int64) {
 	prefix := parentPath
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
 	prefixBytes := []byte(prefix)
-	boltDB.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketName)
+	d.boltDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(d.bucketName)
 		if b == nil {
 			return nil
 		}
@@ -149,18 +166,18 @@ func GetTotalCount(parentPath string) (count int64) {
 	return
 }
 
-func ScanChildren(ctx context.Context, parentPath string, handler func(name string, valStr string)) {
+func (d *DB) ScanChildren(ctx context.Context, workPath string, handler func(name string, valStr string)) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	prefix := parentPath
+	prefix := workPath
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
 	prefixBytes := []byte(prefix)
 
-	boltDB.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketName)
+	d.boltDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(d.bucketName)
 		if b == nil {
 			return nil
 		}

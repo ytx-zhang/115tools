@@ -1,7 +1,6 @@
 package emby302
 
 import (
-	"115tools/config"
 	"bytes"
 	"context"
 	_ "embed"
@@ -16,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/bytedance/sonic"
+	"github.com/bytedance/sonic/ast"
 )
 
 const (
@@ -25,44 +24,24 @@ const (
 )
 
 var (
-	embyURL      string
-	embyApiKey   string
-	fontInAssURL string
-	strmUrl      string
-
+	embyURL         string
 	sharedTransport = &http.Transport{
 		MaxIdleConnsPerHost: 100,
 	}
 	sharedClient = &http.Client{
 		Transport: sharedTransport,
-		Timeout:   30 * time.Second,
 	}
 	redirectClient = &http.Client{
 		Transport: sharedTransport,
-		Timeout:   30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+	sem = make(chan struct{}, 1)
 )
 
-func StartEmby302(ctx context.Context) {
-	conf := config.Get()
-	embyURL = conf.EmbyUrl
-	fontInAssURL = conf.FontInAssUrl
-	strmUrl = conf.StrmUrl
-
-	var subProxy *httputil.ReverseProxy
-	if fontInAssURL != "" {
-		subTarget, _ := url.Parse(fontInAssURL)
-		subProxy = &httputil.ReverseProxy{
-			Rewrite: func(pr *httputil.ProxyRequest) {
-				pr.SetURL(subTarget)
-			},
-			Transport: sharedTransport,
-		}
-	}
-
+func StartEmby302(ctx context.Context, embyurl string) {
+	embyURL = embyurl
 	target, _ := url.Parse(embyURL)
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -75,29 +54,17 @@ func StartEmby302(ctx context.Context) {
 	}
 
 	mux := http.NewServeMux()
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		if path == "/web/modules/htmlvideoplayer/plugin.js" {
-			handleJSInject(w, r)
+	mux.HandleFunc("/web/modules/htmlvideoplayer/plugin.js", handleJSInject)
+	mux.HandleFunc("/emby/Items/{itemID}/PlaybackInfo", handlePlaybackInfo)
+	mux.HandleFunc("/emby/videos/{itemID}/{_}", func(w http.ResponseWriter, r *http.Request) {
+		if handleVideo302(w, r) {
 			return
-		}
-		if subProxy != nil && strings.Contains(path, "/Subtitles/") && strings.Contains(path, "/Stream.") {
-			subProxy.ServeHTTP(w, r)
-			return
-		}
-		if strings.HasSuffix(path, "/PlaybackInfo") {
-			handlePlaybackInfo(w, r)
-			return
-		}
-		if strings.Contains(path, "/videos/") && strings.Contains(path, "/original.") {
-			if handleVideo302(w, r) {
-				return
-			}
 		}
 		proxy.ServeHTTP(w, r)
 	})
+	mux.HandleFunc("/Videos/{itemID}/{mediaSource}/Attachments/{attachmentID}/Stream", handleAttachment)
 
+	mux.HandleFunc("/", proxy.ServeHTTP)
 	srv := &http.Server{
 		Addr:    ":8095",
 		Handler: mux,
@@ -151,15 +118,15 @@ func handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ = io.ReadAll(r.Body)
 	}
 	query := r.URL.Query()
-	maxBitrateStr := query.Get("MaxStreamingBitrate")
-	if maxBitrateStr != "" {
-		bitrate, err := strconv.ParseInt(maxBitrateStr, 10, 64)
-		if err == nil && bitrate < 200000000 {
+
+	if br := query.Get("MaxStreamingBitrate"); br != "" {
+		if bitrate, err := strconv.ParseInt(br, 10, 64); err == nil && bitrate < 200000000 {
 			query.Set("MaxStreamingBitrate", "4000000")
 		}
 	}
-	proxyReq := func(query url.Values) (*http.Response, []byte, error) {
-		apiURL := fmt.Sprintf("%s%s?%s", embyURL, r.URL.Path, query.Encode())
+
+	proxyReq := func(q url.Values) (*http.Response, []byte, error) {
+		apiURL := embyURL + r.URL.Path + "?" + q.Encode()
 		req, _ := http.NewRequestWithContext(r.Context(), r.Method, apiURL, bytes.NewReader(bodyBytes))
 		maps.Copy(req.Header, r.Header)
 		req.Header.Del("Accept-Encoding")
@@ -171,86 +138,96 @@ func handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(resp.Body)
 		return resp, body, err
 	}
+
 	resp, resBody, err := proxyReq(query)
 	if err != nil {
-		http.Error(w, "Proxy Error", http.StatusBadGateway)
 		return
 	}
-	result := gjson.GetBytes(resBody, "MediaSources.0.DirectStreamUrl")
 
-	if result.Exists() && strings.Contains(result.Raw, "ContainerBitrateExceedsLimit") {
+	root, err := sonic.Get(resBody)
+	if err != nil {
+		w.Write(resBody)
+		return
+	}
+
+	sourcesNode := root.Get("MediaSources")
+	needsRetry := false
+	sourcesNode.ForEach(func(path ast.Sequence, node *ast.Node) bool {
+		protocol, _ := node.Get("Protocol").String()
+		dsUrl, _ := node.Get("DirectStreamUrl").String()
+		if protocol == "Http" && strings.Contains(dsUrl, "ContainerBitrateExceedsLimit") {
+			needsRetry = true
+			return false
+		}
+		return true
+	})
+	if needsRetry {
+		slog.Debug("[302] 因码率限制转码,重试PlaybackInfo", "itemID", r.PathValue("itemID"))
 		query.Del("MaxStreamingBitrate")
-		if r2, b2, err := proxyReq(query); err == nil {
-			newResult := gjson.GetBytes(b2, "MediaSources.0.DirectStreamUrl")
-			if newResult.Exists() && strings.Contains(newResult.Raw, "original.") {
-				resp, resBody = r2, b2
-			}
+		if _, b2, err := proxyReq(query); err == nil {
+			resBody = b2
+			root, _ = sonic.Get(resBody)
+			sourcesNode = root.Get("MediaSources")
 		}
 	}
-	res := gjson.GetBytes(resBody, "MediaSources.0")
-	path := res.Get("Path").String()
-	if path != "" && strings.HasPrefix(path, strmUrl) {
-		streamUrl := res.Get("DirectStreamUrl").String()
-		if streamUrl != "" {
-			newStreamUrl := streamUrl + "&is302=1"
-			updatedBody, err := sjson.SetBytes(resBody, "MediaSources.0.DirectStreamUrl", newStreamUrl)
-			if err == nil {
-				resBody = updatedBody
-			}
+	sourcesNode.ForEach(func(path ast.Sequence, node *ast.Node) bool {
+		protocol, _ := node.Get("Protocol").String()
+		streamURL, _ := node.Get("DirectStreamUrl").String()
+
+		if protocol == "Http" && strings.Contains(streamURL, "original.") {
+			pathStr, _ := node.Get("Path").String()
+			name, _ := node.Get("Name").String()
+
+			u, _ := url.Parse(streamURL)
+			q := u.Query()
+			q.Set("mediaPath", pathStr)
+			q.Set("mediaName", name)
+			u.RawQuery = q.Encode()
+			slog.Debug("[302] 发现原始流,写入302标记", "媒体名称", name)
+			node.Set("DirectStreamUrl", ast.NewString(u.String()))
+			go warmUpMedia(pathStr, r.Header.Get("User-Agent"), name)
 		}
-	}
+		return true
+	})
+	finalBody, _ := root.MarshalJSON()
 	maps.Copy(w.Header(), resp.Header)
 	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)
-	w.Write(resBody)
+	w.Write(finalBody)
+}
+
+func warmUpMedia(targetPath, ua, name string) {
+	slog.Debug("[302] 预热需要302的媒体", "媒体名称", name)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", targetPath, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("User-Agent", ua)
+	resp, err := redirectClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
 }
 func handleVideo302(w http.ResponseWriter, r *http.Request) bool {
-	parts := strings.Split(r.URL.Path, "/")
-	var itemID string
-	for i, segment := range parts {
-		if segment == "videos" && i+1 < len(parts) {
-			itemID = parts[i+1]
-			break
-		}
-	}
-	if itemID == "" {
+	u := r.URL.Query()
+	mediaPath := u.Get("mediaPath")
+	if mediaPath == "" {
 		return false
 	}
-	mediaPath, mediaName, err := fetchMediaFromEmby(r.Context(), itemID, r.URL.Query())
-	if err != nil {
-		slog.Error("[302 失败] 获取媒体信息出错", "ItemID", itemID, "错误", err)
-		return false
-	}
-	if !strings.HasPrefix(mediaPath, strmUrl) {
-		return false
-	}
+	mediaName := u.Get("mediaName")
 	finalURL, err := getFinalLocation(r.Context(), mediaPath, r.Header.Get("User-Agent"))
 	if err != nil {
 		slog.Error("[302 失败] 获取直链失败", "媒体名称", mediaName, "路径", mediaPath, "错误", err)
 		return false
 	}
+
 	slog.Info("[302 成功]", "媒体名称", mediaName)
 	http.Redirect(w, r, finalURL, http.StatusFound)
 	return true
-}
-func fetchMediaFromEmby(ctx context.Context, itemID string, query url.Values) (mediaPath, mediaName string, err error) {
-	apiURL := fmt.Sprintf("%s/emby/Items/%s/PlaybackInfo?%s", embyURL, itemID, query.Encode())
-	req, _ := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	var resp *http.Response
-	if resp, err = sharedClient.Do(req); err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	var body []byte
-	if body, err = io.ReadAll(resp.Body); err != nil {
-		return
-	}
-
-	results := gjson.GetManyBytes(body, "MediaSources.0.Path", "MediaSources.0.Name")
-	mediaPath = results[0].String()
-	mediaName = results[1].String()
-	return
 }
 func getFinalLocation(ctx context.Context, targetURL, ua string) (finalUrl string, err error) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
@@ -264,5 +241,35 @@ func getFinalLocation(ctx context.Context, targetURL, ua string) (finalUrl strin
 	if finalUrl = resp.Header.Get("Location"); finalUrl == "" {
 		err = fmt.Errorf("获取的重定向链接为空")
 	}
+	slog.Debug("[302] 获取重定向地址", "原始URL", targetURL, "最终URL", finalUrl, "状态码", resp.StatusCode)
 	return
+}
+func handleAttachment(w http.ResponseWriter, r *http.Request) {
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	case <-r.Context().Done():
+		return
+	}
+	apiURL := embyURL + r.URL.RequestURI()
+	req, _ := http.NewRequestWithContext(r.Context(), "GET", apiURL, nil)
+	maps.Copy(req.Header, r.Header)
+	req.Header.Del("Accept-Encoding")
+
+	resp, err := sharedClient.Do(req)
+	if err != nil {
+		slog.Error("[媒体附件请求失败]", "错误", err)
+		http.Error(w, "Proxy Error", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("[媒体附件请求失败]", "路径", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	maps.Copy(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
