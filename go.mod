@@ -3,7 +3,7 @@ module 115tools
 go 1.26.1
 
 require (
-	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.4.0
+	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.4.1
 	github.com/go-resty/resty/v2 v2.17.2
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/time v0.15.0
