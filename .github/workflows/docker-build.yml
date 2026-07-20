@@ -1,0 +1,85 @@
+name: Docker 镜像构建
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 0.1.0，不填则只用 latest）'
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 QEMU（跨平台构建）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成标签
+        id: tags
+        run: |
+          BASE="ghcr.io/${{ github.repository }}"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VER="${GITHUB_REF_NAME#v}"
+            echo "tags=${BASE}:${VER},${BASE}:latest" >> $GITHUB_OUTPUT
+          elif [ -n "${{ inputs.version }}" ]; then
+            echo "tags=${BASE}:${{ inputs.version }},${BASE}:latest" >> $GITHUB_OUTPUT
+          else
+            echo "tags=${BASE}:latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 构建并推送
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+
+      - name: 生成 Attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: 清理无标签旧版本
+        run: |
+          PACKAGE="${{ env.IMAGE_NAME }}"
+          OWNER="${PACKAGE%%/*}"
+          REPO="${PACKAGE##*/}"
+          gh api "orgs/${OWNER}/packages/container/${REPO}/versions" --paginate \
+            --jq '.[] | select(.metadata.container.tags | length == 0) | .id' \
+            | while read -r version_id; do
+              echo "删除旧版本: $version_id"
+              gh api "orgs/${OWNER}/packages/container/${REPO}/versions/${version_id}" \
+                --method DELETE --silent
+            done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

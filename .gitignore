@@ -1,0 +1,26 @@
+# 数据库文件（运行时生成，无需提交）
+data/files.db
+data/*.db
+
+# 配置文件（含token等敏感信息）
+config/config.yaml
+data/config.yaml
+
+# Go 编译产物
+server
+115tools
+*.exe
+*.exe~
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CodeBuddy 本地数据
+.codebuddy/
