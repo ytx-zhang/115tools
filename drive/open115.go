@@ -114,7 +114,7 @@ func (d *Open115) refreshToken(ctx context.Context) error {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
 		return fail("[TOKEN] 网络请求失败: %w", err)
 	}
@@ -344,8 +344,9 @@ func (d *Open115) GetFileList(ctx context.Context, cid string) ([]FileInfo, erro
 				IsVideo:  item.IsVideo == 1,
 			})
 		}
+		// 退出条件以已消耗的条目数与云端总数比对为准，避免 Aid 过滤导致的计数偏差
 		offset += len(items)
-		if int64(len(allFiles)) >= res.Count {
+		if int64(offset) >= res.Count {
 			break
 		}
 		if err := context.Cause(ctx); err != nil {
@@ -370,8 +371,8 @@ func (d *Open115) UploadFile(ctx context.Context, pathStr, cid, signKey, signVal
 	}
 	fileName := fileInfo.Name()
 	fileSize := fileInfo.Size()
-	fileSha1, _ := fileSHA1(pathStr)
-	preSha1, _ := fileSHA1Partial(pathStr, 0, 128)
+	// 单次读取同时计算全量 SHA1 与前 128KB SHA1（preid），减少一次文件遍历
+	fileSha1, preSha1, _ := fileSHA1WithPreid(pathStr)
 	req := d.Client.R().SetContext(ctx)
 	formData := map[string]string{
 		"file_name": fileName,
@@ -469,21 +470,35 @@ var bufPool = sync.Pool{
 	},
 }
 
-func fileSHA1(filePath string) (string, error) {
+// fileSHA1WithPreid 单次遍历文件，同时计算全量 SHA1 与前 128 字节（0-127）的 SHA1。
+// 供上传初始化使用，避免 fileSHA1 + fileSHA1Partial 两次打开/遍历文件。
+func fileSHA1WithPreid(filePath string) (full, pre string, err error) {
 	f, err := os.Open(filePath)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer f.Close()
 
-	buf := bufPool.Get().(*[]byte)
-	defer bufPool.Put(buf)
+	bufPtr := bufPool.Get().(*[]byte)
+	defer bufPool.Put(bufPtr)
+	buf := *bufPtr
 
-	h := sha1.New()
-	if _, err := io.CopyBuffer(h, f, *buf); err != nil {
-		return "", err
+	hFull := sha1.New()
+	hPre := sha1.New()
+
+	// 前 128 字节同时写入两个哈希
+	head := io.LimitReader(f, 128)
+	if _, err := io.CopyBuffer(io.MultiWriter(hFull, hPre), head, buf); err != nil {
+		return "", "", err
 	}
-	return fmt.Sprintf("%X", h.Sum(nil)), nil
+	pre = fmt.Sprintf("%X", hPre.Sum(nil))
+
+	// 剩余部分仅写入全量哈希
+	if _, err := io.CopyBuffer(hFull, f, buf); err != nil {
+		return "", "", err
+	}
+	full = fmt.Sprintf("%X", hFull.Sum(nil))
+	return full, pre, nil
 }
 func fileSHA1Partial(filePath string, start, end int64) (string, error) {
 	f, err := os.Open(filePath)

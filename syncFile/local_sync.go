@@ -172,7 +172,11 @@ func (s *SyncFile) localScan(ctx context.Context, currentPath, currentFid string
 		}
 
 		// 对比文件是否变化
-		localSize := compareLocalFile(s.db, fullPath, name, dbFid, dbSize)
+		fileInfo, err := localFile.Info()
+		if err != nil {
+			return
+		}
+		localSize := compareLocalFile(s.db, fullPath, name, dbFid, dbSize, fileInfo)
 		if localSize >= 0 && localSize != dbSize {
 			deletes = append(deletes, fullPath)
 			uploads = append(uploads, fullPath)
@@ -209,19 +213,18 @@ func (s *SyncFile) localScan(ctx context.Context, currentPath, currentFid string
 
 // compareLocalFile 返回本地文件用于和 DB 对比的大小值。
 // .strm 文件用修改时间（Unix 秒）代替文件大小；普通文件直接返回字节数。
-// 返回 -1 表示文件不可读。
-func compareLocalFile(boltDB *db.DB, fullPath, name, dbFid string, dbSize int64) int64 {
-	info, err := os.Stat(fullPath)
-	if err != nil {
+// 返回 -1 表示文件不可读。fileInfo 由调用方通过 DirEntry.Info() 提供，避免重复 os.Stat。
+func compareLocalFile(boltDB *db.DB, fullPath, name, dbFid string, dbSize int64, fileInfo os.FileInfo) int64 {
+	if fileInfo == nil {
 		return -1
 	}
 	isStrm := strings.EqualFold(filepath.Ext(name), ".strm")
 	if !isStrm {
-		return info.Size()
+		return fileInfo.Size()
 	}
 	// .strm 文件：若仅修改时间变化但 pickcode 中 fid 匹配，视为本地已知变更，
 	// 更新 DB 记录（不触发重新上传）
-	localSize := info.ModTime().Unix()
+	localSize := fileInfo.ModTime().Unix()
 	if localSize != dbSize {
 		_, fid := extractPickcode(fullPath)
 		if fid == dbFid {

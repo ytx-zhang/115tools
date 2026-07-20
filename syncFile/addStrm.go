@@ -37,7 +37,9 @@ func (s *SyncFile) StartAddStrm(parentCtx context.Context) {
 	s.WalkCloud(ctx, s.paths.StrmPath, info.Fid, CloudVisitor{
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			if filepath.Dir(path) == s.paths.StrmPath {
+				s.Strm.moveFidsMu.Lock()
 				s.Strm.moveFids = append(s.Strm.moveFids, fid)
+				s.Strm.moveFidsMu.Unlock()
 			}
 			if err := os.MkdirAll(path, 0755); err != nil {
 				failLog(&s.Strm.Stats, path, "创建目录失败", err)
@@ -47,7 +49,9 @@ func (s *SyncFile) StartAddStrm(parentCtx context.Context) {
 		},
 		VisitFile: func(ctx context.Context, path, fid, pickCode string, e CloudEntry) error {
 			if filepath.Dir(path) == s.paths.StrmPath {
+				s.Strm.moveFidsMu.Lock()
 				s.Strm.moveFids = append(s.Strm.moveFids, fid)
+				s.Strm.moveFidsMu.Unlock()
 			}
 			savePath, _ := processCloudFile(path, e)
 			if _, err := os.Stat(savePath); err == nil {

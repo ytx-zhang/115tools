@@ -22,5 +22,9 @@ server
 .DS_Store
 Thumbs.db
 
+# 本地脚本
+update-deps.ps1
+count.sh
+
 # CodeBuddy 本地数据
 .codebuddy/

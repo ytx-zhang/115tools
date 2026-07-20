@@ -85,7 +85,7 @@ func main() {
 	// 5. 等待退出信号并优雅关闭
 	<-appCtx.Done()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
@@ -98,14 +98,18 @@ func main() {
 
 // registerRoutes 注册初始化完成后才开放的管理/触发类路由（不含 /download）。
 func registerRoutes(mux *http.ServeMux, appCtx context.Context, wg *sync.WaitGroup, syncer *syncFile.SyncFile) {
-	// 管理面板首页
+	// 管理面板首页（启动时读取一次 embed 内容并缓存，避免每请求重复读取）
+	indexData, err := indexHTML.ReadFile("index.html")
+	if err != nil {
+		slog.Error("读取 index.html 失败", "错误信息", err)
+		indexData = []byte("<h1>index.html missing</h1>")
+	}
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		data, _ := indexHTML.ReadFile("index.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(data)
+		w.Write(indexData)
 	})
 
-	// SSE：实时推送同步/生成状态
+	// SSE：实时推送同步/生成状态。每次发送设置短写超时，避免慢客户端拖垮广播。
 	mux.HandleFunc("GET /logs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -113,11 +117,13 @@ func registerRoutes(mux *http.ServeMux, appCtx context.Context, wg *sync.WaitGro
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		flusher, ok := w.(http.Flusher)
 
+		rc := http.NewResponseController(w)
 		send := func() {
 			data := fmt.Sprintf(`{"sync":%s,"strm":%s}`,
 				syncer.Cloud.Stats.GetStatus(),
 				syncer.Strm.Stats.GetStatus(),
 			)
+			_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			if ok {
 				flusher.Flush()

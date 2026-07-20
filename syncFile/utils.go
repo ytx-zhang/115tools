@@ -2,6 +2,7 @@ package syncFile
 
 import (
 	"115tools/db"
+	"115tools/drive"
 	"context"
 	"fmt"
 	"io"
@@ -28,7 +29,7 @@ func (s *SyncFile) downloadFile(ctx context.Context, pickcode, localPath string)
 	}
 	req.Header.Set("User-Agent", "115tools")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := drive.SharedHTTPClient().Do(req)
 	if err != nil {
 		return err
 	}

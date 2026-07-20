@@ -19,13 +19,15 @@ type cacheItem struct {
 
 type Server struct {
 	api          *drive.Open115
+	httpClient   *http.Client
 	cache        sync.Map
 	pendingTasks sync.Map
 }
 
 func New(api *drive.Open115) *Server {
 	return &Server{
-		api: api,
+		api:        api,
+		httpClient: drive.SharedHTTPClient(),
 	}
 }
 func (s *Server) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {

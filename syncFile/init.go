@@ -46,6 +46,7 @@ type CloudSyncState struct {
 // Stats 字段导出供 main.go 的 SSE 接口读取进度。
 type StrmGenState struct {
 	cancelFunc context.CancelCauseFunc
+	moveFidsMu sync.Mutex // 保护 moveFids 的并发追加
 	moveFids   []string
 	Stats      taskStats
 }

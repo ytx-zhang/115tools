@@ -38,6 +38,8 @@ type CloudVisitor struct {
 //
 // 返回的错误仅来自 GetFileList 致命失败；文件级错误由各回调内部记录，不向上传播。
 func (s *SyncFile) WalkCloud(ctx context.Context, rootPath, rootFid string, v CloudVisitor, onFatal func(error)) error {
+	// dirSem 限制目录递归 goroutine 的总并发度，防止极宽目录树导致协程数爆炸。
+	dirSem := make(chan struct{}, 64)
 	var walk func(path, fid string) error
 	walk = func(path, fid string) error {
 		slog.Debug("[云端遍历] 进入目录", "路径", path)
@@ -63,10 +65,12 @@ func (s *SyncFile) WalkCloud(ctx context.Context, rootPath, rootFid string, v Cl
 			slog.Debug("[云端遍历] 获取配额失败(已取消)，退出目录", "路径", path)
 			return nil
 		}
-		defer func() { <-s.sem }()
 
 		slog.Debug("[云端遍历] 获取文件列表", "路径", path)
 		items, err := s.api.GetFileList(ctx, fid)
+		// GetFileList 结束后立即释放配额，使并发上限只约束 API 调用，
+		// 而不约束目录处理与子目录递归，避免父目录持锁等待子目录获取配额造成死锁。
+		<-s.sem
 		if err != nil {
 			if onFatal != nil {
 				onFatal(fmt.Errorf("[云端遍历] 获取列表失败[%s]: %w", path, err))
@@ -93,11 +97,18 @@ func (s *SyncFile) WalkCloud(ctx context.Context, rootPath, rootFid string, v Cl
 						descend = d
 					}
 				}
-				if descend {
+			if descend {
+				// 子目录递归前获取目录并发配额；ctx 取消时放弃递归
+				select {
+				case dirSem <- struct{}{}:
 					wg.Go(func() {
+						defer func() { <-dirSem }()
 						_ = walk(fullPath, item.Fid)
 					})
+				case <-ctx.Done():
+					return ctx.Err()
 				}
+			}
 				continue
 			}
 			if v.VisitFile != nil {

@@ -123,49 +123,72 @@ func (d *DB) SaveRecord(localPath string, fid string, size int64) {
 	})
 }
 
+// BatchClearPaths 批量删除传入路径（含目录的全部子条目）。
+// 实现拆为“只读收集所有待删 key”与“分块批量删除”两步：
+//   - 收集阶段用只读事务，避免在单个写事务中长时间持锁；
+//   - 删除阶段按 deleteChunkSize 分块，每块一个事务，控制单事务大小。
 func (d *DB) BatchClearPaths(fPaths []string) {
 	if len(fPaths) == 0 {
 		return
 	}
-	err := d.boltDB.Batch(func(tx *bbolt.Tx) error {
+
+	// 第一步：收集所有待删 key（自身 + 目录子项）
+	var keys [][]byte
+	seen := make(map[string]struct{}, len(fPaths))
+	err := d.boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		if b == nil {
 			return nil
 		}
+		c := b.Cursor()
 		for _, fPath := range fPaths {
 			selfBytes := []byte(fPath)
-			val := b.Get(selfBytes)
-			if val != nil {
-				_, size, _ := decodeValue(val)
-				if size == SizeDir {
-					// 目录：仅删除其自身与所有子条目
-					c := b.Cursor()
-					childPrefix := make([]byte, len(selfBytes)+1)
-					copy(childPrefix, selfBytes)
-					childPrefix[len(selfBytes)] = '/'
-					for k, _ := c.Seek(selfBytes); k != nil; {
-						if bytes.Equal(k, selfBytes) || bytes.HasPrefix(k, childPrefix) {
-							if err := c.Delete(); err != nil {
-								return err
-							}
-							k, _ = c.Seek(k)
-						} else {
-							break
-						}
-					}
+			childPrefix := make([]byte, len(selfBytes)+1)
+			copy(childPrefix, selfBytes)
+			childPrefix[len(selfBytes)] = '/'
+
+			// 从 selfBytes 起扫描，覆盖自身与所有子项
+			for k, _ := c.Seek(selfBytes); k != nil; k, _ = c.Next() {
+				if !bytes.Equal(k, selfBytes) && !bytes.HasPrefix(k, childPrefix) {
+					break
+				}
+				ks := string(k)
+				if _, dup := seen[ks]; dup {
 					continue
 				}
-			}
-			// 非目录文件：直接删除自身
-			if err := b.Delete(selfBytes); err != nil {
-				return err
+				seen[ks] = struct{}{}
+				keyCopy := make([]byte, len(k))
+				copy(keyCopy, k)
+				keys = append(keys, keyCopy)
 			}
 		}
 		return nil
 	})
-
 	if err != nil {
-		slog.Error("[数据库] 批量清理失败", "数量", len(fPaths), "错误信息", err)
+		slog.Error("[数据库] 批量清理(收集)失败", "数量", len(fPaths), "错误信息", err)
+		return
+	}
+
+	// 第二步：分块删除
+	const deleteChunkSize = 2000
+	for start := 0; start < len(keys); start += deleteChunkSize {
+		end := min(start+deleteChunkSize, len(keys))
+		chunk := keys[start:end]
+		if err := d.boltDB.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket(d.bucketName)
+			if b == nil {
+				return nil
+			}
+			for _, k := range chunk {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			slog.Error("[数据库] 批量清理(删除)失败", "数量", len(chunk), "错误信息", err)
+			return
+		}
 	}
 }
 
