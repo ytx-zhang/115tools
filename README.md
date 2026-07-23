@@ -137,6 +137,10 @@ temp_path: /Temp
 # STRM 文件中的直链地址（Emby 可访问的地址）
 strm_url: http://your-server:8080
 
+# 本地同步静默窗口（秒）：监听事件后等待该时长内无新事件才执行同步，
+# 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 15 秒。
+settle_seconds: 15
+
 # 115 网盘 Token
 token:
   access_token: ""
