@@ -13,11 +13,9 @@ func (s *SyncFile) StartCloudSync(parentCtx context.Context) {
 	if !s.Cloud.Stats.running.CompareAndSwap(false, true) {
 		return
 	}
-	s.Cloud.locker.Lock()
 	start := time.Now()
 	defer func() {
 		slog.Info("云端文件同步完成", "总数", s.Cloud.Stats.total.Load(), "耗时", time.Since(start))
-		s.Cloud.locker.Unlock()
 		s.Cloud.Stats.running.Store(false)
 		s.Cloud.cancelFunc(nil)
 	}()
@@ -26,7 +24,8 @@ func (s *SyncFile) StartCloudSync(parentCtx context.Context) {
 	s.Cloud.cancelFunc = cancel
 	slog.Info("开始同步云端文件...")
 
-	s.WalkCloud(ctx, s.paths.SyncPath, s.paths.SyncFid, CloudVisitor{
+	// 致命错误已由 VisitFile/EnterDir 内的 failLog 记录，这里显式忽略返回值。
+	_ = s.WalkCloud(ctx, s.paths.SyncPath, s.paths.SyncFid, CloudVisitor{
 		SkipByCount: true,
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			if s.db.GetFid(path) == "" {
@@ -35,6 +34,7 @@ func (s *SyncFile) StartCloudSync(parentCtx context.Context) {
 					return false, nil
 				}
 				s.db.SaveRecord(path, fid, db.SizeDir)
+				slog.Info("创建本地目录", "路径", path)
 			}
 			return true, nil
 		},
@@ -46,6 +46,8 @@ func (s *SyncFile) StartCloudSync(parentCtx context.Context) {
 			if dbFid != "" && dbFid != fid {
 				if err := s.api.DeleteFile(ctx, fid); err != nil {
 					failLog(stats, savePath, "清理云端冗余项失败", err)
+				} else {
+					slog.Info("删除云端冗余项", "路径", savePath, "云端FID", fid)
 				}
 				return nil
 			}

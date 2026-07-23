@@ -6,6 +6,10 @@ import (
 	"sync/atomic"
 )
 
+// maxFailedErrors 限制保留的失败原因条数，防止长任务持续失败时 slice 无界增长
+// （failed 计数仍精确累加，此处仅裁剪明细列表）。
+const maxFailedErrors = 100
+
 type taskStats struct {
 	total        atomic.Int64
 	completed    atomic.Int64
@@ -54,5 +58,9 @@ func (s *taskStats) markFailed(reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failed.Add(1)
+	// 超过上限时丢弃最旧的明细，保留最近 maxFailedErrors 条
 	s.failedErrors = append(s.failedErrors, reason)
+	if len(s.failedErrors) > maxFailedErrors {
+		s.failedErrors = s.failedErrors[len(s.failedErrors)-maxFailedErrors:]
+	}
 }

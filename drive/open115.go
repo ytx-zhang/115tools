@@ -101,7 +101,7 @@ func (d *Open115) refreshToken(ctx context.Context) error {
 	// fail 记录刷新失败并安排短间隔重试，避免 token 过期前再无机会刷新。
 	fail := func(format string, a ...any) error {
 		err := fmt.Errorf(format, a...)
-		slog.Error("[TOKEN] 刷新失败，将短间隔重试", "错误信息", err)
+		slog.Warn("[TOKEN] 刷新失败，将短间隔重试", "错误信息", err)
 		time.AfterFunc(time.Minute, func() {
 			_ = d.refreshToken(context.Background())
 		})
@@ -139,10 +139,7 @@ func (d *Open115) refreshToken(ctx context.Context) error {
 			rt = d.cfg.GetRefreshToken()
 		}
 		d.cfg.SaveToken(res.Data.AccessToken, rt, res.Data.ExpiresIn)
-		nextDelay := time.Duration(res.Data.ExpiresIn)*time.Second - 10*time.Minute
-		if nextDelay < 0 {
-			nextDelay = 1 * time.Second
-		}
+		nextDelay := max(time.Duration(res.Data.ExpiresIn)*time.Second-10*time.Minute, time.Second)
 		time.AfterFunc(nextDelay, func() {
 			_ = d.refreshToken(context.Background())
 		})

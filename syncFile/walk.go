@@ -49,7 +49,7 @@ func (s *SyncFile) WalkCloud(ctx context.Context, rootPath, rootFid string, v Cl
 		if v.SkipByCount {
 			info, err := s.api.GetDirInfo(ctx, path)
 			if err != nil {
-				slog.Debug("[云端遍历] GetDirInfo 失败，回退全量同步", "路径", path, "错误", err)
+				slog.Warn("[云端遍历] GetDirInfo 失败，回退全量同步", "路径", path, "错误", err)
 			} else {
 				cloudTotal := info.FileCount + info.FolderCount
 				dbTotal := s.db.CountRecursive(path)
@@ -77,7 +77,7 @@ func (s *SyncFile) WalkCloud(ctx context.Context, rootPath, rootFid string, v Cl
 			}
 			return err
 		}
-		slog.Debug("[云端遍历] 获取文件列表完成", "路径", path, "条目数", len(items))
+		slog.Info("[云端遍历] 获取文件列表完成", "路径", path, "条目数", len(items))
 
 		var wg sync.WaitGroup
 		defer wg.Wait()
@@ -97,18 +97,18 @@ func (s *SyncFile) WalkCloud(ctx context.Context, rootPath, rootFid string, v Cl
 						descend = d
 					}
 				}
-			if descend {
-				// 子目录递归前获取目录并发配额；ctx 取消时放弃递归
-				select {
-				case dirSem <- struct{}{}:
-					wg.Go(func() {
-						defer func() { <-dirSem }()
-						_ = walk(fullPath, item.Fid)
-					})
-				case <-ctx.Done():
-					return ctx.Err()
+				if descend {
+					// 子目录递归前获取目录并发配额；ctx 取消时放弃递归
+					select {
+					case dirSem <- struct{}{}:
+						wg.Go(func() {
+							defer func() { <-dirSem }()
+							_ = walk(fullPath, item.Fid)
+						})
+					case <-ctx.Done():
+						return ctx.Err()
+					}
 				}
-			}
 				continue
 			}
 			if v.VisitFile != nil {

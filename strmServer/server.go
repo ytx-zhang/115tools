@@ -30,6 +30,16 @@ func New(api *drive.Open115) *Server {
 		httpClient: drive.SharedHTTPClient(),
 	}
 }
+
+// loadCache 从缓存读取并做类型断言，消除重复的 Load + 断言样板。
+func (s *Server) loadCache(key string) (cacheItem, bool) {
+	val, ok := s.cache.Load(key)
+	if !ok {
+		return cacheItem{}, false
+	}
+	item, ok := val.(cacheItem)
+	return item, ok
+}
 func (s *Server) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	pickCode := r.URL.Query().Get("pickcode")
 	if pickCode == "" {
@@ -41,8 +51,7 @@ func (s *Server) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	clientUA := strings.TrimSpace(r.Header.Get("User-Agent"))
 
 	cacheKey := pickCode + "_" + clientUA
-	if val, ok := s.cache.Load(cacheKey); ok {
-		item := val.(cacheItem)
+	if item, ok := s.loadCache(cacheKey); ok {
 		// 惰性过期：命中但已过期则删除并当 miss，避免使用 time.AfterFunc 导致的
 		// “刷新后旧定时器仍会误删”以及无滑动过期的问题。
 		if time.Now().After(item.expireAt) {
@@ -68,8 +77,7 @@ func (s *Server) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		}
-		if val, ok := s.cache.Load(cacheKey); ok {
-			item := val.(cacheItem)
+		if item, ok := s.loadCache(cacheKey); ok {
 			if !time.Now().After(item.expireAt) {
 				http.Redirect(w, r, item.url, http.StatusFound)
 				return
@@ -85,7 +93,7 @@ func (s *Server) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	info, err := s.api.GetDownloadUrl(r.Context(), pickCode, clientUA)
-	if err != nil || info.Url == "" {
+	if err != nil || info == nil || info.Url == "" {
 		slog.Error("[strm后端] 115接口报错", "err", err)
 		http.NotFound(w, r)
 		return

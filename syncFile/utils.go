@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -57,19 +58,15 @@ func (s *SyncFile) downloadFile(ctx context.Context, pickcode, localPath string)
 }
 func (s *SyncFile) saveStrmFile(pickcode, fid, localPath string) error {
 	content := fmt.Sprintf("%s/download?pickcode=%s&fid=%s", s.paths.StrmUrl, pickcode, fid)
-	contentBytes := []byte(content)
-	if err := os.WriteFile(localPath, contentBytes, 0644); err != nil {
-		return err
-	}
-	return nil
+	return os.WriteFile(localPath, []byte(content), 0644)
 }
 func (s *SyncFile) addCloudFolder(ctx context.Context, currentCID, fileName, fullPath string) (string, error) {
-	slog.Debug("创建云端文件夹", "路径", fullPath)
 	fid, err := s.api.AddFolder(ctx, currentCID, fileName)
 	if err != nil {
 		return "", fmt.Errorf("[%s]: 创建云端文件夹失败: %w", fullPath, err)
 	}
 	s.db.SaveRecord(fullPath, fid, db.SizeDir)
+	slog.Info("创建云端目录", "路径", fullPath, "云端FID", fid)
 	return fid, nil
 }
 func (s *SyncFile) cloudCleanTask(ctx context.Context, fPaths []string, workPath string) error {
@@ -94,10 +91,12 @@ func (s *SyncFile) cloudCleanTask(ctx context.Context, fPaths []string, workPath
 		}
 	}
 
+	joined := strings.Join(fPaths, ",")
+
 	// 1. 批量移动
 	if len(moveFids) > 0 {
 		fidsJoin := strings.Join(moveFids, ",")
-		slog.Debug("批量移动云端文件到临时目录", "处理目录", workPath, "数量", len(moveFids))
+		slog.Info("移动云端项到临时目录", "路径", joined, "数量", len(moveFids))
 		err := s.api.MoveFile(ctx, fidsJoin, s.paths.TempFid)
 		if err != nil {
 			return fmt.Errorf("[%s]: 批量移动目录内文件失败: %w", workPath, err)
@@ -107,7 +106,7 @@ func (s *SyncFile) cloudCleanTask(ctx context.Context, fPaths []string, workPath
 	// 2. 批量删除
 	if len(deleteFids) > 0 {
 		fidsJoin := strings.Join(deleteFids, ",")
-		slog.Debug("批量删除云端文件", "处理目录", workPath, "数量", len(deleteFids))
+		slog.Info("删除云端项", "路径", joined, "数量", len(deleteFids))
 		err := s.api.DeleteFile(ctx, fidsJoin)
 		if err != nil {
 			return fmt.Errorf("[%s]: 批量删除目录内文件失败: %w", workPath, err)
@@ -115,7 +114,7 @@ func (s *SyncFile) cloudCleanTask(ctx context.Context, fPaths []string, workPath
 	}
 
 	// 3. 清理数据库记录
-	slog.Debug("批量删除数据库索引", "处理目录", workPath, "数量", len(fPaths))
+	slog.Debug("清理数据库索引", "路径", joined, "数量", len(fPaths))
 	s.db.BatchClearPaths(fPaths)
 
 	return nil
@@ -124,11 +123,7 @@ func checkVideo(ext string, size int64) bool {
 	if size < 10*1024*1024 {
 		return false
 	}
-	switch strings.ToLower(ext) {
-	case ".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv":
-		return true
-	}
-	return false
+	return slices.Contains([]string{".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv"}, strings.ToLower(ext))
 }
 func extractPickcode(fPath string) (pickcode, fid string) {
 	content, err := os.ReadFile(fPath)
@@ -161,13 +156,13 @@ func (s *SyncFile) fetchAndSave(ctx context.Context, pickCode, fid, savePath str
 			failLog(stats, savePath, "创建strm文件失败", err)
 			return err
 		}
-		slog.Debug("新增STRM文件", "文件", savePath)
+		slog.Info("新增STRM文件", "文件", savePath)
 		return nil
 	}
 	if err := s.downloadFile(ctx, pickCode, savePath); err != nil {
 		failLog(stats, savePath, "下载文件失败", err)
 		return err
 	}
-	slog.Debug("下载文件成功", "文件", savePath)
+	slog.Info("下载文件成功", "文件", savePath)
 	return nil
 }

@@ -27,7 +27,7 @@ const valueTagBinary byte = 0x01
 type DB struct {
 	boltDB     *bbolt.DB
 	bucketName []byte
-	path       string   // 数据库文件路径，用于 Compact
+	path       string     // 数据库文件路径，用于 Compact
 	mu         sync.Mutex // 保护 Compact 期间的 boltDB 替换
 }
 

@@ -18,6 +18,10 @@ type Config struct {
 	TempPath string `yaml:"temp_path"`
 	StrmUrl  string `yaml:"strm_url"`
 
+	// 本地同步静默窗口（秒）：监听事件后等待该时长内无新事件才执行同步，
+	// 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 15 秒。
+	SettleSeconds int `yaml:"settle_seconds"`
+
 	// 内部私有属性
 	path  string
 	mu    sync.RWMutex
@@ -110,12 +114,19 @@ func (c *Config) SaveToken(access, refresh string, expiresIn int64) {
 	c.token.ExpireAt = expireAt
 
 	// 序列化并存盘
-	out, _ := yaml.Marshal(struct {
+	out, err := yaml.Marshal(struct {
 		*Config `yaml:",inline"`
 		Token   tokenData `yaml:"token"`
 	}{c, c.token})
+	if err != nil {
+		slog.Error("[CONFIG] Token 序列化失败，内存已更新但未落盘", "错误信息", err)
+		return
+	}
 
-	_ = os.WriteFile(c.path, out, 0644)
+	if err := os.WriteFile(c.path, out, 0644); err != nil {
+		slog.Error("[CONFIG] Token 写盘失败，内存已更新但未落盘，重启后可能读到旧 Token", "错误信息", err)
+		return
+	}
 
 	// 显示直观的到期时间日志
 	slog.Info("[CONFIG] Token 已更新", "到期时间", expireAt.Format("2006-01-02 15:04:05"))

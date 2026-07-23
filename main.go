@@ -91,7 +91,7 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("强制关闭 HTTP 服务器", "错误信息", err)
 	}
-	slog.Info("正在等待后台任务完成...")
+	slog.Debug("正在等待后台任务完成...")
 	wg.Wait()
 	slog.Info("程序已安全退出。")
 }
@@ -106,7 +106,7 @@ func registerRoutes(mux *http.ServeMux, appCtx context.Context, wg *sync.WaitGro
 	}
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(indexData)
+		_, _ = w.Write(indexData)
 	})
 
 	// SSE：实时推送同步/生成状态。每次发送设置短写超时，避免慢客户端拖垮广播。
@@ -116,6 +116,11 @@ func registerRoutes(mux *http.ServeMux, appCtx context.Context, wg *sync.WaitGro
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		flusher, ok := w.(http.Flusher)
+		if !ok {
+			slog.Error("[SSE] ResponseWriter 不支持 Flusher，无法建立实时日志流")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
 
 		rc := http.NewResponseController(w)
 		send := func() {
@@ -125,9 +130,7 @@ func registerRoutes(mux *http.ServeMux, appCtx context.Context, wg *sync.WaitGro
 			)
 			_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			fmt.Fprintf(w, "data: %s\n\n", data)
-			if ok {
-				flusher.Flush()
-			}
+			flusher.Flush()
 		}
 
 		send()

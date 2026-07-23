@@ -25,8 +25,8 @@ func (s *SyncFile) StartAddStrm(parentCtx context.Context) {
 	}()
 
 	s.Strm.Stats.Reset()
-	s.Strm.moveFids = nil
-	slog.Info("开始生成strm文件...")
+	clear(s.Strm.moveFids)
+	slog.Debug("开始生成strm文件...")
 
 	info, err := s.api.GetDirInfo(ctx, s.paths.StrmPath)
 	if err != nil {
@@ -34,7 +34,8 @@ func (s *SyncFile) StartAddStrm(parentCtx context.Context) {
 		return
 	}
 
-	s.WalkCloud(ctx, s.paths.StrmPath, info.Fid, CloudVisitor{
+	// 错误已由回调内的 failLog 记录，这里显式忽略返回值。
+	_ = s.WalkCloud(ctx, s.paths.StrmPath, info.Fid, CloudVisitor{
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			if filepath.Dir(path) == s.paths.StrmPath {
 				s.Strm.moveFidsMu.Lock()
@@ -88,6 +89,6 @@ func (s *SyncFile) moveStrmPathFiles(ctx context.Context, paths []string) {
 		slog.Error("移动文件失败", "目录", "TempPath", "错误", err)
 		s.Strm.Stats.markFailed(fmt.Sprintf("移动文件至 TempPath 失败: %v", err))
 	} else {
-		slog.Debug("移动文件至 TempPath", "文件数量", count)
+		slog.Info("移动文件至 TempPath", "文件数量", count, "路径", fidsStr)
 	}
 }
