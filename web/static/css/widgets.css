@@ -1,0 +1,270 @@
+/* 小部件：任务卡片 / 进度条 / 徽标 / 表格 / 日志（过滤按钮与日志行） / 横幅 / Toast */
+
+/* 任务卡片 */
+.task-nums {
+  font-size: 26px;
+  margin: 6px 0 10px;
+}
+
+.task-nums b {
+  color: var(--accent);
+}
+
+.task-nums small {
+  font-size: 13px;
+  margin-left: 8px;
+}
+
+.progress {
+  height: 6px;
+  background: var(--bg);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+
+.progress i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width .4s;
+}
+
+/* 徽标 */
+.badge {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 20px;
+  background: var(--bg3);
+  color: var(--muted);
+}
+
+.badge.run {
+  background: rgba(68, 147, 248, .15);
+  color: var(--accent);
+}
+
+.badge.ok {
+  background: rgba(63, 185, 80, .15);
+  color: var(--green);
+}
+
+.badge.err {
+  background: rgba(248, 81, 73, .15);
+  color: var(--red);
+}
+
+.badge.warn {
+  background: rgba(210, 153, 34, .15);
+  color: var(--yellow);
+}
+
+/* 表格 */
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+td.name {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.pager {
+  justify-content: center;
+  margin-top: 12px;
+}
+
+/* 日志卡片头部右侧操作区：过滤按钮组 + 暂停滚动 + 清空 */
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.card-actions .chk {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.card-actions .chk input {
+  width: auto;
+  margin: 0;
+}
+
+/* 日志级别过滤按钮组（chip 小按钮：未选中 bg3 底，选中 accent 蓝底） */
+.log-filter {
+  display: flex;
+  gap: 6px;
+}
+
+.chip {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* 运行日志 */
+.log-box {
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.log-box .empty {
+  padding: 6px 0;
+}
+
+.log-line {
+  display: flex;
+  gap: 8px;
+  padding: 1px 0;
+  border-bottom: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-line:last-child {
+  border-bottom: none;
+}
+
+.log-time {
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+.log-lv {
+  flex: 0 0 48px;
+  font-weight: 600;
+  text-align: center;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.log-msg {
+  flex: 1 1 auto;
+}
+
+.log-line.lv-debug .log-lv {
+  color: var(--muted);
+}
+
+.log-line.lv-info .log-lv {
+  color: var(--accent);
+}
+
+.log-line.lv-warn .log-lv {
+  color: var(--yellow);
+  background: rgba(210, 153, 34, .15);
+}
+
+.log-line.lv-error .log-lv {
+  color: var(--red);
+  background: rgba(248, 81, 73, .15);
+}
+
+.log-line.lv-error .log-msg {
+  color: var(--red);
+}
+
+/* 横幅提示 */
+.banner {
+  background: rgba(210, 153, 34, .12);
+  border: 1px solid var(--yellow);
+  color: var(--yellow);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+}
+
+/* Toast */
+#toast-box {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 99;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toast {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 16px;
+  min-width: 220px;
+  max-width: 360px;
+  animation: slide .25s;
+  word-break: break-all;
+}
+
+.toast.err {
+  border-left-color: var(--red);
+}
+
+.toast.ok {
+  border-left-color: var(--green);
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(30px);
+    opacity: 0;
+  }
+
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}

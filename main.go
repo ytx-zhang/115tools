@@ -1,30 +1,37 @@
+// 115tools 主程序：115 网盘 ↔ 本地媒体库 同步工具。
+//
+// main 只负责「装配」——把各包创建出来并接好线，不含任何业务逻辑：
+//  1. 日志：logstream.Setup 配好 slog（stdout + 面板日志管道）；
+//  2. HTTP：先注册 /download（Emby 播放视频的直链依赖）并立即监听，
+//     管理面板路由等数据库与同步器初始化完成后才注册；
+//  3. 同步：syncFile.Runner 管理同步器生命周期（含配置热重载）；
+//  4. 面板：web.Register 注册全部管理接口（登录/配置/任务触发/状态与日志推送）；
+//  5. 退出：收到中断信号后优雅关闭（先停 HTTP，再等全部后台协程收尾）。
 package main
 
 import (
 	"115tools/config"
 	"115tools/db"
 	"115tools/drive"
+	"115tools/logstream"
 	"115tools/strmServer"
 	"115tools/syncFile"
+	"115tools/web"
 	"context"
-	"embed"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 	_ "time/tzdata" // 嵌入时区数据库，无需系统 tzdata
 )
 
-//go:embed index.html
-var indexHTML embed.FS
-
 func main() {
-	setupLogger()
+	// 日志管道：hub 是面板「日志」卡片的数据源，显式创建并注入各处（无全局状态）。
+	hub := logstream.NewHub()
+	logstream.Setup(hub)
 
 	// 全局信号：收到中断/终止信号时取消所有任务并优雅退出
 	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -32,7 +39,7 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	// 1. 加载配置与 API 客户端
+	// 1. 加载配置与 115 API 客户端
 	cfg, err := config.New("/app/data/config.yaml")
 	if err != nil {
 		slog.Error("[CONFIG] 配置文件错误", "错误信息", err)
@@ -42,8 +49,8 @@ func main() {
 	apiClient := drive.New115Drive(cfg)
 
 	// 2. 先注册 /download 并立即启动 HTTP 服务
-	//    /download 是 Emby 播放视频的直链依赖，必须尽早可用，
-	//    因此在其余较重的管理路由之前启动。
+	//    /download 是 Emby 播放视频的直链依赖，必须尽早可用且【不做登录验证】，
+	//    因此在其余较重的管理路由之前启动、且不经过 web 包的鉴权中间件。
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /download", strmServer.New(apiClient).RedirectToRealURL)
 
@@ -59,7 +66,7 @@ func main() {
 		}
 	})
 
-	// 3. 初始化 DB 与同步器（可能较耗时）。此期间仅 /download 可用，
+	// 3. 初始化数据库与同步器（可能较耗时）。此期间仅 /download 可用，
 	//    管理/触发类路由在初始化完成后才注册，避免未完成初始化即被调用。
 	boltDB, err := db.New(`/app/data/files.db`)
 	if err != nil {
@@ -68,19 +75,30 @@ func main() {
 	}
 	defer boltDB.Close()
 
-	// 启动时压缩一次 bbolt 数据库，回收删除/重写产生的空洞页。
+	// 启动时压缩一次数据库，回收删除/重写产生的空洞页。
 	if err := boltDB.Compact(); err != nil {
 		slog.Warn("数据库压缩失败", "错误信息", err)
 	}
 
-	syncer, err := syncFile.New(appCtx, cfg, apiClient, boltDB, &wg)
-	if err != nil {
+	// Runner 管理同步器生命周期，配置变更时热重载使其实时生效
+	runner := syncFile.NewRunner(appCtx, cfg, apiClient, boltDB, &wg)
+	if err := runner.Start(); err != nil {
 		slog.Error("初始化同步失败", "错误信息", err)
 		return
 	}
 
-	// 4. 初始化完成后，再注册其余管理/触发路由
-	registerRoutes(mux, appCtx, &wg, syncer)
+	// 4. 初始化完成后，注册管理面板路由（登录鉴权 + 配置 + 离线下载 + 任务触发）
+	web.Register(mux, web.Deps{
+		Cfg:         cfg,
+		Api:         apiClient,
+		AppCtx:      appCtx,
+		Wg:          &wg,
+		Hub:         hub,
+		StatsNotify: runner.StatsNotify(),
+		Syncer:      runner.Current,
+		TaskCtx:     runner.TaskCtx,
+		Reload:      runner.Reload,
+	})
 
 	// 5. 等待退出信号并优雅关闭
 	<-appCtx.Done()
@@ -94,98 +112,4 @@ func main() {
 	slog.Debug("正在等待后台任务完成...")
 	wg.Wait()
 	slog.Info("程序已安全退出。")
-}
-
-// registerRoutes 注册初始化完成后才开放的管理/触发类路由（不含 /download）。
-func registerRoutes(mux *http.ServeMux, appCtx context.Context, wg *sync.WaitGroup, syncer *syncFile.SyncFile) {
-	// 管理面板首页（启动时读取一次 embed 内容并缓存，避免每请求重复读取）
-	indexData, err := indexHTML.ReadFile("index.html")
-	if err != nil {
-		slog.Error("读取 index.html 失败", "错误信息", err)
-		indexData = []byte("<h1>index.html missing</h1>")
-	}
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(indexData)
-	})
-
-	// SSE：实时推送同步/生成状态。每次发送设置短写超时，避免慢客户端拖垮广播。
-	mux.HandleFunc("GET /logs", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			slog.Error("[SSE] ResponseWriter 不支持 Flusher，无法建立实时日志流")
-			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-			return
-		}
-
-		rc := http.NewResponseController(w)
-		send := func() {
-			data := fmt.Sprintf(`{"sync":%s,"strm":%s}`,
-				syncer.Cloud.Stats.GetStatus(),
-				syncer.Strm.Stats.GetStatus(),
-			)
-			_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
-		}
-
-		send()
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-r.Context().Done():
-				return
-			case <-appCtx.Done():
-				return
-			case <-ticker.C:
-				send()
-			}
-		}
-	})
-
-	// 触发类接口：异步启动任务并立即返回 202
-	trigger := func(task func()) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			wg.Go(task)
-			w.Header().Set("Cache-Control", "no-store")
-			w.WriteHeader(http.StatusAccepted)
-		}
-	}
-	mux.HandleFunc("GET /sync", trigger(func() { syncer.StartCloudSync(appCtx) }))
-	mux.HandleFunc("GET /stopsync", trigger(func() { syncer.StopCloudSync() }))
-	mux.HandleFunc("GET /strm", trigger(func() { syncer.StartAddStrm(appCtx) }))
-	mux.HandleFunc("GET /stopstrm", trigger(func() { syncer.StopAddStrm() }))
-}
-
-// setupLogger 根据 LOG_LEVEL 环境变量配置全局日志级别与格式。
-func setupLogger() {
-	levelStr := strings.ToUpper(os.Getenv("LOG_LEVEL"))
-	var level slog.Level
-
-	switch levelStr {
-	case "DEBUG":
-		level = slog.LevelDebug
-	case "WARN":
-		level = slog.LevelWarn
-	case "ERROR":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
-
-	opts := &slog.HandlerOptions{
-		Level: level,
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				return slog.String(slog.TimeKey, a.Value.Time().Format("15:04:05.000"))
-			}
-			return a
-		},
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, opts)))
 }

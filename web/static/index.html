@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>115 Tools</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" sizes="64x64">
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/ui.css">
+  <link rel="stylesheet" href="/static/css/widgets.css">
+  <script type="module" src="/static/js/main.js"></script>
+</head>
+
+<body>
+  <!-- 登录页 -->
+  <div id="login-view" class="login-wrap" hidden>
+    <form id="login-form" class="login-card">
+      <div class="login-logo">☁️</div>
+      <h1>115 Tools</h1>
+      <p class="muted">请登录以继续</p>
+      <input name="username" placeholder="账号" autocomplete="username" required>
+      <input name="password" type="password" placeholder="密码" autocomplete="current-password" required>
+      <button type="submit" class="btn primary block">登 录</button>
+    </form>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="app-view" class="layout" hidden>
+    <aside class="sidebar">
+      <div class="brand">☁️ <span>115 Tools</span></div>
+      <nav id="nav">
+        <button class="nav-item active" data-view="dashboard">📊 <span>仪表盘</span></button>
+        <button class="nav-item" data-view="offline">⬇️ <span>离线下载</span></button>
+        <button class="nav-item" data-view="settings">⚙️ <span>设置</span></button>
+      </nav>
+      <button id="logout-btn" class="nav-item logout" hidden>🚪 <span>退出登录</span></button>
+    </aside>
+
+    <main class="content">
+      <!-- 仪表盘 -->
+      <section id="view-dashboard" class="view">
+        <h2>仪表盘</h2>
+        <div id="reload-banner" class="banner" hidden>⏳ 配置热重载中，同步器正在重建……</div>
+        <div class="grid2">
+          <div class="card task-card" id="card-sync">
+            <div class="card-head">
+              <h3>云端同步</h3><span class="badge" data-role="badge">空闲</span>
+            </div>
+            <div class="task-nums"><b data-role="done">0</b> / <span data-role="total">0</span>
+              <small class="muted" data-role="failed"></small>
+            </div>
+            <div class="progress"><i data-role="bar"></i></div>
+            <button class="btn primary" data-role="toggle" data-task="sync">开始同步</button>
+          </div>
+          <div class="card task-card" id="card-strm">
+            <div class="card-head">
+              <h3>STRM 生成</h3><span class="badge" data-role="badge">空闲</span>
+            </div>
+            <div class="task-nums"><b data-role="done">0</b> / <span data-role="total">0</span>
+              <small class="muted" data-role="failed"></small>
+            </div>
+            <div class="progress"><i data-role="bar"></i></div>
+            <button class="btn primary" data-role="toggle" data-task="strm">开始生成</button>
+          </div>
+        </div>
+        <!-- 统一日志卡片：运行日志与错误日志已合并为一条日志流，用级别过滤按钮切换视角 -->
+        <div class="card">
+          <div class="card-head">
+            <h3>日志</h3>
+            <div class="card-actions">
+              <div class="log-filter" id="log-filter">
+                <button type="button" class="chip active" data-lv="all">全部</button>
+                <button type="button" class="chip" data-lv="info">信息</button>
+                <button type="button" class="chip" data-lv="warn">警告</button>
+                <button type="button" class="chip" data-lv="error">错误</button>
+              </div>
+              <label class="chk"><input type="checkbox" id="log-pause">暂停滚动</label>
+              <button class="btn ghost" id="log-clear" type="button">清空</button>
+            </div>
+          </div>
+          <div class="log-box" id="log-box">
+            <div class="muted empty">正在连接日志流…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 离线下载 -->
+      <section id="view-offline" class="view" hidden>
+        <h2>离线下载 <small class="muted" id="quota-info"></small></h2>
+        <div class="card">
+          <form id="offline-add-form">
+            <label>下载链接（每行一条，支持 http / magnet / ed2k，或选择种子文件上传）</label>
+            <textarea name="urls" rows="4" placeholder="magnet:?xt=urn:btih:..."></textarea>
+            <label>种子文件（.torrent）</label>
+            <input type="file" name="torrent" accept=".torrent">
+            <label>保存到云端目录（留空默认 STRM 目录，「/」为网盘根目录）</label>
+            <div class="row">
+              <input name="save_path" placeholder="/影视/下载">
+              <button type="submit" class="btn primary">添加任务</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h3>任务列表</h3>
+            <div class="row">
+              <button class="btn sm" id="offline-refresh">刷新</button>
+              <button class="btn sm" data-clear="0">清除已完成</button>
+              <button class="btn sm" data-clear="2">清除失败</button>
+              <button class="btn sm danger" data-clear="1">清空全部</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>大小</th>
+                  <th>进度</th>
+                  <th>状态</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="offline-tbody">
+                <tr>
+                  <td colspan="5" class="muted center">加载中…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="row pager">
+            <button class="btn sm" id="page-prev">上一页</button>
+            <span id="page-info" class="muted"></span>
+            <button class="btn sm" id="page-next">下一页</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section id="view-settings" class="view" hidden>
+        <h2>设置</h2>
+        <form id="config-form">
+          <div class="card">
+            <h3>同步配置 <small class="muted">保存后自动热重载，实时生效</small></h3>
+            <label>云端同步目录 <input name="sync_path" required></label>
+            <label>STRM 生成起始目录 <input name="strm_path" required></label>
+            <label>回收/临时目录 <input name="temp_path" required></label>
+            <label>STRM 直链 URL <input name="strm_url" required></label>
+            <label>种子临时目录 <small class="muted">离线下载上传种子的云端目录，留空用根目录</small> <input name="torrent_path" placeholder="留空则根目录"></label>
+            <label>本地同步静默窗口（秒，0 为默认 15）<input name="settle_seconds" type="number" min="0"></label>
+          </div>
+          <div class="card">
+            <h3>登录验证 <small class="muted">用户名留空即关闭验证；/download 直链始终免验证</small></h3>
+            <label>用户名 <input name="auth_username" autocomplete="off"></label>
+            <label>密码 <input name="auth_password" type="password" placeholder="留空则保持不变" autocomplete="new-password"></label>
+          </div>
+          <button type="submit" class="btn primary">保存配置</button>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast-box"></div>
+</body>
+
+</html>

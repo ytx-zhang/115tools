@@ -19,6 +19,36 @@
 - 视频文件上传云端后，本地保留 `.strm` 文件（内含下载直链 URL），Emby 播放时通过 115tools 302 重定向到 115 CDN 直链
 - 非视频文件（字幕、nfo 等）直接下载到本地
 
+## 代码结构
+
+按职责拆包：一个文件夹 = 一个功能模块，看单个包即可理解对应功能。
+
+```
+main.go                    # 纯装配：日志管道、HTTP 服务、DB、Runner、面板注册、优雅退出
+config/                    # 配置文件读写（含 token 持久化、面板配置校验）
+db/                        # bbolt 本地索引（路径→云端FID+大小）与批量写入器
+drive/                     # 115 API 客户端
+│  open115.go              #   客户端装配（限流/鉴权/统一错误处理）
+│  token.go                #   AccessToken 自动刷新
+│  file_api.go             #   文件/目录操作（下载直链/列表/增删移改）
+│  upload_api.go           #   上传（秒传优先）与 SHA1 工具
+│  offline.go · oss_upload.go · httpclient.go
+logstream/                 # 统一日志管道：slog 捕获进内存缓冲，供面板 SSE 推送
+strmServer/                # /download 302 直链服务（Emby 播放用，免鉴权）
+syncFile/                  # 同步系统根包（门面/装配，不含具体业务）
+│  syncFile.go             #   New() 装配三模块 + 对 web 的门面方法
+│  bootstrap.go            #   启动初始化编排（建库扫描/回收目录）
+│  cron.go                 #   每 12 小时定时全量同步
+│  runner.go               #   热重载生命周期管理
+├── core/                  # 三模块共享层（运行环境/云端遍历器/进度统计/文件存取）
+├── local/                 # 本地同步模块：监听本地变化 → 上传/清理云端（本地→云端）
+├── cloud/                 # 云端同步模块：全量遍历云端 → 下载/生成 strm（云端→本地）
+└── strm/                  # STRM 生成模块：为云端媒体库批量生成 .strm 索引
+web/                       # 管理面板 HTTP 层（鉴权/配置/任务触发/SSE 推送/静态资源）
+```
+
+依赖方向单向：`local`/`cloud`/`strm` → `core`；根包 → 三模块 + `core`；`web` → `syncFile`/`logstream`。
+
 ## 目录命名规则（重要）
 
 **Docker 挂载的目录名必须与 `config.yaml` 中的云端目录名完全一致**，因为代码根据本地文件路径直接映射云端路径。
@@ -141,6 +171,11 @@ strm_url: http://your-server:8080
 # 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 15 秒。
 settle_seconds: 15
 
+# 管理面板登录验证（username 留空则关闭验证；/download 直链始终免验证，供 Emby 使用）
+auth:
+  username: ""
+  password: ""
+
 # 115 网盘 Token
 token:
   access_token: ""
@@ -165,22 +200,26 @@ docker compose up -d
 
 | 操作 | 说明 |
 |------|------|
-| **文件同步** | 遍历云端目录，将新增/变化文件同步到本地 |
-| **STRM 生成** | 遍历 `strm_path` 云端目录，为所有视频文件生成本地 `.strm` |
-| **进度条** | 实时展示当前任务的完成进度 |
-| **错误日志** | 汇总展示任务执行过程中的异常 |
+| **登录验证** | 配置 `auth` 后需账号密码登录（Cookie 会话 7 天）；`/download` 始终免验证 |
+| **仪表盘** | 云端同步 / STRM 生成的启停与实时进度；统一日志卡片（全部/信息/警告/错误级别过滤，SSE 推送） |
+| **离线下载** | 添加 http/magnet/ed2k 离线任务、查看进度/配额、删除与批量清除 |
+| **设置** | 在线修改路径、STRM URL、静默窗口与登录凭据，保存后热重载实时生效 |
 
 启动后所有路由：
 
 | 路由 | 说明 |
 |------|------|
-| `GET /` | 管理面板首页 |
-| `GET /logs` | SSE 实时状态推送 |
-| `GET /sync` | 触发云端同步 |
-| `GET /stopsync` | 停止云端同步 |
-| `GET /strm` | 触发 STRM 生成 |
-| `GET /stopstrm` | 停止 STRM 生成 |
-| `GET /download` | 内部 302 重定向，供 Emby 播放 |
+| `GET /` | 管理面板（原生 JS SPA，零框架） |
+| `GET /download` | 内部 302 重定向，供 Emby 播放（**不做登录验证**） |
+| `POST /api/login` · `POST /api/logout` · `GET /api/me` | 会话管理 |
+| `GET /api/status` | SSE 实时任务状态推送 |
+| `GET /api/logs` · `POST /api/logs/clear` | SSE 实时日志推送 / 清空日志缓冲 |
+| `POST /api/task/{sync\|strm}` | 触发任务；`DELETE` 同路由为停止 |
+| `GET /api/config` · `PUT /api/config` | 查看 / 修改配置（改动实时生效） |
+| `GET /api/offline/tasks` · `quota` | 离线任务列表 / 配额 |
+| `POST /api/offline/add` · `delete` · `clear` | 添加 / 删除 / 批量清除离线任务 |
+
+除 `/`、`/download`、`/api/login`、`/api/me` 与静态资源外，其余接口均需登录（未配置 `auth` 时不校验）。
 
 ## Emby 配置
 

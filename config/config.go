@@ -13,19 +13,31 @@ import (
 // Config 包含所有业务路径和 Token 操作方法
 type Config struct {
 	// 静态配置字段：外部直接通过 cfg.SyncPath 访问
-	SyncPath string `yaml:"sync_path"`
-	StrmPath string `yaml:"strm_path"`
-	TempPath string `yaml:"temp_path"`
-	StrmUrl  string `yaml:"strm_url"`
+	SyncPath    string `yaml:"sync_path"`
+	StrmPath    string `yaml:"strm_path"`
+	TempPath    string `yaml:"temp_path"`
+	StrmUrl     string `yaml:"strm_url"`
+	TorrentPath string `yaml:"torrent_path"` // 离线下载上传种子的云端临时目录，为空则用根目录
 
 	// 本地同步静默窗口（秒）：监听事件后等待该时长内无新事件才执行同步，
 	// 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 15 秒。
 	SettleSeconds int `yaml:"settle_seconds"`
 
+	// Auth 前端管理页登录凭据；Username 为空表示关闭登录验证。
+	// 密码仅以 bcrypt 哈希存储（PasswordHash），绝不保存明文。
+	// /download 直链接口始终不做验证（供 Emby 使用）。
+	Auth AuthConfig `yaml:"auth"`
+
 	// 内部私有属性
 	path  string
 	mu    sync.RWMutex
 	token tokenData
+}
+
+// AuthConfig 前端登录的账号密码；密码仅以 bcrypt 哈希存储。
+type AuthConfig struct {
+	Username     string `yaml:"username"`
+	PasswordHash string `yaml:"password_hash"`
 }
 
 type tokenData struct {
@@ -113,21 +125,23 @@ func (c *Config) SaveToken(access, refresh string, expiresIn int64) {
 	expireAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
 	c.token.ExpireAt = expireAt
 
-	// 序列化并存盘
-	out, err := yaml.Marshal(struct {
-		*Config `yaml:",inline"`
-		Token   tokenData `yaml:"token"`
-	}{c, c.token})
-	if err != nil {
-		slog.Error("[CONFIG] Token 序列化失败，内存已更新但未落盘", "错误信息", err)
-		return
-	}
-
-	if err := os.WriteFile(c.path, out, 0644); err != nil {
+	if err := c.persistLocked(); err != nil {
 		slog.Error("[CONFIG] Token 写盘失败，内存已更新但未落盘，重启后可能读到旧 Token", "错误信息", err)
 		return
 	}
 
 	// 显示直观的到期时间日志
 	slog.Info("[CONFIG] Token 已更新", "到期时间", expireAt.Format("2006-01-02 15:04:05"))
+}
+
+// persistLocked 序列化并写盘，调用方必须已持有 c.mu 写锁。
+func (c *Config) persistLocked() error {
+	out, err := yaml.Marshal(struct {
+		*Config `yaml:",inline"`
+		Token   tokenData `yaml:"token"`
+	}{c, c.token})
+	if err != nil {
+		return fmt.Errorf("序列化失败: %w", err)
+	}
+	return os.WriteFile(c.path, out, 0644)
 }
