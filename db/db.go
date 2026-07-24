@@ -263,6 +263,38 @@ func (d *DB) ScanChildren(ctx context.Context, workPath string, handler func(nam
 	})
 }
 
+// ListStrmFids 递归返回 dirPath 目录下所有 .strm 文件对应的云端视频 FID。
+// 用于「删除目录」时先把有价值的视频挪到临时目录，再让目录进回收站。
+// 实现：bbolt 前缀扫描 dirPath/ 下全部后代 key，按 .strm 后缀过滤并解出 fid；
+// 不跳过深层目录（要的是整棵子树），故不用 ScanChildren 的 0xFF 跳转。
+func (d *DB) ListStrmFids(dirPath string) []string {
+	prefix := dirPath
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	prefixBytes := []byte(prefix)
+
+	var fids []string
+	d.boltDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(d.bucketName)
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, v := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, v = c.Next() {
+			// 只看 .strm 文件（大小写不敏感），目录壳子不关心
+			if !strings.HasSuffix(strings.ToLower(string(k)), ".strm") {
+				continue
+			}
+			if fid, _, ok := decodeValue(v); ok && fid != "" {
+				fids = append(fids, fid)
+			}
+		}
+		return nil
+	})
+	return fids
+}
+
 // Compact 将数据库压缩到最小体积，回收删除/重写产生的空洞页。
 // 压缩期间 d.mu 全程持锁，先关闭主连接再操作文件，避免 Windows 文件锁冲突。
 func (d *DB) Compact() error {
