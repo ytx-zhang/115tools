@@ -151,6 +151,10 @@
             <label>本地同步静默窗口（秒，0 为默认 15）<input name="settle_seconds" type="number" min="0"></label>
           </div>
           <div class="card">
+            <h3>115 账号凭证 <small class="muted">仅用于紧急更换 refresh_token；保存后 115 会自动轮换</small></h3>
+            <label>refresh_token <input name="refresh_token" type="password" placeholder="未配置" autocomplete="off"></label>
+          </div>
+          <div class="card">
             <h3>登录验证 <small class="muted">用户名留空即关闭验证；/download 直链始终免验证</small></h3>
             <label>用户名 <input name="auth_username" autocomplete="off"></label>
             <label>密码 <input name="auth_password" type="password" placeholder="留空则保持不变" autocomplete="new-password"></label>

@@ -23,6 +23,17 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// refresh_token 单独处理：仅在用户有输入时才校验并落盘，避免无效 token 写盘后
+	// 旧 access_token 过期导致刷新全挂。校验成功即已持久化（含 115 可能轮换的新 rt），
+	// 从请求剥离后交给 Update 处理其余字段。
+	if req.RefreshToken != "" {
+		if err := s.Api.VerifyAndApplyRefreshToken(r.Context(), req.RefreshToken); err != nil {
+			writeErr(w, http.StatusBadRequest, "refresh_token 校验失败，未保存: %v", err)
+			return
+		}
+		req.RefreshToken = ""
+	}
+
 	needReload, err := s.Cfg.Update(req)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)

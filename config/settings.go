@@ -20,21 +20,26 @@ type Editable struct {
 	AuthUsername  string `json:"auth_username"`
 	AuthPassword  string `json:"auth_password,omitempty"`
 	HasPassword   bool   `json:"has_password,omitempty"` // 仅 Snapshot 输出
+	// RefreshToken：快照只回显 has_refresh_token（绝不回显明文）；
+	// 保存时若非空则用新值校验并替换，空表示保持不变。
+	RefreshToken    string `json:"refresh_token,omitempty"`
+	HasRefreshToken bool   `json:"has_refresh_token,omitempty"` // 仅 Snapshot 输出
 }
 
-// Snapshot 返回当前可编辑配置的副本（不含密码明文）。
+// Snapshot 返回当前可编辑配置的副本（不含密码明文，也不回显 refresh_token 明文）。
 func (c *Config) Snapshot() Editable {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return Editable{
-		SyncPath:      c.SyncPath,
-		StrmPath:      c.StrmPath,
-		TempPath:      c.TempPath,
-		StrmUrl:       c.StrmUrl,
-		TorrentPath:   c.TorrentPath,
-		SettleSeconds: c.SettleSeconds,
-		AuthUsername:  c.Auth.Username,
-		HasPassword:   c.Auth.PasswordHash != "",
+		SyncPath:        c.SyncPath,
+		StrmPath:        c.StrmPath,
+		TempPath:        c.TempPath,
+		StrmUrl:         c.StrmUrl,
+		TorrentPath:     c.TorrentPath,
+		SettleSeconds:   c.SettleSeconds,
+		AuthUsername:    c.Auth.Username,
+		HasPassword:     c.Auth.PasswordHash != "",
+		HasRefreshToken: c.token.RefreshToken != "",
 	}
 }
 

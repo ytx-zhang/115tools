@@ -20,9 +20,13 @@ async function load() {
     const cfg = await api('/api/config');
     const form = document.getElementById('config-form');
     for (const f of FIELDS) form.elements[f].value = cfg[f] ?? '';
+    // 密码与 refresh_token 不回显明文：仅清空并给占位提示
     form.elements['auth_password'].value = '';
     form.elements['auth_password'].placeholder =
       cfg.has_password ? '已设置，留空则保持不变' : '未设置';
+    form.elements['refresh_token'].value = '';
+    form.elements['refresh_token'].placeholder =
+      cfg.has_refresh_token ? '已配置，留空则保持不变' : '未配置';
   } catch (err) {
     toast(err.message, 'err');
   }
@@ -41,6 +45,8 @@ async function save(e) {
     settle_seconds: +form.elements['settle_seconds'].value || 0,
     auth_username: form.elements['auth_username'].value.trim(),
     auth_password: form.elements['auth_password'].value,
+    // 有输入才提交；留空表示保持不变（后端跳过校验，不改动 token）
+    refresh_token: form.elements['refresh_token'].value.trim(),
   };
 
   btn.disabled = true;
