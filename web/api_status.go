@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,8 +13,10 @@ import (
 // 事件驱动：阻塞等待 syncFile 的状态变更信号，有变更才推送；空闲时零开销。
 // 15s 心跳注释帧防止代理/网关空闲超时（504）。
 //
-// 推送的 JSON 形如 {"ready":true,"sync":{...},"strm":{...}}：
-//   - ready=false 表示热重载进行中或初始化失败，前端显示「未就绪」横幅；
+// 推送的 JSON 形如 {"ready":true,"config_ready":true,"missing":[],"sync":{...},"strm":{...}}：
+//   - ready=false 表示同步器未就绪，需结合 config_ready 区分：
+//     · config_ready=false → 配置不完整（前端显示「请补齐配置」横幅 + 缺失项）；
+//     · config_ready=true  → 热重载进行中或初始化失败（前端显示「重载中」横幅）。
 //   - sync/strm 为各自的任务进度（总数/完成/失败计数/运行中）。
 //     失败原因明细不在此推送——统一走 /api/logs 日志管道，
 //     前端在日志卡片按「错误」级别过滤即可查看（避免同一错误记两处）。
@@ -59,13 +62,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // sendStatus 写出当前状态快照。返回 false 表示连接已断，调用方应直接 return 关闭流。
 func (s *Server) sendStatus(sw *sseWriter) bool {
+	ready := s.Syncer() != nil
+	configReady := s.Cfg.IsSyncReady()
+	missing, _ := json.Marshal(s.Cfg.RequiredMissing())
 	var data string
-	if syncer := s.Syncer(); syncer != nil {
-		syncJSON, strmJSON := syncer.StatusSnapshot()
-		data = fmt.Sprintf(`{"ready":true,"sync":%s,"strm":%s}`, syncJSON, strmJSON)
+	if ready {
+		syncJSON, strmJSON := s.Syncer().StatusSnapshot()
+		data = fmt.Sprintf(`{"ready":true,"config_ready":%t,"missing":%s,"sync":%s,"strm":%s}`,
+			configReady, missing, syncJSON, strmJSON)
 	} else {
-		// 热重载进行中或初始化失败
-		data = `{"ready":false,"sync":null,"strm":null}`
+		// 未就绪：可能是「配置未填」或「热重载中」，由 config_ready 区分
+		data = fmt.Sprintf(`{"ready":false,"config_ready":%t,"missing":%s,"sync":null,"strm":null}`,
+			configReady, missing)
 	}
 	return sw.writeData(data)
 }

@@ -46,18 +46,35 @@ type tokenData struct {
 	ExpireAt     time.Time `yaml:"expire_at"`
 }
 
-// New 初始化并执行必须字段检查
+// New 读取并解析配置文件。
+//
+// 与旧版不同：本函数不再因「缺少必填项」而报错——缺失由 IsSyncReady 判定，
+// 缺失时只阻止同步启动、不影响程序与面板运行（前端会提示用户补齐）。
+//
+// 文件不存在时自动生成一份模板（字段全空、含注释），随后重新读入返回，不致命退出；
+// 仅当文件存在但读取/解析失败时返回 error（属于真实损坏，需用户介入）。
 func New(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("读取配置文件失败: %w", err)
+		if os.IsNotExist(err) {
+			// 配置文件缺失：生成模板供用户在面板填写，降级继续运行而非退出。
+			if genErr := writeTemplate(path); genErr != nil {
+				return nil, fmt.Errorf("生成配置文件模板失败: %w", genErr)
+			}
+			slog.Warn("[CONFIG] 配置文件不存在，已生成模板，请在管理面板填写后保存以启动同步", "路径", path)
+			data, err = os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("读取生成的配置文件失败: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("读取配置文件失败: %w", err)
+		}
 	}
 
 	var tmp struct {
 		Config `yaml:",inline"`
 		Token  tokenData `yaml:"token"`
 	}
-
 	if err := yaml.Unmarshal(data, &tmp); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
@@ -65,33 +82,67 @@ func New(path string) (*Config, error) {
 	cfg := &tmp.Config
 	cfg.path = path
 	cfg.token = tmp.Token
-
-	// 执行必须字段检查
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
-
 	return cfg, nil
 }
 
-// validate 检查核心参数是否为空
-func (c *Config) validate() error {
+// templateConfig 是自动生成的配置文件模板内容（字段全空、含注释）。
+// 字段名/缩进与 persistLocked 的 marshal 产物（*Config inline + token）对齐，
+// 避免用户首次保存后产生无谓的字段顺序 diff。
+const templateConfig = `# 115tools 配置文件（自动生成模板）
+# 可直接在此编辑后重启，或通过 Web 管理面板填写。
+# 注意：token 中仅 refresh_token 需手动填写；access_token / expire_at 由程序自动刷新写入。
+
+sync_path: ""
+strm_path: ""
+temp_path: ""
+strm_url: ""
+torrent_path: ""
+
+# 本地同步静默窗口（秒）：监听事件后等待该时长无新事件再同步；0 表示默认 15 秒
+settle_seconds: 0
+
+# 管理面板登录：username 留空表示关闭登录验证（仅内网安全时使用）
+auth:
+  username: ""
+  password_hash: ""
+
+token:
+  access_token: ""
+  refresh_token: ""
+  expire_at: "0001-01-01T00:00:00Z"
+`
+
+// writeTemplate 将模板写入指定路径（目录需已存在，由部署挂载保证）。
+func writeTemplate(path string) error {
+	return os.WriteFile(path, []byte(templateConfig), 0644)
+}
+
+// RequiredMissing 返回缺失的必填项（用于前端提示与启动决策）。
+// 仅 refresh_token 是用户必须提供的 token；access_token / expire_at 由程序
+// 首次刷新时自动写入，不计入必填。路径四项是同步器启动的必要条件。
+func (c *Config) RequiredMissing() []string {
+	var miss []string
 	if c.token.RefreshToken == "" {
-		return fmt.Errorf("配置错误: token.refresh_token 不能为空")
+		miss = append(miss, "refresh_token")
 	}
 	if c.SyncPath == "" {
-		return fmt.Errorf("配置错误: sync_path 不能为空")
+		miss = append(miss, "sync_path")
 	}
 	if c.StrmPath == "" {
-		return fmt.Errorf("配置错误: strm_path 不能为空")
+		miss = append(miss, "strm_path")
 	}
 	if c.TempPath == "" {
-		return fmt.Errorf("配置错误: temp_path 不能为空")
+		miss = append(miss, "temp_path")
 	}
 	if c.StrmUrl == "" {
-		return fmt.Errorf("配置错误: strm_url 不能为空")
+		miss = append(miss, "strm_url")
 	}
-	return nil
+	return miss
+}
+
+// IsSyncReady 配置是否已足以启动同步器。
+func (c *Config) IsSyncReady() bool {
+	return len(c.RequiredMissing()) == 0
 }
 
 func (c *Config) GetAccessToken() string {

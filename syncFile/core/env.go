@@ -26,11 +26,13 @@ import (
 //
 // 生命周期：由 syncFile 根包的 New() 调用 NewEnv 构造一次，
 // 之后以指针形式注入 local/cloud/strm 三个模块，全程只读。
-// （唯一例外是 Paths 里的 SyncFid/TempFid 会在 bootstrap 阶段回填，见 Paths 注释。）
+// （唯一例外是 Paths 里的 SyncFid/TempFid 会在 bootstrap 阶段从云端实时
+// 读取回填（仅内存、不落库）：TempFid 完全不落库，SyncFid 对应的目录树
+// 索引仍落库但启动会与云端 FID 重新核对，见 Paths 注释。）
 type Env struct {
 	API   *drive.Open115 // 115 网盘 API 客户端（token 刷新、限流由 drive 包内部自动处理）
 	DB    *db.DB         // 本地文件索引数据库（bbolt），记录 路径 → 云端FID + 大小
-	Paths *Paths         // 路径与 FID 配置，三个模块共用同一份
+	Paths *Paths         // 路径与 FID 配置，三个模块共用同一份（SyncFid/TempFid 由 bootstrap 从云端回填，不落库）
 	Sem   chan struct{}  // 云端 API 并发配额（容量 5），仅在 GetFileList 调用期间持有
 }
 

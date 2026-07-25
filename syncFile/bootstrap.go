@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 )
 
 // 本文件是启动时的「初始化编排」：在三个功能模块启动前，
@@ -16,12 +15,15 @@ import (
 
 // initRoot 准备主同步目录的数据库索引。
 //
-// 两种情形：
-//   - 数据库已有主目录记录（非首次运行）→ 直接取出 FID，秒级返回；
-//   - 首次运行 → 全量扫描云端目录树，把每个文件/目录的 路径→FID 写入数据库
-//     （后续 local 的扫描对比、cloud 的计数跳过优化都依赖这份索引）。
+// 设计要点：以云端为准。每次启动都先向 115 查询主目录的当前 FID，
+// 再与数据库中记录的 FID 比对，决定「复用索引」还是「清空重扫」：
+//   - 一致（非首次运行）→ 直接复用既有索引，秒级返回；
+//   - 不一致（云端目录被手动重建、配置改了 sync_path 等）→ 清空旧索引后全量重扫；
+//   - 数据库为空（首次运行）→ 全量扫描建库。
 //
-// 首次扫描若被中止（如热重载/退出），会清掉写了一半的索引，
+// 这样配置改动、云端目录被重建等情况不会再沿用陈旧（可能已失效）的索引。
+//
+// 首次/重扫若被中止（如热重载/退出），会清掉写了一半的索引，
 // 保证下次启动重新完整扫描，不留下「看似建好实则残缺」的数据。
 func (s *SyncFile) initRoot(parentCtx context.Context) error {
 	if err := context.Cause(parentCtx); err != nil {
@@ -34,23 +36,39 @@ func (s *SyncFile) initRoot(parentCtx context.Context) error {
 		cancel(err)
 	}
 
-	// 非首次运行：数据库里已有主目录记录，直接用，无需扫描。
-	dbFid := s.env.DB.GetFid(s.env.Paths.SyncPath)
-	if dbFid != "" {
-		s.env.Paths.SyncFid = dbFid
-		return nil
-	}
-
-	var isCloudScan atomic.Bool
-	isCloudScan.Store(true)
-	defer isCloudScan.Store(false)
-	slog.Info("初次运行，开始初始化云端数据库...")
+	// 总是先读云端：以 115 当前目录为准，避免沿用旧的本地记录。
 	info, err := s.env.API.GetDirInfo(ctx, s.env.Paths.SyncPath)
 	if err != nil {
 		return err
 	}
-	s.env.Paths.SyncFid = info.Fid
-	s.env.DB.SaveRecord(s.env.Paths.SyncPath, s.env.Paths.SyncFid, db.SizeDir)
+	cloudFid := info.Fid
+	s.env.Paths.SyncFid = cloudFid
+
+	// 再取数据库里记录的旧 FID，用于比对。
+	dbFid := s.env.DB.GetFid(s.env.Paths.SyncPath)
+
+	// 数据库已有主目录记录，且云端 FID 与之一致 → 秒级复用，无需扫描。
+	if dbFid != "" && dbFid == cloudFid {
+		return nil
+	}
+
+	// 走到这里说明：要么首次运行（dbFid 空），要么云端 FID 已变化（需重建索引）。
+	// scanStarted 标记已进入云端扫描分支，扫描被中止时据此清理残留索引。
+	// 注意：TempPath 的历史孤儿记录清理不在此处，统一交给 initTemp 负责
+	//（TempPath 不在 SyncPath 扫描树内，initRoot 无需管它）。
+	scanStarted := true
+
+	if dbFid == "" {
+		slog.Info("初次运行，开始初始化云端数据库...")
+	} else {
+		// FID 变化：清空旧索引后重新全量扫描。
+		slog.Info("[初始化] 云端目录 FID 已变更，将清空旧索引并重新全量扫描",
+			"旧FID", dbFid, "新FID", cloudFid)
+		s.env.DB.BatchClearPaths([]string{s.env.Paths.SyncPath})
+	}
+
+	// 记录根目录自身，供后续相对路径拼接与扫描定位。
+	s.env.DB.SaveRecord(s.env.Paths.SyncPath, cloudFid, db.SizeDir)
 
 	// 批量写入器：扫描产生的大量写入合并为少量数据库事务；遍历成功后才落盘。
 	// 注意：仅在扫描成功时 Flush——若扫描失败，下方会 BatchClearPaths 清理数据库，
@@ -92,7 +110,7 @@ func (s *SyncFile) initRoot(parentCtx context.Context) error {
 	}
 
 	if err := context.Cause(ctx); err != nil {
-		if isCloudScan.Load() {
+		if scanStarted {
 			slog.Error("云端扫描被中止，正在清理数据库", "错误信息", err)
 			s.env.DB.BatchClearPaths([]string{s.env.Paths.SyncPath})
 		}
@@ -104,22 +122,27 @@ func (s *SyncFile) initRoot(parentCtx context.Context) error {
 }
 
 // initTemp 准备云端回收目录的 FID（删除/替换文件时先移入这里，保留反悔余地）。
-// 同样优先用数据库缓存，没有才查询云端。
+//
+// 设计要点：与旧版「优先读数据库缓存」不同，这里每次启动都向 115 实时查询，
+// 结果只回填内存（core.Paths.TempFid），不再写入数据库。原因：temp_path 可能
+// 被配置改动、云端手动重建，落库反而会用到陈旧（可能已失效）的 FID。
+// 顺带清理旧版本落库的 TempPath 孤儿记录（该路径下从未写入子条目，清空无副作用）。
 func (s *SyncFile) initTemp(ctx context.Context) error {
 	if err := context.Cause(ctx); err != nil {
 		slog.Warn("[任务中止] Temp目录初始化", "错误信息", err)
 		return err
 	}
-	dbFid := s.env.DB.GetFid(s.env.Paths.TempPath)
-	if dbFid != "" {
-		s.env.Paths.TempFid = dbFid
-		return nil
+
+	// 旧版曾把 TempFid 落库，这里清掉历史孤儿记录（该路径下无子条目可误伤）。
+	if old := s.env.DB.GetFid(s.env.Paths.TempPath); old != "" {
+		s.env.DB.BatchClearPaths([]string{s.env.Paths.TempPath})
 	}
+
+	// 每次都读云端，结果仅存内存。
 	info, err := s.env.API.GetDirInfo(ctx, s.env.Paths.TempPath)
 	if err != nil {
 		return err
 	}
 	s.env.Paths.TempFid = info.Fid
-	s.env.DB.SaveRecord(s.env.Paths.TempPath, s.env.Paths.TempFid, db.SizeDir)
 	return nil
 }

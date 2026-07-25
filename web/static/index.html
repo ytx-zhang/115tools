@@ -41,6 +41,7 @@
       <!-- 仪表盘 -->
       <section id="view-dashboard" class="view">
         <h2>仪表盘</h2>
+        <div id="config-banner" class="banner" hidden>⚠️ 配置不完整，同步未启动，请到「设置」补齐。</div>
         <div id="reload-banner" class="banner" hidden>⏳ 配置热重载中，同步器正在重建……</div>
         <div class="grid2">
           <div class="card task-card" id="card-sync">
@@ -140,13 +141,14 @@
       <!-- 设置 -->
       <section id="view-settings" class="view" hidden>
         <h2>设置</h2>
+        <div id="settings-banner" class="banner" hidden></div>
         <form id="config-form">
           <div class="card">
-            <h3>同步配置 <small class="muted">保存后自动热重载，实时生效</small></h3>
-            <label>云端同步目录 <input name="sync_path" required></label>
-            <label>STRM 生成起始目录 <input name="strm_path" required></label>
-            <label>回收/临时目录 <input name="temp_path" required></label>
-            <label>STRM 直链 URL <input name="strm_url" required></label>
+            <h3>同步配置 <small class="muted">保存后自动生效；不完整时仅保存不启动同步</small></h3>
+            <label>云端同步目录 <input name="sync_path"></label>
+            <label>STRM 生成起始目录 <input name="strm_path"></label>
+            <label>回收/临时目录 <input name="temp_path"></label>
+            <label>STRM 直链 URL <input name="strm_url"></label>
             <label>种子临时目录 <small class="muted">离线下载上传种子的云端目录，留空用根目录</small> <input name="torrent_path" placeholder="留空则根目录"></label>
             <label>本地同步静默窗口（秒，0 为默认 15）<input name="settle_seconds" type="number" min="0"></label>
           </div>

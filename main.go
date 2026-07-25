@@ -2,11 +2,12 @@
 //
 // main 只负责「装配」——把各包创建出来并接好线，不含任何业务逻辑：
 //  1. 日志：logstream.Setup 配好 slog（stdout + 面板日志管道）；
-//  2. HTTP：先注册 /download（Emby 播放视频的直链依赖）并立即监听，
-//     管理面板路由等数据库与同步器初始化完成后才注册；
-//  3. 同步：syncFile.Runner 管理同步器生命周期（含配置热重载）；
-//  4. 面板：web.Register 注册全部管理接口（登录/配置/任务触发/状态与日志推送）；
-//  5. 退出：收到中断信号后优雅关闭（先停 HTTP，再等全部后台协程收尾）。
+//  2. 配置：加载 config 并创建 115 API 客户端（缺失自动降级，不致命退出）；
+//  3. HTTP：先注册 /download（Emby 播放视频的直链，免鉴权）并立即监听；
+//  4. 数据库：初始化 DB 并压缩一次回收空洞页；
+//  5. 同步：创建 Runner 管理同步器生命周期（含热重载），提前注册管理面板；
+//  6. 启动：配置就绪才启动同步器，否则面板照常可用；
+//  7. 退出：收到中断信号后优雅关闭（先停 HTTP，再等全部后台协程收尾）。
 package main
 
 import (
@@ -39,10 +40,12 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	// 1. 加载配置与 115 API 客户端
+	// 1. 加载配置与 115 API 客户端。
+	//    配置文件缺失会自动生成模板（降级继续运行，不致命退出）；
+	//    仅当文件存在但解析损坏时才返回错误（需用户介入）。
 	cfg, err := config.New("/app/data/config.yaml")
 	if err != nil {
-		slog.Error("[CONFIG] 配置文件错误", "错误信息", err)
+		slog.Error("[CONFIG] 配置文件损坏，无法解析", "错误信息", err)
 		return
 	}
 
@@ -50,7 +53,7 @@ func main() {
 
 	// 2. 先注册 /download 并立即启动 HTTP 服务
 	//    /download 是 Emby 播放视频的直链依赖，必须尽早可用且【不做登录验证】，
-	//    因此在其余较重的管理路由之前启动、且不经过 web 包的鉴权中间件。
+	//    因此在其余管理路由之前启动、且不经过 web 包的鉴权中间件。
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /download", strmServer.New(apiClient).RedirectToRealURL)
 
@@ -66,8 +69,7 @@ func main() {
 		}
 	})
 
-	// 3. 初始化数据库与同步器（可能较耗时）。此期间仅 /download 可用，
-	//    管理/触发类路由在初始化完成后才注册，避免未完成初始化即被调用。
+	// 3. 初始化数据库。
 	boltDB, err := db.New(`/app/data/files.db`)
 	if err != nil {
 		slog.Error("数据库初始化失败", "错误信息", err)
@@ -80,14 +82,14 @@ func main() {
 		slog.Warn("数据库压缩失败", "错误信息", err)
 	}
 
-	// Runner 管理同步器生命周期，配置变更时热重载使其实时生效
+	// 4. 创建 Runner（此时【不立即启动】同步器）。
+	//    Runner 管理同步器生命周期，配置变更时热重载使其实时生效。
+	//    即便配置不完整，也先创建好，使管理面板可注册并可用。
 	runner := syncFile.NewRunner(appCtx, cfg, apiClient, boltDB, &wg)
-	if err := runner.Start(); err != nil {
-		slog.Error("初始化同步失败", "错误信息", err)
-		return
-	}
 
-	// 4. 初始化完成后，注册管理面板路由（登录鉴权 + 配置 + 离线下载 + 任务触发）
+	// 5. 提前注册管理面板路由（登录鉴权 + 配置 + 离线下载 + 任务触发）。
+	//    与旧版不同，这里不等待同步器初始化完成：配置缺失时面板仍可用，
+	//    用户可在面板补齐配置，保存后由 web 层自动拉起同步器。
 	web.Register(mux, web.Deps{
 		Cfg:         cfg,
 		Api:         apiClient,
@@ -100,7 +102,18 @@ func main() {
 		Reload:      runner.Reload,
 	})
 
-	// 5. 等待退出信号并优雅关闭
+	// 6. 配置完整才启动同步器；否则仅 Warn 列出缺失项、不致命退出，
+	//    面板照常可用。补齐后由 web 保存逻辑（Reload）拉起同步器。
+	if cfg.IsSyncReady() {
+		if err := runner.Start(); err != nil {
+			slog.Error("[初始化] 同步器启动失败，请在面板检查配置或稍后重试", "错误信息", err)
+		}
+	} else {
+		slog.Warn("[CONFIG] 配置不完整，同步未启动，请在管理面板补齐后保存",
+			"缺失项", cfg.RequiredMissing())
+	}
+
+	// 7. 等待退出信号并优雅关闭
 	<-appCtx.Done()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

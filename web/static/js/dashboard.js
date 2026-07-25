@@ -40,10 +40,18 @@ function connect() {
 
 const startText = { sync: '开始同步', strm: '开始生成' };
 
-// render 刷新整个仪表盘：热重载横幅 + 两张任务卡片。
+// render 刷新整个仪表盘：配置/热重载横幅 + 两张任务卡片。
 // 失败原因明细不在状态里推送（统一走日志卡片按「错误」过滤），这里只展示失败计数。
 function render(data) {
-  document.getElementById('reload-banner').hidden = data.ready;
+  // 配置不完整：优先提示补齐（比热重载更关键）。
+  const cfgBanner = document.getElementById('config-banner');
+  cfgBanner.hidden = data.config_ready;
+  if (!data.config_ready) {
+    const miss = (data.missing || []).join('、');
+    cfgBanner.textContent = `⚠️ 配置不完整，同步未启动，请到「设置」补齐：${miss}`;
+  }
+  // 热重载中横幅：仅当配置已就绪、但同步器暂未就绪时显示。
+  document.getElementById('reload-banner').hidden = data.ready || !data.config_ready;
   renderCard('sync', data.sync);
   renderCard('strm', data.strm);
 }

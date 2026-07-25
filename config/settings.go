@@ -24,12 +24,18 @@ type Editable struct {
 	// 保存时若非空则用新值校验并替换，空表示保持不变。
 	RefreshToken    string `json:"refresh_token,omitempty"`
 	HasRefreshToken bool   `json:"has_refresh_token,omitempty"` // 仅 Snapshot 输出
+
+	// ConfigReady / MissingFields 仅由 GET /api/config 返回（供前端展示配置完备状态），
+	// PUT 请求中忽略这两个字段。
+	ConfigReady   bool     `json:"config_ready,omitempty"`
+	MissingFields []string `json:"missing_fields,omitempty"`
 }
 
 // Snapshot 返回当前可编辑配置的副本（不含密码明文，也不回显 refresh_token 明文）。
 func (c *Config) Snapshot() Editable {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	missing := c.RequiredMissing() // 算一次，ConfigReady 与 MissingFields 都从它派生
 	return Editable{
 		SyncPath:        c.SyncPath,
 		StrmPath:        c.StrmPath,
@@ -40,6 +46,8 @@ func (c *Config) Snapshot() Editable {
 		AuthUsername:    c.Auth.Username,
 		HasPassword:     c.Auth.PasswordHash != "",
 		HasRefreshToken: c.token.RefreshToken != "",
+		ConfigReady:     len(missing) == 0,
+		MissingFields:   missing,
 	}
 }
 
@@ -55,9 +63,9 @@ func (c *Config) GetAuth() (username, passwordHash string) {
 // 返回 needReload 表示同步相关字段（路径/URL/静默窗口）发生变化，
 // 调用方需要热重载同步器使其实时生效。
 func (c *Config) Update(e Editable) (needReload bool, err error) {
-	if e.SyncPath == "" || e.StrmPath == "" || e.TempPath == "" || e.StrmUrl == "" {
-		return false, fmt.Errorf("sync_path / strm_path / temp_path / strm_url 均不能为空")
-	}
+	// 注意：不再强制 sync_path / strm_path / temp_path / strm_url 非空，
+	// 允许先保存不完整配置（前端会提示缺失项、同步器暂不启动）；
+	// 待用户在面板补齐后由 web 保存逻辑自动拉起同步器。
 	if e.AuthUsername != "" && e.AuthPassword == "" {
 		// 允许留空表示沿用旧密码，但旧密码也为空时必须设置
 		if _, old := c.GetAuth(); old == "" {
