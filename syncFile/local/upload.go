@@ -55,8 +55,34 @@ func (l *Local) uploadOneFile(ctx context.Context, cid, fPath string) {
 	}
 }
 
+// alreadyUploaded 在真正上传前查数据库：若本地文件对应的云端记录已存在且内容一致，
+// 说明此前已成功上传（嵌套目录重复事件、手动重试、事件迟到乱序导致的二次入队皆会触发），
+// 返回 true 让上层跳过，避免重复上传产生云端副本。
+//
+// 判定键与签名刻意与 upFileTask / upStrmTask 的落库保持一致：
+//   - 视频：落库键为「同名 .strm」、签名是时间戳版本号，存在即视为已完成（不比对时间戳）；
+//   - .strm 文件：落库键即自身、签名为时间戳，同样存在即视为已完成；
+//   - 其余普通文件：落库键即自身、签名为字节数，大小一致才视为已完成。
+func (l *Local) alreadyUploaded(fPath string, fileInfo os.FileInfo) bool {
+	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
+	// 视频会被替换为 .strm 再落库，键要跟着变；.strm 与普通文件仍以自身为键
+	dbKey := fPath
+	if !isStrm && core.CheckVideo(filepath.Ext(fPath), fileInfo.Size()) {
+		dbKey = strings.TrimSuffix(fPath, filepath.Ext(fPath)) + ".strm"
+	}
+	dbFid, dbSize := l.env.DB.GetInfo(dbKey)
+	if dbFid == "" {
+		return false
+	}
+	// 视频 / .strm 以时间戳为签名，无法与本地字节大小比较，仅判存在即可
+	if isStrm || core.CheckVideo(filepath.Ext(fPath), fileInfo.Size()) {
+		return true
+	}
+	return fileInfo.Size() == dbSize
+}
+
 // doUpload 真正执行一次上传（由上传 worker 调用）：
-// os.Stat 确认文件还在 → 按类型分派 upStrmTask/upFileTask → 记录结果日志。
+// os.Stat 确认文件还在 → 上传前查重避免重复上传 → 按类型分派 upStrmTask/upFileTask → 记录结果日志。
 func (l *Local) doUpload(ctx context.Context, cid, fPath string) {
 	if err := ctx.Err(); err != nil {
 		return
@@ -65,6 +91,12 @@ func (l *Local) doUpload(ctx context.Context, cid, fPath string) {
 	if err != nil {
 		// 排队期间文件又被删了，属正常情况，无需报错
 		slog.Warn("同步的文件不存在", "文件", fPath)
+		return
+	}
+
+	// 上传前查重：数据库已有匹配记录说明此前已成功上传，跳过重复上传
+	if l.alreadyUploaded(fPath, fileInfo) {
+		slog.Debug("文件已存在云端对应记录，跳过重复上传", "文件", fPath)
 		return
 	}
 
