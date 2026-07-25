@@ -3,6 +3,8 @@ package local
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -45,9 +47,54 @@ func (l *Local) watch(ctx context.Context) {
 			if len(event.Types) == 0 {
 				continue
 			}
-			// 直接上报具体文件/目录路径，由 processPath 精确判定动作，
-			// 不上卷到父目录（避免一次改名污染顶层目录、触发全盘扫描）。
-			l.Enqueue(event.Path)
+			// 入队前收敛：文件直接上报；目录按「是否有子项」决定是否忽略，
+			// 避免同一棵子树被多层目录事件重复递归扫描。
+			l.enqueueFromWatch(event.Path)
 		}
 	}
+}
+
+// enqueueFromWatch 是 watcher 上报事件前的入口收敛，规则如下：
+//
+//   - 文件事件：直接 Enqueue，由 processPath 精确判定动作；
+//   - 目录事件：
+//     1. 主同步根目录 SyncPath 永远 Enqueue——它是整树递归的唯一总入口；
+//     2. 空目录 Enqueue——运行中新增的空目录没有文件事件能触发回退链，
+//     必须自己建云端目录，否则该目录在云端永远漏建；
+//     3. 有子项的目录直接忽略：其子文件/子目录会单独上报并触发 processPath
+//     内部的回退链（「父目录未同步则 Enqueue 父目录」），最终由「父目录
+//     已在云端」的那一层递归 syncDir 把整棵子树收敛处理。
+//
+// 为什么忽略有子项的目录能去重：fswatcher 对一棵新子树，最深的叶子最先报、
+// 祖先最后报，所以中间层目录事件到达时其下已存在子项；再让它进 processPath
+// 跑一次 syncDir，会和根目录的递归形成「同一棵子树被多层目录重复递归」的双入口，
+// 正是之前重复上传队列的根源。忽略中间层目录事件后，单入口递归即可覆盖全树。
+//
+// 注意：回退链（processPath 内 Enqueue 父目录）不走此过滤，它是云端目录树
+// 建立责任的兜底承担者，必须保留。
+func (l *Local) enqueueFromWatch(path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		// 路径已不存在（删除/重命名瞬间）：交给 processPath 判定，通常为无需动作
+		l.Enqueue(path)
+		return
+	}
+	if !info.IsDir() {
+		// 文件：直接上报
+		l.Enqueue(path)
+		return
+	}
+	// 目录：根目录永远处理（整树递归总入口）
+	if filepath.Clean(path) == filepath.Clean(l.env.Paths.SyncPath) {
+		l.Enqueue(path)
+		return
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil || len(entries) == 0 {
+		// 读失败或空目录：保守处理；空目录需自己建云端目录，否则漏建
+		l.Enqueue(path)
+		return
+	}
+	// 有子项：忽略，交由回退链/父目录递归处理，避免双入口重复扫描
+	slog.Debug("忽略有子项的目录事件", "目录", path)
 }
