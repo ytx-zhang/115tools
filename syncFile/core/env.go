@@ -19,6 +19,7 @@ import (
 	"115tools/db"
 	"115tools/drive"
 	"context"
+	"time"
 )
 
 // Env 是三个功能模块共享的运行环境，可以理解为「公共工具箱」：
@@ -34,6 +35,10 @@ type Env struct {
 	DB    *db.DB         // 本地文件索引数据库（bbolt），记录 路径 → 云端FID + 大小
 	Paths *Paths         // 路径与 FID 配置，三个模块共用同一份（SyncFid/TempFid 由 bootstrap 从云端回填，不落库）
 	Sem   chan struct{}  // 云端 API 并发配额（容量 5），仅在 GetFileList 调用期间持有
+
+	// 定时全量同步配置（由 config 注入，运行期只读）。
+	CronEnabled  bool          // 是否启用定时全量同步（配置 cron_enabled，默认开启）
+	CronInterval time.Duration // 定时全量同步间隔（配置 cron_interval_hours，默认 12h）
 }
 
 // NewEnv 根据配置创建共享运行环境。
@@ -50,6 +55,9 @@ func NewEnv(cfg *config.Config, api *drive.Open115, boltDB *db.DB) *Env {
 			Settle:   SettleDuration(cfg.SettleSeconds),
 		},
 		Sem: make(chan struct{}, 5),
+
+		CronEnabled:  cfg.CronEnabled,
+		CronInterval: cfg.CronInterval(),
 	}
 }
 

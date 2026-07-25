@@ -23,6 +23,13 @@ type Config struct {
 	// 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 15 秒。
 	SettleSeconds int `yaml:"settle_seconds"`
 
+	// 是否启用定时全量同步：false 表示关闭，仅靠本地文件监听同步，不做定时兜底扫描。
+	// 旧版默认开启；升级用户若配置文件未显式写该字段，按「开启」处理（见 New）。
+	CronEnabled bool `yaml:"cron_enabled"`
+
+	// 定时全量同步间隔（小时）：本地→云端兜底扫描 + 云端全量同步。0 表示默认 12 小时。
+	CronIntervalHours int `yaml:"cron_interval_hours"`
+
 	// Auth 前端管理页登录凭据；Username 为空表示关闭登录验证。
 	// 密码仅以 bcrypt 哈希存储（PasswordHash），绝不保存明文。
 	// /download 直链接口始终不做验证（供 Emby 使用）。
@@ -79,6 +86,19 @@ func New(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
+	// 兼容旧配置：旧版没有 cron_enabled 字段（旧默认=开启）。当配置文件里没显式写
+	// cron_enabled 时，按「开启、间隔 12 小时」处理，保持升级后行为不变。
+	var rawCron struct {
+		CronEnabled *bool `yaml:"cron_enabled"`
+	}
+	_ = yaml.Unmarshal(data, &rawCron)
+	if rawCron.CronEnabled == nil {
+		tmp.Config.CronEnabled = true
+	}
+	if tmp.Config.CronIntervalHours <= 0 {
+		tmp.Config.CronIntervalHours = 12
+	}
+
 	cfg := &tmp.Config
 	cfg.path = path
 	cfg.token = tmp.Token
@@ -100,6 +120,13 @@ torrent_path: ""
 
 # 本地同步静默窗口（秒）：监听事件后等待该时长无新事件再同步；0 表示默认 15 秒
 settle_seconds: 0
+
+# 定时全量同步：开启后每 cron_interval_hours 小时做一次全量扫描
+# （兜底文件监听可能漏掉的本地变化 + 云端全量同步）。关闭则仅依赖本地文件监听
+cron_enabled: true
+
+# 定时全量同步间隔（小时）：0 表示默认 12 小时
+cron_interval_hours: 12
 
 # 管理面板登录：username 留空表示关闭登录验证（仅内网安全时使用）
 auth:
@@ -138,6 +165,14 @@ func (c *Config) RequiredMissing() []string {
 		miss = append(miss, "strm_url")
 	}
 	return miss
+}
+
+// CronInterval 返回定时全量同步间隔；CronIntervalHours <= 0 时回退默认 12 小时。
+func (c *Config) CronInterval() time.Duration {
+	if c.CronIntervalHours <= 0 {
+		return 12 * time.Hour
+	}
+	return time.Duration(c.CronIntervalHours) * time.Hour
 }
 
 // IsSyncReady 配置是否已足以启动同步器。

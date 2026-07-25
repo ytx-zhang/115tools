@@ -11,15 +11,17 @@ import (
 // AuthPassword 在 Snapshot 输出时恒为空（不回传密码）；
 // Update 时留空表示保持原密码不变。
 type Editable struct {
-	SyncPath      string `json:"sync_path"`
-	StrmPath      string `json:"strm_path"`
-	TempPath      string `json:"temp_path"`
-	StrmUrl       string `json:"strm_url"`
-	TorrentPath   string `json:"torrent_path"`
-	SettleSeconds int    `json:"settle_seconds"`
-	AuthUsername  string `json:"auth_username"`
-	AuthPassword  string `json:"auth_password,omitempty"`
-	HasPassword   bool   `json:"has_password,omitempty"` // 仅 Snapshot 输出
+	SyncPath          string `json:"sync_path"`
+	StrmPath          string `json:"strm_path"`
+	TempPath          string `json:"temp_path"`
+	StrmUrl           string `json:"strm_url"`
+	TorrentPath       string `json:"torrent_path"`
+	SettleSeconds     int    `json:"settle_seconds"`
+	CronEnabled       bool   `json:"cron_enabled"`
+	CronIntervalHours int    `json:"cron_interval_hours"`
+	AuthUsername      string `json:"auth_username"`
+	AuthPassword      string `json:"auth_password,omitempty"`
+	HasPassword       bool   `json:"has_password,omitempty"` // 仅 Snapshot 输出
 	// RefreshToken：快照只回显 has_refresh_token（绝不回显明文）；
 	// 保存时若非空则用新值校验并替换，空表示保持不变。
 	RefreshToken    string `json:"refresh_token,omitempty"`
@@ -37,17 +39,19 @@ func (c *Config) Snapshot() Editable {
 	defer c.mu.RUnlock()
 	missing := c.RequiredMissing() // 算一次，ConfigReady 与 MissingFields 都从它派生
 	return Editable{
-		SyncPath:        c.SyncPath,
-		StrmPath:        c.StrmPath,
-		TempPath:        c.TempPath,
-		StrmUrl:         c.StrmUrl,
-		TorrentPath:     c.TorrentPath,
-		SettleSeconds:   c.SettleSeconds,
-		AuthUsername:    c.Auth.Username,
-		HasPassword:     c.Auth.PasswordHash != "",
-		HasRefreshToken: c.token.RefreshToken != "",
-		ConfigReady:     len(missing) == 0,
-		MissingFields:   missing,
+		SyncPath:          c.SyncPath,
+		StrmPath:          c.StrmPath,
+		TempPath:          c.TempPath,
+		StrmUrl:           c.StrmUrl,
+		TorrentPath:       c.TorrentPath,
+		SettleSeconds:     c.SettleSeconds,
+		CronEnabled:       c.CronEnabled,
+		CronIntervalHours: c.CronIntervalHours,
+		AuthUsername:      c.Auth.Username,
+		HasPassword:       c.Auth.PasswordHash != "",
+		HasRefreshToken:   c.token.RefreshToken != "",
+		ConfigReady:       len(missing) == 0,
+		MissingFields:     missing,
 	}
 }
 
@@ -90,7 +94,9 @@ func (c *Config) Update(e Editable) (needReload bool, err error) {
 		e.StrmPath != c.StrmPath ||
 		e.TempPath != c.TempPath ||
 		e.StrmUrl != c.StrmUrl ||
-		e.SettleSeconds != c.SettleSeconds
+		e.SettleSeconds != c.SettleSeconds ||
+		e.CronEnabled != c.CronEnabled ||
+		e.CronIntervalHours != c.CronIntervalHours
 
 	c.SyncPath = e.SyncPath
 	c.StrmPath = e.StrmPath
@@ -98,6 +104,12 @@ func (c *Config) Update(e Editable) (needReload bool, err error) {
 	c.StrmUrl = e.StrmUrl
 	c.TorrentPath = e.TorrentPath
 	c.SettleSeconds = e.SettleSeconds
+	c.CronEnabled = e.CronEnabled
+	// 间隔 <=0 视为使用默认 12 小时，避免 0 触发即时死循环
+	c.CronIntervalHours = e.CronIntervalHours
+	if c.CronIntervalHours <= 0 {
+		c.CronIntervalHours = 12
+	}
 
 	switch {
 	case e.AuthUsername == "":

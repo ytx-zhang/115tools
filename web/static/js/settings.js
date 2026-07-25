@@ -1,7 +1,7 @@
 // settings.js —— 配置查看与修改（保存后实时生效）
 import { api, toast } from './api.js';
 
-const FIELDS = ['sync_path', 'strm_path', 'temp_path', 'strm_url', 'torrent_path', 'settle_seconds', 'auth_username'];
+const FIELDS = ['sync_path', 'strm_path', 'temp_path', 'strm_url', 'torrent_path', 'settle_seconds', 'cron_interval_hours', 'auth_username'];
 
 export function initSettings() {
   bindOnce();
@@ -20,6 +20,8 @@ async function load() {
     const cfg = await api('/api/config');
     const form = document.getElementById('config-form');
     for (const f of FIELDS) form.elements[f].value = cfg[f] ?? '';
+    // 定时全量同步开关（复选框）：默认开启
+    form.elements['cron_enabled'].checked = cfg.cron_enabled !== false;
     // 密码与 refresh_token 不回显明文：仅清空并给占位提示
     form.elements['auth_password'].value = '';
     form.elements['auth_password'].placeholder =
@@ -51,6 +53,8 @@ async function save(e) {
     strm_url: form.elements['strm_url'].value.trim(),
     torrent_path: form.elements['torrent_path'].value.trim(),
     settle_seconds: +form.elements['settle_seconds'].value || 0,
+    cron_enabled: form.elements['cron_enabled'].checked,
+    cron_interval_hours: +form.elements['cron_interval_hours'].value || 12,
     auth_username: form.elements['auth_username'].value.trim(),
     auth_password: form.elements['auth_password'].value,
     // 有输入才提交；留空表示保持不变（后端跳过校验，不改动 token）

@@ -153,6 +153,11 @@
             <label>本地同步静默窗口（秒，0 为默认 15）<input name="settle_seconds" type="number" min="0"></label>
           </div>
           <div class="card">
+            <h3>定时全量同步 <small class="muted">兜底文件监听漏掉的本地变化 + 云端全量扫描；改动后同步器热重载生效</small></h3>
+            <label class="chk"><input type="checkbox" name="cron_enabled"> 启用定时全量同步（关闭后仅依赖本地文件监听）</label>
+            <label>同步间隔（小时，0 为默认 12）<input name="cron_interval_hours" type="number" min="1"></label>
+          </div>
+          <div class="card">
             <h3>115 账号凭证 <small class="muted">仅用于紧急更换 refresh_token；保存后 115 会自动轮换</small></h3>
             <label>refresh_token <input name="refresh_token" type="password" placeholder="未配置" autocomplete="off"></label>
           </div>
