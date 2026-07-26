@@ -104,6 +104,20 @@ th {
   flex-wrap: wrap;
 }
 
+/* 全局复选框标签：与文字同一行、垂直居中、不拉伸成整行 */
+.chk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.chk input {
+  width: auto;
+  margin: 0;
+}
+
 .card-actions .chk {
   display: flex;
   align-items: center;

@@ -13,7 +13,13 @@ const views = {
 };
 let current = null;
 
-function switchView(name) {
+function isValidView(name) {
+  return Object.prototype.hasOwnProperty.call(views, name);
+}
+
+// 仅负责 DOM 显隐、导航高亮与视图生命周期（不读写 location.hash）
+function activate(name) {
+  if (!isValidView(name)) name = 'dashboard';
   if (current === name) return;
   if (current) {
     views[current].leave();
@@ -24,6 +30,19 @@ function switchView(name) {
   views[name].enter();
   document.querySelectorAll('.nav-item[data-view]').forEach(b =>
     b.classList.toggle('active', b.dataset.view === name));
+}
+
+// 唯一的“写路由”入口：写 location.hash，由 hashchange 触发 activate，避免循环
+function navigate(name) {
+  if (!isValidView(name)) name = 'dashboard';
+  const target = '#' + name;
+  if (location.hash === target) activate(name);
+  else location.hash = target;
+}
+
+function hashToView() {
+  const h = location.hash.replace(/^#/, '');
+  return isValidView(h) ? h : 'dashboard';
 }
 
 function showLogin() {
@@ -38,7 +57,7 @@ function showApp(authRequired) {
   $('#logout-btn').hidden = !authRequired;
   document.querySelectorAll('.view').forEach(v => v.hidden = true);
   current = null;
-  switchView('dashboard');
+  activate(hashToView());
 }
 
 async function boot() {
@@ -77,11 +96,14 @@ $('#logout-btn').addEventListener('click', async () => {
   showLogin();
 });
 
-// 导航切换
+// 导航切换：点击导航走 navigate（写 hash），由 hashchange 触发真正的视图切换
 $('#nav').addEventListener('click', e => {
   const btn = e.target.closest('[data-view]');
-  if (btn) switchView(btn.dataset.view);
+  if (btn) navigate(btn.dataset.view);
 });
+
+// URL hash 变化（含手动输入 #xxx、前进/后退、刷新）：同步切换视图
+window.addEventListener('hashchange', () => activate(hashToView()));
 
 // 任意接口 401 → 回到登录页
 window.addEventListener('auth:required', showLogin);
