@@ -49,6 +49,14 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		core.VideoExts = s.Cfg.VideoExts
 	}
 
+	// 上传排除名单改动即时生效：readLocalDir 实时读 core.IsUploadExcluded，
+	// 这里在 Update 落盘后刷新；之后触发一次全量扫描，把云端已误传的临时文件
+	// 一并联动清理（不必等重启或下一个定时全量周期）。
+	core.SetUploadExclude(s.Cfg.UploadExclude)
+
+	// Emby 排除文件随 video_exts / 开关 / SyncPath 变化刷新（不进 needReload）。
+	s.Cfg.SyncEmbyIgnore()
+
 	// 依据配置完整性决定如何推进同步器：
 	//   - 仍不完整：不启动，前端据此提示补齐（started=false）；
 	//   - 已补齐且同步器从未运行：首次拉起同步器（Reload 在 cancel 为 nil 时直接 startLocked）；
@@ -67,6 +75,13 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		slog.Info("[WEB] 路径类配置变更，开始热重载同步器")
 		s.Wg.Go(s.Reload)
 		started = true
+	}
+	// 上传排除名单改动后，若同步器原本已在运行（非首次启动/非热重载路径），
+	// 立即触发一次全量扫描，把云端已误传的临时文件联动清理；
+	// 首次启动/热重载路径下 local.Start 已自带全量扫描，无需重复触发。
+	if ready && !started && s.Syncer() != nil {
+		slog.Info("[WEB] 上传排除名单已更新，触发全量扫描清理云端存量临时文件")
+		s.Wg.Go(func() { s.Syncer().LocalFullScan(s.TaskCtx()) })
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":        true,

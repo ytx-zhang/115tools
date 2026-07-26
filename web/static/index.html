@@ -160,6 +160,15 @@
                 <button type="button" class="btn ghost" id="video-exts-reset">恢复默认值</button>
                 <span class="muted">改动后点「保存配置」生效（恢复默认会直接保存）</span>
               </div>
+              <label class="chk"><input type="checkbox" name="emby_ignore_enabled"> 自动在同步根目录生成 .embyignore（按上述扩展名忽略原始视频，使 Emby 只扫描 .strm；仅 Emby 4.9+ 生效）</label>
+            </div>
+            <div class="card">
+              <h3>上传排除 <small class="muted">这些后缀/整名文件不上传，且会联动清理云端已存在的同名项；改动保存后触发一次全量扫描</small></h3>
+              <label>后缀（逗号分隔，如 .part, .crdownload, .DS_Store）<input name="upload_exclude" placeholder=".part, .crdownload, ..."></label>
+              <div class="row">
+                <button type="button" class="btn ghost" id="upload-exclude-reset">恢复默认值</button>
+                <span class="muted">改动后点「保存配置」生效（恢复默认会直接保存）</span>
+              </div>
             </div>
             <div class="card">
               <h3>定时全量同步 <small class="muted">兜底文件监听漏掉的本地变化 + 云端全量扫描；改动后同步器热重载生效</small></h3>

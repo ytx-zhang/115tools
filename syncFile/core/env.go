@@ -48,6 +48,10 @@ func NewEnv(cfg *config.Config, api *drive.Open115, boltDB *db.DB) *Env {
 	// 保证 VideoExts 永远与当前配置一致）。
 	VideoExts = cfg.VideoExts
 
+	// 把配置里的上传排除名单注入运行期变量（下载器/系统临时文件后缀），
+	// 首次启动与每次热重载都走这里，保证与当前配置一致。
+	SetUploadExclude(cfg.UploadExclude)
+
 	return &Env{
 		API: api,
 		DB:  boltDB,

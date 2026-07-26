@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +26,11 @@ type Config struct {
 	// 可通过配置文件或 Web 设置页修改，二者保持一致。
 	VideoExts []string `yaml:"video_exts"`
 
+	// 上传排除名单：这些后缀（或整名，如 .DS_Store / Thumbs.db）的文件不上传，
+	// 且云端已存在的同名项会被联动清理。用于跳过下载器/系统的临时半成品文件。
+	// 为空时使用内置默认（见 DefaultUploadExclude）；可通过配置文件或 Web 设置页修改。
+	UploadExclude []string `yaml:"upload_exclude"`
+
 	// 本地同步去抖窗口（秒）：监听事件后等待该时长内无新事件才执行同步，
 	// 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 5 秒。
 	// 上限 10 秒，防止窗口过长导致本地变更迟迟不生效。
@@ -32,6 +39,12 @@ type Config struct {
 	// Cron 定时全量同步配置（嵌套段，YAML 键 cron）。
 	// 旧版用顶层 cron_enabled / cron_interval_hours，现已统一到本段，不再兼容旧字段。
 	Cron CronConfig `yaml:"cron"`
+
+	// 自动在 SyncPath 根目录生成 .embyignore（仅 Emby 4.9+ 支持通配）：
+	// 按 video_exts 写出 *.ext 规则，使 Emby 只扫描 .strm 索引而忽略原始视频，
+	// 从根上消除「原始视频比 .strm 先被 Emby 扫到」的竞态。nil = 默认开启；
+	// 仅显式 false 才关闭（并在关闭时清理本程序生成的文件，不动用户手建）。
+	EmbyIgnoreEnabled *bool `yaml:"emby_ignore_enabled"`
 
 	// Auth 前端管理页登录凭据；Username 为空表示关闭登录验证。
 	// 密码仅以 bcrypt 哈希存储（PasswordHash），绝不保存明文。
@@ -50,6 +63,14 @@ type Config struct {
 var DefaultVideoExts = []string{
 	".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv",
 	".m4v", ".mpg", ".mpeg", ".webm", ".rmvb", ".3gp", ".vob",
+}
+
+// DefaultUploadExclude 上传排除名单内置默认（下载器/系统临时文件后缀）。
+// 与 syncFile/core.DefaultUploadExclude 保持一致——配置未显式设置 upload_exclude 时使用它，
+// 运行期也可由配置覆盖（见 settings.Update / core.NewEnv）。
+var DefaultUploadExclude = []string{
+	".part", ".partial", ".aria2", ".crdownload", ".download",
+	".tmp", ".!qB", ".DS_Store", "Thumbs.db",
 }
 
 // AuthConfig 前端登录的账号密码；密码仅以 bcrypt 哈希存储。
@@ -130,6 +151,11 @@ func New(path string) (*Config, error) {
 		tmp.Config.VideoExts = append([]string(nil), DefaultVideoExts...)
 	}
 
+	// 上传排除名单：配置文件未显式写 upload_exclude 时回退内置默认。
+	if len(tmp.Config.UploadExclude) == 0 {
+		tmp.Config.UploadExclude = append([]string(nil), DefaultUploadExclude...)
+	}
+
 	cfg := &tmp.Config
 	cfg.path = path
 	cfg.token = tmp.Token
@@ -166,6 +192,23 @@ video_exts:
   - .rmvb
   - .3gp
   - .vob
+
+# 上传排除名单（下载器/系统临时文件后缀，逗号或列表均可；整名如 .DS_Store / Thumbs.db 也支持）。
+# 这些文件不上传，且云端已存在的同名项会被联动清理。留空则使用内置默认；亦可在 Web 设置页修改。
+upload_exclude:
+  - .part
+  - .partial
+  - .aria2
+  - .crdownload
+  - .download
+  - .tmp
+  - .!qB
+  - .DS_Store
+  - Thumbs.db
+
+# 自动在同步根目录生成 .embyignore（按 video_exts 忽略原始视频，使 Emby 只扫描 .strm）。
+# 默认开启；Emby 4.9+ 才支持 .embyignore 通配，更旧版本请改用其他方案。
+emby_ignore_enabled: true
 
 # 本地同步去抖窗口（秒）：监听事件后等待该时长无新事件再同步；0 表示默认 5 秒（上限 10）
 debounce_seconds: 0
@@ -284,4 +327,79 @@ func (c *Config) persistLocked() error {
 		return fmt.Errorf("序列化失败: %w", err)
 	}
 	return os.WriteFile(c.path, out, 0644)
+}
+
+// embyIgnoreName 是自动生成的 Emby 排除文件名（放在 SyncPath 根目录）。
+// Emby Server 4.9+ 支持 .embyignore 通配按扩展名排除；
+// 更旧版本用 .ignore 仅支持整目录忽略，不适用本方案。
+const embyIgnoreName = ".embyignore"
+
+// embyIgnoreMarker 是自动生成的 .embyignore 文件首行标记，
+// 用于区分「本程序生成」与「用户手建」——关闭开关时只删除本程序生成的文件。
+const embyIgnoreMarker = "# 本文件由 115tools 自动生成"
+
+// EmbyIgnoreOn 返回是否自动生成 .embyignore：未显式设置（nil）按「默认开启」处理，
+// 仅显式 emby_ignore_enabled: false 才返回 false（用户可在面板取消勾选真正关闭）。
+func (c *Config) EmbyIgnoreOn() bool {
+	return c.EmbyIgnoreEnabled == nil || *c.EmbyIgnoreEnabled
+}
+
+// SyncEmbyIgnore 在 SyncPath 根目录生成/刷新/移除 Emby 排除文件。
+//   - 开关开启：按当前 VideoExts 写出 *.ext 通配规则，使 Emby 只扫描 .strm 索引；
+//   - 开关关闭：若文件是本程序生成的（以标记开头）则删除，不动用户手建文件；
+//   - SyncPath 未设置或目录不存在时跳过（等配置就绪后由下一次调用补生成）。
+//
+// 调用方必须不在 c.mu 写锁内（本函数自取 RLock 读字段，避免与 Update 死锁）。
+func (c *Config) SyncEmbyIgnore() {
+	if !c.EmbyIgnoreOn() {
+		p := filepath.Join(c.SyncPath, embyIgnoreName)
+		data, err := os.ReadFile(p)
+		if err == nil && strings.HasPrefix(strings.TrimSpace(string(data)), embyIgnoreMarker) {
+			if err := os.Remove(p); err != nil {
+				slog.Warn("[CONFIG] 删除自动生成的 Emby 排除文件失败", "路径", p, "错误", err)
+			} else {
+				slog.Info("[CONFIG] 已移除自动生成的 Emby 排除文件", "路径", p)
+			}
+		}
+		return
+	}
+	if c.SyncPath == "" {
+		return
+	}
+
+	c.mu.RLock()
+	syncPath := c.SyncPath
+	exts := append([]string(nil), c.VideoExts...)
+	c.mu.RUnlock()
+
+	info, err := os.Stat(syncPath)
+	if err != nil || !info.IsDir() {
+		return
+	}
+
+	var b strings.Builder
+	b.WriteString(embyIgnoreMarker)
+	b.WriteString("，请勿手动编辑；\n")
+	b.WriteString("# 修改视频扩展名请在 115tools 设置页调整 video_exts 并重保存。\n")
+	b.WriteString("# 列出的原始视频扩展名会被 Emby 忽略，使之只扫描 .strm 索引文件。\n")
+	b.WriteString("# 仅对 Emby Server 4.9+ 生效；更旧版本请改用其他方案。\n")
+	for _, ext := range exts {
+		e := strings.ToLower(strings.TrimSpace(ext))
+		if e == "" {
+			continue
+		}
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		b.WriteString("*")
+		b.WriteString(e)
+		b.WriteString("\n")
+	}
+
+	path := filepath.Join(syncPath, embyIgnoreName)
+	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
+		slog.Warn("[CONFIG] 生成 Emby 排除文件失败", "路径", path, "错误", err)
+		return
+	}
+	slog.Info("[CONFIG] 已生成 Emby 排除文件", "路径", path, "规则数", len(exts))
 }

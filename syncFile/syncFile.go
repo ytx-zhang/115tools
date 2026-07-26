@@ -93,6 +93,11 @@ func (s *SyncFile) StartAddStrm(ctx context.Context) { s.strm.Start(ctx) }
 // StopAddStrm 停止正在运行的 STRM 生成任务。
 func (s *SyncFile) StopAddStrm() { s.strm.Stop() }
 
+// LocalFullScan 触发一次本地同步目录的全量扫描（委托 local 模块）。
+// 用于保存上传排除规则后，立即把云端误传的临时文件联动清理掉，
+// 不必等重启或下一个定时全量周期。
+func (s *SyncFile) LocalFullScan(ctx context.Context) { s.local.FullScan(ctx) }
+
 // StatusSnapshot 返回云端同步/STRM 生成两个任务的进度 JSON，供 web 层 SSE 推送。
 // 收口内部状态读取，web 层无需（也无法）触碰模块内部字段。
 func (s *SyncFile) StatusSnapshot() (syncJSON, strmJSON string) {

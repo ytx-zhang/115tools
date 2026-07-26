@@ -48,6 +48,7 @@ func main() {
 		slog.Error("[CONFIG] 配置文件损坏，无法解析", "错误信息", err)
 		return
 	}
+	cfg.SyncEmbyIgnore() // 启动即生成/刷新 Emby 排除文件（SyncPath 就绪时生效）
 
 	apiClient := drive.New115Drive(cfg)
 

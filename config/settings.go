@@ -33,6 +33,16 @@ type Editable struct {
 	// VideoExtsDefault 仅 Snapshot 输出：内置默认白名单，供前端「恢复默认值」按钮使用。
 	VideoExtsDefault []string `json:"video_exts_default,omitempty"`
 
+	// UploadExclude 上传排除名单（下载器/系统临时文件后缀；整名如 .DS_Store 也支持）。
+	// 快照回显当前生效值（未设置则为内置默认）；保存时按用户输入覆盖。
+	UploadExclude []string `json:"upload_exclude"`
+	// UploadExcludeDefault 仅 Snapshot 输出：内置默认名单，供前端「恢复默认值」按钮使用。
+	UploadExcludeDefault []string `json:"upload_exclude_default,omitempty"`
+
+	// EmbyIgnoreEnabled 是否自动在 SyncPath 根目录生成 .embyignore（按 video_exts 忽略原始视频）。
+	// 快照回显当前开关；保存时按用户勾选覆盖（nil 默认开启，仅显式 false 关闭）。
+	EmbyIgnoreEnabled bool `json:"emby_ignore_enabled"`
+
 	// ConfigReady / MissingFields 仅由 GET /api/config 返回（供前端展示配置完备状态），
 	// PUT 请求中忽略这两个字段。
 	ConfigReady   bool     `json:"config_ready,omitempty"`
@@ -62,13 +72,16 @@ func (c *Config) Snapshot() Editable {
 			Enabled:       c.CronEnabled(), // 归一：nil 或 true → true，前端始终收到布尔
 			IntervalHours: c.Cron.IntervalHours,
 		},
-		AuthUsername:     c.Auth.Username,
-		HasPassword:      c.Auth.PasswordHash != "",
-		HasRefreshToken:  c.token.RefreshToken != "",
-		VideoExts:        c.VideoExts,
-		VideoExtsDefault: DefaultVideoExts,
-		ConfigReady:      len(missing) == 0,
-		MissingFields:    missing,
+		AuthUsername:         c.Auth.Username,
+		HasPassword:          c.Auth.PasswordHash != "",
+		HasRefreshToken:      c.token.RefreshToken != "",
+		VideoExts:            c.VideoExts,
+		VideoExtsDefault:     DefaultVideoExts,
+		UploadExclude:        c.UploadExclude,
+		UploadExcludeDefault: DefaultUploadExclude,
+		EmbyIgnoreEnabled:    c.EmbyIgnoreOn(),
+		ConfigReady:          len(missing) == 0,
+		MissingFields:        missing,
 	}
 }
 
@@ -93,6 +106,30 @@ func normalizeVideoExts(in []string) []string {
 	}
 	if len(out) == 0 {
 		return append([]string(nil), DefaultVideoExts...)
+	}
+	return out
+}
+
+// normalizeUploadExclude 清洗用户输入的上传排除名单：去空格、小写、去空、去重；
+// 全空时回退内置默认（保证运行期不会因空白名单把一切临时文件都上传）。
+// 与 syncFile/core.normalizeUploadExclude 逻辑一致（config 不能 import core，故刻意重复）。
+// 注意：不强制补前导点——否则 .DS_Store 会被加成 .ds_store 而整名匹配失败。
+func normalizeUploadExclude(in []string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, e := range in {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if _, ok := seen[e]; ok {
+			continue
+		}
+		seen[e] = struct{}{}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return append([]string(nil), DefaultUploadExclude...)
 	}
 	return out
 }
@@ -146,6 +183,12 @@ func (c *Config) Update(e Editable) (needReload bool, err error) {
 	c.StrmUrl = e.StrmUrl
 	c.TorrentPath = e.TorrentPath
 	c.VideoExts = normalizeVideoExts(e.VideoExts)
+	c.UploadExclude = normalizeUploadExclude(e.UploadExclude)
+	// Emby 排除文件开关：用堆分配的 *bool 承载（避免局部变量取地址导致悬空指针）。
+	// 前端始终提交明确 true/false；nil 仅出现在未通过本结构写入时，默认按开启处理。
+	pe := new(bool)
+	*pe = e.EmbyIgnoreEnabled
+	c.EmbyIgnoreEnabled = pe
 	c.DebounceSeconds = e.DebounceSeconds
 	// 定时全量同步：用堆分配的 *bool 承载（避免局部变量取地址导致悬空指针）。
 	// 前端始终提交明确 true/false，故此处直接按用户意图落盘；

@@ -28,8 +28,9 @@ func (l *Local) FullScan(ctx context.Context) {
 // syncDir 同步一个目录：先扫描出差异，再把需要上传的文件逐个投递到上传队列。
 // 上传本身是异步的（3 个常驻 worker 消费），本函数只负责「调度」。
 //
-// stop 为 nil 表示不可中断（全量扫描/定时扫描）；监控块传入 pendingDirty.Load，
-// 以便在新事件到来时，当前云端操作（建目录/删文件/投递上传）完成后快速停止。
+// stop 为 nil 表示不可中断。全量扫描与实时增量监控统一传 nil——监控块改用按目录
+// 静默窗口，处理期间来的新事件只被重新登记、待该目录再次静默后才处理，故无需中断
+// 当前流程（syncDir 幂等，跑到底无副作用）。
 func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid string, stop func() bool) {
 	// 阶段一：扫描（递归比对数据库与本地，找出待上传文件）
 	scanStart := time.Now()
@@ -68,7 +69,7 @@ func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid stri
 //
 // scanDir 递归扫描本地目录，与数据库比对，返回需要上传的本地文件路径列表。
 // 云端目录的创建和文件的删除在这里同步完成，文件上传则交给 syncDir 异步调度。
-// stop 叠加到每个既有 ctx.Err 检查点，使云端操作粒度可快速中断（详见 syncDir）。
+// stop 叠加到每个既有 ctx.Err 检查点，供调用方在需要时中止（现统一传 nil，不中断）。
 func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, stop func() bool) []string {
 	slog.Debug("扫描本地文件", "处理目录", currentPath)
 	start := time.Now()
@@ -183,6 +184,11 @@ func readLocalDir(path string) (map[string]os.DirEntry, error) {
 	}
 	m := make(map[string]os.DirEntry, len(entries))
 	for _, e := range entries {
+		// 上传排除名单（下载器/系统临时文件）：命中则跳过，不进待上传/比对候选，
+		// 且云端已存在的同名项会被 scanDir 判为「本地已删」而联动清理。
+		if core.IsUploadExcluded(e.Name()) {
+			continue
+		}
 		m[e.Name()] = e
 	}
 	return m, nil

@@ -5,6 +5,8 @@ const FIELDS = ['sync_path', 'strm_path', 'temp_path', 'strm_url', 'torrent_path
 
 // videoExtsDefault 当前内置默认白名单（供「恢复默认值」按钮使用），由 load() 刷新。
 let videoExtsDefault = [];
+// uploadExcludeDefault 当前内置默认上传排除名单（供「恢复默认值」按钮使用），由 load() 刷新。
+let uploadExcludeDefault = [];
 
 export function initSettings() {
   bindOnce();
@@ -20,6 +22,12 @@ function bindOnce() {
   document.getElementById('video-exts-reset').addEventListener('click', () => {
     document.getElementById('config-form').elements['video_exts'].value =
       (videoExtsDefault || []).join(', ');
+    document.getElementById('config-form').requestSubmit();
+  });
+  // 「恢复默认值」：把输入框填回内置默认并直接提交保存，即时生效。
+  document.getElementById('upload-exclude-reset').addEventListener('click', () => {
+    document.getElementById('config-form').elements['upload_exclude'].value =
+      (uploadExcludeDefault || []).join(', ');
     document.getElementById('config-form').requestSubmit();
   });
 }
@@ -42,6 +50,11 @@ async function load() {
     // 视频扩展名：以逗号分隔回显当前生效值；记录内置默认供「恢复默认值」使用。
     form.elements['video_exts'].value = (cfg.video_exts || []).join(', ');
     videoExtsDefault = cfg.video_exts_default || [];
+    // 上传排除名单：以逗号分隔回显当前生效值；记录内置默认供「恢复默认值」使用。
+    form.elements['upload_exclude'].value = (cfg.upload_exclude || []).join(', ');
+    uploadExcludeDefault = cfg.upload_exclude_default || [];
+    // Emby 排除文件开关：未显式设置（undefined/null）按默认开启勾选。
+    form.elements['emby_ignore_enabled'].checked = cfg.emby_ignore_enabled !== false;
 
     // 配置不完整时，在设置页顶部给出提示与缺失项。
     const sb = document.getElementById('settings-banner');
@@ -72,6 +85,8 @@ async function save(e) {
       interval_hours: +form.elements['cron_interval_hours'].value || 12,
     },
     video_exts: form.elements['video_exts'].value.split(',').map(s => s.trim()).filter(Boolean),
+    upload_exclude: form.elements['upload_exclude'].value.split(',').map(s => s.trim()).filter(Boolean),
+    emby_ignore_enabled: form.elements['emby_ignore_enabled'].checked,
     auth_username: form.elements['auth_username'].value.trim(),
     auth_password: form.elements['auth_password'].value,
     // 有输入才提交；留空表示保持不变（后端跳过校验，不改动 token）
