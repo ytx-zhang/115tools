@@ -55,7 +55,7 @@ func (s *Server) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 		if time.Now().After(item.expireAt) {
 			s.cache.Delete(cacheKey)
 		} else {
-			slog.Info("[strm后端] 缓存命中", "媒体名称", item.name, "UA", clientUA)
+			slog.Debug("[strm后端] 缓存命中", "媒体名称", item.name, "UA", clientUA)
 			http.Redirect(w, r, item.url, http.StatusFound)
 			return
 		}

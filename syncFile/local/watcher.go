@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
-	"slices"
+	"sort"
 	"time"
 
 	"github.com/sgtdi/fswatcher"
@@ -25,8 +25,7 @@ import (
 func (l *Local) watchPump(ctx context.Context) {
 	watcher, err := fswatcher.New(
 		fswatcher.WithPath(l.env.Paths.SyncPath),
-		fswatcher.WithCooldown(3*time.Second), // 同路径事件去抖：3 秒内的合并推送
-		fswatcher.WithBufferSize(40960),       // 事件缓冲，防止高峰期丢失
+		fswatcher.WithSeverity(fswatcher.SeverityNone), // 关闭 fswatcher 内部日志
 	)
 	if err != nil {
 		slog.Error("监听器启动失败", "err", err)
@@ -57,15 +56,6 @@ func (l *Local) watchPump(ctx context.Context) {
 		case ev, ok := <-watcher.Events():
 			if !ok {
 				return
-			}
-			// 事件队列溢出说明丢了部分事件、无法得知具体是哪些路径，
-			// 只能把主同步目录收进待处理表，靠 syncDir 递归兜底，保证不丢变更。
-			if slices.Contains(ev.Types, fswatcher.EventOverflow) {
-				slog.Warn("文件监听事件队列溢出，触发主目录全量扫描兜底", "路径", l.env.Paths.SyncPath)
-				l.addPending(l.env.Paths.SyncPath)
-				l.pendingDirty.Store(true)
-				arm()
-				continue
 			}
 			// 任何事件都只记其父目录，无视类型（rename 也走 syncDir）
 			l.addPending(ev.Path)
@@ -104,35 +94,8 @@ func (l *Local) processPending(ctx context.Context) {
 	l.pending = make(map[string]struct{})
 	l.pendingMu.Unlock()
 
-	// 收敛：丢弃「祖先也在本轮列表」的文件夹，避免递归 syncDir 对同一棵子树重复扫描。
-	// 云端与 DB 均为树结构，子孙不可能脱离祖先独立存在——某文件夹的祖先若也在列表里，
-	// 祖先的递归 syncDir 必然覆盖它；即便祖先因云端 fid 为空被跳过，子孙 fid 也必为空、
-	// 本就会被跳过，故丢弃无害。
-	folderSet := make(map[string]struct{}, len(folders))
-	for _, f := range folders {
-		folderSet[f] = struct{}{}
-	}
-	kept := folders[:0]
-	for _, f := range folders {
-		redundant := false
-		// 从 f 的父目录开始向上爬，若某个祖先也在本轮列表则判冗余丢弃。
-		// 注意：filepath.Dir(根目录) 返回根自身（如 Dir("/")=="/"、Dir("Z:\\")=="Z:\\"），
-		// 爬到根后 a 不再变化，若以「a != f」作终止条件会恒真 → 无限循环（watchPump 卡死、
-		// 增量同步永不触发）。故必须显式判断「已爬到根」才停止。
-		for a := filepath.Dir(f); ; a = filepath.Dir(a) {
-			if _, ok := folderSet[a]; ok {
-				redundant = true
-				break
-			}
-			if parent := filepath.Dir(a); parent == a {
-				break // 已到根目录，无法再向上，停止爬升
-			}
-		}
-		if !redundant {
-			kept = append(kept, f)
-		}
-	}
-	folders = kept
+	// 收敛：只在本轮批处理（静默窗口后）跑一次，避免递归 syncDir 对同一棵子树重复扫描。
+	folders = convergeFolders(folders)
 
 	for i, f := range folders {
 		if l.pendingDirty.Load() {
@@ -150,4 +113,40 @@ func (l *Local) processPending(ctx context.Context) {
 		}
 		l.syncDir(ctx, f, fid, l.pendingDirty.Load)
 	}
+}
+
+// convergeFolders 丢弃「祖先也在列表」的文件夹，避免递归 syncDir 对同一棵子树重复扫描。
+//
+// 云端与 DB 均为树结构，子孙不可能脱离祖先独立存在——某文件夹的祖先若也在列表里，
+// 祖先的递归 syncDir 必然覆盖它；即便祖先因云端 fid 为空被跳过，子孙 fid 也必为空、
+// 本就会被跳过，故丢弃无害。
+//
+// 先按路径升序排序，祖先必然先于子孙出现；于是向上爬时只需在「已保留集合」(keptSet)
+// 里找祖先——被丢弃文件夹的最深祖先必是保留项（自身无祖先在列表里），爬到的第一个命中
+// 即其最深保留祖先，绝不会漏判；未命中则 f 自身是新的最上层，纳入 keptSet。
+func convergeFolders(folders []string) []string {
+	sort.Strings(folders)
+	kept := folders[:0]
+	keptSet := make(map[string]struct{}, len(folders))
+	for _, f := range folders {
+		redundant := false
+		// 从 f 的父目录开始向上爬，命中已保留集合即判冗余丢弃。
+		// 注意：filepath.Dir(根目录) 返回根自身（如 Dir("/")=="/"、Dir("Z:\\")=="Z:\\"），
+		// 爬到根后 a 不再变化，若以「a != f」作终止条件会恒真 → 无限循环（watchPump 卡死、
+		// 增量同步永不触发）。故必须显式判断「已爬到根」才停止。
+		for a := filepath.Dir(f); ; a = filepath.Dir(a) {
+			if _, ok := keptSet[a]; ok {
+				redundant = true
+				break
+			}
+			if parent := filepath.Dir(a); parent == a {
+				break // 已到根目录，无法再向上，停止爬升
+			}
+		}
+		if !redundant {
+			kept = append(kept, f)
+			keptSet[f] = struct{}{}
+		}
+	}
+	return kept
 }
