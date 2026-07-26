@@ -1,12 +1,10 @@
 package drive
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
@@ -53,27 +51,35 @@ func newOSSTarget(token, init map[string]any) *ossTarget {
 	}
 }
 
-func (d *Open115) ossUploadFile(ctx context.Context, token, init map[string]any, filePath string, fileSize int64) (map[string]any, error) {
+// ossUpload 统一 OSS 真实内容上传（status=1 分支），供磁盘文件与内存字节共用。
+// readerAt 提供内容（*os.File 或 bytes.Reader 均实现 io.ReaderAt，单传/分片通用）；
+// size 为内容总字节数。小于等于阈值走单次 PUT，超过则走分片上传。
+func (d *Open115) ossUpload(ctx context.Context, token, init map[string]any, size int64, readerAt io.ReaderAt) (map[string]any, error) {
 	if err := checkCtx(ctx); err != nil {
 		return nil, err
 	}
+	if size > ossMultipartThreshold {
+		return d.ossUploadMultipart(ctx, token, init, size, readerAt)
+	}
+	t := newOSSTarget(token, init)
+	result, err := t.client.PutObject(ctx, &oss.PutObjectRequest{
+		Bucket:      &t.bucket,
+		Key:         &t.object,
+		Body:        io.NewSectionReader(readerAt, 0, size),
+		Callback:    &t.cbBase64,
+		CallbackVar: &t.cbVarBase64,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.CallbackResult, nil
+}
+
+// ossUploadMultipart 分片上传大文件（对齐 OpenList multpartUpload 实现）。
+// 仅 ossUpload 在 size 超过阈值时调用；readerAt 须支持按偏移随机读取（io.ReaderAt）。
+func (d *Open115) ossUploadMultipart(ctx context.Context, token, init map[string]any, fileSize int64, readerAt io.ReaderAt) (map[string]any, error) {
 	t := newOSSTarget(token, init)
 
-	// 小文件：单次 PUT 上传（带 OSS 回调）
-	if fileSize <= ossMultipartThreshold {
-		result, err := t.client.PutObjectFromFile(ctx, &oss.PutObjectRequest{
-			Bucket:      &t.bucket,
-			Key:         &t.object,
-			Callback:    &t.cbBase64,
-			CallbackVar: &t.cbVarBase64,
-		}, filePath)
-		if err != nil {
-			return nil, err
-		}
-		return result.CallbackResult, nil
-	}
-
-	// 大文件：分片上传（对齐 OpenList multpartUpload 实现）
 	// Step 1: 初始化分片上传，加 sequential 参数使 OSS 返回不带 -N 后缀的 ETag
 	initResult, err := t.client.InitiateMultipartUpload(ctx, &oss.InitiateMultipartUploadRequest{
 		Bucket: &t.bucket,
@@ -91,12 +97,6 @@ func (d *Open115) ossUploadFile(ctx context.Context, token, init map[string]any,
 	totalParts := int((fileSize + ossPartSize - 1) / ossPartSize)
 	parts := make([]oss.UploadPart, totalParts)
 
-	f, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("打开文件失败: %w", err)
-	}
-	defer f.Close()
-
 	offset := int64(0)
 	for i := range totalParts {
 		partNum := int32(i + 1)
@@ -107,7 +107,7 @@ func (d *Open115) ossUploadFile(ctx context.Context, token, init map[string]any,
 			Key:        &t.object,
 			UploadId:   &uploadID,
 			PartNumber: partNum,
-			Body:       io.NewSectionReader(f, offset, partSize),
+			Body:       io.NewSectionReader(readerAt, offset, partSize),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("上传分片 %d/%d 失败: %w", partNum, totalParts, err)
@@ -136,26 +136,4 @@ func (d *Open115) ossUploadFile(ctx context.Context, token, init map[string]any,
 	}
 
 	return completeResult.CallbackResult, nil
-}
-
-// ossUploadBytes 从内存上传小文件（种子等，调用方已限制 ≤ 10MB，无需分片）。
-func (d *Open115) ossUploadBytes(ctx context.Context, token, init map[string]any, data []byte) (map[string]any, error) {
-	if err := checkCtx(ctx); err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > ossMultipartThreshold {
-		return nil, fmt.Errorf("内存上传仅支持 %dMB 以内的文件", ossMultipartThreshold>>20)
-	}
-	t := newOSSTarget(token, init)
-	result, err := t.client.PutObject(ctx, &oss.PutObjectRequest{
-		Bucket:      &t.bucket,
-		Key:         &t.object,
-		Body:        bytes.NewReader(data),
-		Callback:    &t.cbBase64,
-		CallbackVar: &t.cbVarBase64,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return result.CallbackResult, nil
 }

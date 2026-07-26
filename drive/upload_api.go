@@ -1,6 +1,7 @@
 package drive
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/json"
@@ -29,21 +30,39 @@ type UploadFileInfo struct {
 	PickCode string
 }
 
-// UploadFile 上传本地文件到云端目录 cid。
-// signKey/signVal 用于二次校验重提（status=7 场景），首次调用留空。
-func (d *Open115) UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (*UploadFileInfo, error) {
+// uploadSource 抽象待上传内容的来源差异（磁盘文件 vs 内存字节），
+// 把 UploadFile/UploadBytes 几乎一致的上传流程统一收口到 doUpload。
+// 两个实现见文件底部：fileUploadSource（磁盘路径）与 bytesUploadSource（内存数据）。
+type uploadSource interface {
+	// name 返回上传后在云端的文件名；出错时返回 error（如磁盘文件不存在）。
+	name() (string, error)
+	// size 返回内容总字节数；出错时返回 error。
+	size() (int64, error)
+	// hashPair 返回全量 SHA1（fileid）与前 128KB SHA1（preid），均大写。
+	hashPair() (fileid, preid string)
+	// partialHash 返回 [start:end] 区间 SHA1（status=7 二次校验用）。
+	partialHash(start, end int64) string
+	// ossUpload 走 OSS 把真实内容传到云端（status=1 分支）。
+	ossUpload(ctx context.Context, d *Open115, token, init map[string]any) (map[string]any, error)
+}
+
+// doUpload 统一上传主流程（秒传优先）：init → 按 status 分支。
+// status=2 秒传、7 二次校验递归自身、1 走 OSS，分支逻辑与旧 UploadFile/UploadBytes 完全一致，
+// 唯一差异（内容来源）由 uploadSource 接口隔离，从而消除两份重复实现。
+func (d *Open115) doUpload(ctx context.Context, src uploadSource, cid, signKey, signVal string) (*UploadFileInfo, error) {
 	if err := checkCtx(ctx); err != nil {
 		return nil, err
 	}
-	fileInfo, err := os.Stat(pathStr)
+	fileName, err := src.name()
 	if err != nil {
 		return nil, fmt.Errorf("获取文件信息失败: %v", err)
 	}
-	fileName := fileInfo.Name()
-	fileSize := fileInfo.Size()
-	// 单次读取同时计算全量 SHA1 与前 128 字节 SHA1（preid），减少一次文件遍历
-	fileSha1, preSha1, _ := fileSHA1WithPreid(pathStr)
-	req := d.Client.R().SetContext(ctx)
+	fileSize, err := src.size()
+	if err != nil {
+		return nil, fmt.Errorf("获取文件信息失败: %v", err)
+	}
+	fileSha1, preSha1 := src.hashPair()
+
 	formData := map[string]string{
 		"file_name": fileName,
 		"file_size": strconv.FormatInt(fileSize, 10),
@@ -56,9 +75,7 @@ func (d *Open115) UploadFile(ctx context.Context, pathStr, cid, signKey, signVal
 		formData["sign_key"] = signKey
 		formData["sign_val"] = signVal
 	}
-	req.SetFormData(formData)
-
-	resp, err := req.Post("/open/upload/init")
+	resp, err := d.Client.R().SetContext(ctx).SetFormData(formData).Post("/open/upload/init")
 	if err != nil {
 		return nil, err
 	}
@@ -75,9 +92,10 @@ func (d *Open115) UploadFile(ctx context.Context, pathStr, cid, signKey, signVal
 	switch int64(status) {
 	case 2:
 		// 秒传成功
-		fid, _ := initData["file_id"].(string)
-		pc, _ := initData["pick_code"].(string)
-		return &UploadFileInfo{Fid: fid, PickCode: pc}, nil
+		return &UploadFileInfo{
+			Fid:      getMapString(initData, "file_id"),
+			PickCode: getMapString(initData, "pick_code"),
+		}, nil
 
 	case 7:
 		// 二次校验：按指定字节区间重新计算 SHA1 后重提
@@ -88,14 +106,13 @@ func (d *Open115) UploadFile(ctx context.Context, pathStr, cid, signKey, signVal
 		}
 		start, _ := strconv.ParseInt(parts[0], 10, 64)
 		end, _ := strconv.ParseInt(parts[1], 10, 64)
-		newSignKey, _ := initData["sign_key"].(string)
-		newSignVal, _ := fileSHA1Partial(pathStr, start, end)
-		return d.UploadFile(ctx, pathStr, cid, newSignKey, newSignVal)
+		newSignKey := getMapString(initData, "sign_key")
+		newSignVal := src.partialHash(start, end)
+		return d.doUpload(ctx, src, cid, newSignKey, newSignVal)
 
 	case 1:
-		// 云端无此文件：取 OSS 上传凭证，走分片上传
-		tokenReq := d.Client.R().SetContext(ctx)
-		tokenResp, err := tokenReq.Get("/open/upload/get_token")
+		// 云端无此文件：取 OSS 上传凭证，走真实内容上传
+		tokenResp, err := d.Client.R().SetContext(ctx).Get("/open/upload/get_token")
 		if err != nil {
 			return nil, err
 		}
@@ -107,7 +124,7 @@ func (d *Open115) UploadFile(ctx context.Context, pathStr, cid, signKey, signVal
 		if !ok {
 			return nil, fmt.Errorf("解析上传Token响应失败: data 字段缺失")
 		}
-		cbResp, err := d.ossUploadFile(ctx, tokenData, initData, pathStr, fileSize)
+		cbResp, err := src.ossUpload(ctx, d, tokenData, initData)
 		if err != nil {
 			return nil, fmt.Errorf("OSS上传失败: %w", err)
 		}
@@ -123,89 +140,81 @@ func (d *Open115) UploadFile(ctx context.Context, pathStr, cid, signKey, signVal
 	}
 }
 
+// UploadFile 上传本地文件到云端目录 cid。
+// signKey/signVal 用于二次校验重提（status=7 场景），首次调用留空。
+func (d *Open115) UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (*UploadFileInfo, error) {
+	return d.doUpload(ctx, fileUploadSource{path: pathStr}, cid, signKey, signVal)
+}
+
 // UploadBytes 上传内存中的字节数据（如种子文件）到云端目录 cid（"0" 为根目录）。
 // signKey/signVal 含义同 UploadFile，首次调用留空。
 func (d *Open115) UploadBytes(ctx context.Context, name string, data []byte, cid, signKey, signVal string) (*UploadFileInfo, error) {
-	if err := checkCtx(ctx); err != nil {
-		return nil, err
-	}
-	dataSize := int64(len(data))
-	fileSha1, preSha1 := bytesSHA1WithPreid(data)
+	return d.doUpload(ctx, bytesUploadSource{fileName: name, data: data}, cid, signKey, signVal)
+}
 
-	formData := map[string]string{
-		"file_name": name,
-		"file_size": strconv.FormatInt(dataSize, 10),
-		"target":    fmt.Sprintf("U_1_%s", cid),
-		"fileid":    fileSha1,
-		"preid":     preSha1,
-		"topupload": "0",
-	}
-	if signKey != "" && signVal != "" {
-		formData["sign_key"] = signKey
-		formData["sign_val"] = signVal
-	}
+// ──── 内容来源适配器：把磁盘文件 / 内存字节适配为 uploadSource ────
 
-	resp, err := d.Client.R().SetContext(ctx).
-		SetFormData(formData).
-		Post("/open/upload/init")
+// fileUploadSource 适配磁盘文件：name/size 走 os.Stat，SHA1 走文件读取，OSS 走磁盘上传。
+type fileUploadSource struct{ path string }
+
+func (s fileUploadSource) name() (string, error) {
+	fi, err := os.Stat(s.path)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	var uploadResp map[string]any
-	if err := json.Unmarshal(resp.Body(), &uploadResp); err != nil {
-		return nil, fmt.Errorf("解析上传初始化响应失败: %w", err)
+	return fi.Name(), nil
+}
+
+func (s fileUploadSource) size() (int64, error) {
+	fi, err := os.Stat(s.path)
+	if err != nil {
+		return 0, err
 	}
-	initData, ok := uploadResp["data"].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("解析上传初始化响应失败: data 字段缺失")
+	return fi.Size(), nil
+}
+
+func (s fileUploadSource) hashPair() (string, string) {
+	full, pre, _ := fileSHA1WithPreid(s.path)
+	return full, pre
+}
+
+func (s fileUploadSource) partialHash(start, end int64) string {
+	v, _ := fileSHA1Partial(s.path, start, end)
+	return v
+}
+
+func (s fileUploadSource) ossUpload(ctx context.Context, d *Open115, token, init map[string]any) (map[string]any, error) {
+	f, err := os.Open(s.path)
+	if err != nil {
+		return nil, fmt.Errorf("打开文件失败: %w", err)
 	}
-	status, _ := initData["status"].(float64)
-
-	switch int64(status) {
-	case 2:
-		return &UploadFileInfo{
-			Fid:      getMapString(initData, "file_id"),
-			PickCode: getMapString(initData, "pick_code"),
-		}, nil
-
-	case 7:
-		signCheck, _ := initData["sign_check"].(string)
-		parts := strings.Split(signCheck, "-")
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("签名检查格式错误: %s", signCheck)
-		}
-		start, _ := strconv.ParseInt(parts[0], 10, 64)
-		end, _ := strconv.ParseInt(parts[1], 10, 64)
-		newSignKey := getMapString(initData, "sign_key")
-		newSignVal := bytesSHA1Partial(data, start, end)
-		return d.UploadBytes(ctx, name, data, cid, newSignKey, newSignVal)
-
-	case 1:
-		tokenResp, err := d.Client.R().SetContext(ctx).
-			Get("/open/upload/get_token")
-		if err != nil {
-			return nil, err
-		}
-		var tokenRoot map[string]any
-		if err := json.Unmarshal(tokenResp.Body(), &tokenRoot); err != nil {
-			return nil, fmt.Errorf("解析上传Token响应失败: %w", err)
-		}
-		tokenData, ok := tokenRoot["data"].(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("解析上传Token响应失败: data 字段缺失")
-		}
-		cbResp, err := d.ossUploadBytes(ctx, tokenData, initData, data)
-		if err != nil {
-			return nil, fmt.Errorf("OSS上传失败: %w", err)
-		}
-		return &UploadFileInfo{
-			Fid:      getMapString(cbResp, "data", "file_id"),
-			PickCode: getMapString(cbResp, "data", "pick_code"),
-		}, nil
-
-	default:
-		return nil, fmt.Errorf("未知上传状态码: %.0f", status)
+	defer f.Close()
+	size, err := s.size()
+	if err != nil {
+		return nil, fmt.Errorf("获取文件信息失败: %v", err)
 	}
+	return d.ossUpload(ctx, token, init, size, f)
+}
+
+// bytesUploadSource 适配内存字节：name/size 直接取自入参，SHA1 走内存计算，OSS 走内存上传。
+type bytesUploadSource struct {
+	fileName string
+	data     []byte
+}
+
+func (s bytesUploadSource) name() (string, error) { return s.fileName, nil }
+func (s bytesUploadSource) size() (int64, error)  { return int64(len(s.data)), nil }
+func (s bytesUploadSource) hashPair() (string, string) {
+	return bytesSHA1WithPreid(s.data)
+}
+func (s bytesUploadSource) partialHash(start, end int64) string {
+	return bytesSHA1Partial(s.data, start, end)
+}
+func (s bytesUploadSource) ossUpload(ctx context.Context, d *Open115, token, init map[string]any) (map[string]any, error) {
+	if int64(len(s.data)) > ossMultipartThreshold {
+		return nil, fmt.Errorf("内存上传仅支持 %dMB 以内的文件", ossMultipartThreshold>>20)
+	}
+	return d.ossUpload(ctx, token, init, int64(len(s.data)), bytes.NewReader(s.data))
 }
 
 // ──── SHA1 工具（全部输出【大写】十六进制，115 服务端强制要求）────

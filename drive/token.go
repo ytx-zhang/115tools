@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"115tools/httputil"
 )
 
 // 本文件负责 115 访问令牌（AccessToken）的自动刷新。
@@ -66,7 +68,7 @@ func (d *Open115) refreshToken(ctx context.Context, overrideRT ...string) error 
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := sharedHTTPClient.Do(req)
+	resp, err := httputil.SharedHTTPClient().Do(req)
 	if err != nil {
 		return fail("[TOKEN] 网络请求失败: %w", err)
 	}

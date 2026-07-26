@@ -1,4 +1,7 @@
-package drive
+// 包 httputil 提供全项目通用的 HTTP 基础设施（目前只有全局共享连接池）。
+// 它不依赖任何业务包（drive/config/db 等），任何模块想发裸 HTTP 请求都直接用这里，
+// 不必为了拿个客户端而被迫 import 115 业务包。
+package httputil
 
 import (
 	"net"
@@ -6,8 +9,8 @@ import (
 	"time"
 )
 
-// sharedHTTPClient 供 drive 包及外部模块（strmServer、syncFile）复用，
-// 避免每次请求新建 TCP 连接，降低 TIME_WAIT 端口耗尽风险。
+// sharedHTTPClient 供全项目各模块复用，避免每次请求新建 TCP 连接，
+// 降低 TIME_WAIT 端口耗尽风险。drive 的 token 刷新、core 的下载等都用它。
 var sharedHTTPClient = &http.Client{
 	Timeout: 120 * time.Second,
 	Transport: &http.Transport{
