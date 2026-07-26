@@ -171,6 +171,42 @@ strm_url: http://your-server:8080
 # 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 15 秒。
 debounce_seconds: 5
 
+# 视频文件扩展名白名单（命中且体积达阈值按视频处理，上传后本地替换为 .strm；
+# 仅影响本地上传识别，云端/STRM 用 115 自身的视频标记）。留空则用内置默认；亦可在 Web 设置页修改。
+video_exts:
+  - .mp4
+  - .mkv
+  - .avi
+  - .mov
+  - .ts
+  - .flv
+  - .wmv
+  - .m4v
+  - .mpg
+  - .mpeg
+  - .webm
+  - .rmvb
+  - .3gp
+  - .vob
+
+# 上传排除名单（下载器/系统临时文件后缀；整名如 .DS_Store / Thumbs.db 也支持）。
+# 这些文件不上传，且云端已存在的同名项会在同步时被联动清理（进 115 回收站）。
+# 留空则用内置默认；亦可在 Web 设置页修改。
+upload_exclude:
+  - .part
+  - .partial
+  - .aria2
+  - .crdownload
+  - .download
+  - .tmp
+  - .!qB
+  - .DS_Store
+  - Thumbs.db
+
+# 自动在同步根目录生成 .embyignore：按 video_exts 忽略原始视频，使 Emby 只扫描 .strm。
+# 仅 Emby 4.9+ 生效（旧版不支持目录级 ignore）。留空视为关闭。
+emby_ignore_enabled: false
+
 # 管理面板登录验证（username 留空则关闭验证；/download 直链始终免验证，供 Emby 使用）
 auth:
   username: ""
@@ -184,6 +220,11 @@ token:
 ```
 
 **获取 Token**：只需填写 `refresh_token` 一项，`access_token` 和 `expire_at` 留空即可——程序启动后会自动获取并周期性刷新、回写。配置文件缺失时程序会**自动创建含注释的模板文件**，无需手动新建。
+
+### 上传排除与 Emby 忽略
+
+- **上传排除（`upload_exclude`）**：在本地扫描上传的入口统一拦截，名单里的后缀（或整名，如 `.DS_Store` / `Thumbs.db`）文件不会上传；已误传到云端的同名项会在下次同步（保存该配置后自动触发一次全量扫描，或重启/定时周期）被判定为「本地已删」并清理（进 115 回收站，可恢复）。默认已覆盖常见下载器/系统临时文件：`.part` `.partial` `.aria2` `.crdownload` `.download` `.tmp` `.!qB` `.DS_Store` `Thumbs.db`。
+- **自动生成 .embyignore（`emby_ignore_enabled`）**：开启后程序按 `video_exts` 在同步根目录写入 `.embyignore`，使 Emby（4.9+）只扫描 `.strm` 而忽略原始视频，减少 Emby 库扫描开销。开启后保存配置会在根目录生成该文件；关闭则不影响已生成的文件。
 
 ### 启动
 
@@ -204,7 +245,7 @@ docker compose up -d
 | **登录验证** | 配置 `auth` 后需账号密码登录（Cookie 会话 7 天）；`/download` 始终免验证 |
 | **仪表盘** | 云端同步 / STRM 生成的启停与实时进度；统一日志卡片（全部/信息/警告/错误级别过滤，SSE 推送） |
 | **离线下载** | 添加 http/magnet/ed2k 离线任务、查看进度/配额、删除与批量清除 |
-| **设置** | 在线修改路径、STRM URL、静默窗口与登录凭据，保存后热重载实时生效；配置不完整时不会启动同步并在面板提示缺失项 |
+| **设置** | 在线修改路径、STRM URL、静默窗口、登录凭据、**视频扩展名白名单**、**上传排除名单**、**自动生成 .embyignore** 等；保存后实时生效（路径类改动热重载同步器，其余即时生效）；配置不完整时不会启动同步并在面板提示缺失项 |
 
 启动后所有路由：
 
