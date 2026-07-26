@@ -14,17 +14,40 @@ import (
 // 本文件实现「目录级全量对比」：递归对比数据库记录与本地文件系统，
 // 找出需要上传的新文件和需要云端清理的已删项。
 
+// FullScan 对主同步目录做一次完整递归同步（扫描块入口，不可中断）。
+// 用于：程序启动后的首次收敛、定时全量扫描兜底。复用与监控块完全相同的 syncDir，
+// 保证全量扫描与实时增量行为完全一致。主目录云端 FID 未就绪时跳过（不应发生）。
+func (l *Local) FullScan(ctx context.Context) {
+	if l.env.Paths.SyncFid == "" {
+		slog.Warn("主同步目录云端FID未就绪，跳过全量扫描", "路径", l.env.Paths.SyncPath)
+		return
+	}
+	l.syncDir(ctx, l.env.Paths.SyncPath, l.env.Paths.SyncFid, nil)
+}
+
 // syncDir 同步一个目录：先扫描出差异，再把需要上传的文件逐个投递到上传队列。
 // 上传本身是异步的（3 个常驻 worker 消费），本函数只负责「调度」。
-func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid string) {
-	start := time.Now()
-	uploadPaths := l.scanDir(ctx, currentPath, currentFid)
+//
+// stop 为 nil 表示不可中断（全量扫描/定时扫描）；监控块传入 pendingDirty.Load，
+// 以便在新事件到来时，当前云端操作（建目录/删文件/投递上传）完成后快速停止。
+func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid string, stop func() bool) {
+	// 阶段一：扫描（递归比对数据库与本地，找出待上传文件）
+	scanStart := time.Now()
+	uploadPaths := l.scanDir(ctx, currentPath, currentFid, stop)
+	slog.Info("扫描本地目录", "目录", currentPath, "需要上传文件", len(uploadPaths), "耗时", time.Since(scanStart))
+
+	// 无变更无需进入同步阶段，扫描日志已说明
 	if len(uploadPaths) == 0 {
 		return
 	}
+
+	// 阶段二：把待上传文件逐个投递到上传队列（异步，3 个 worker 消费）
+	// 注意：这一步只是把任务塞进 channel，立即返回，不阻塞等真正上传完成，
+	// 故此处不计时——真实上传耗时由上传 worker（doUpload）单独记录。
+	uploaded := 0
 	for _, fPath := range uploadPaths {
-		if err := ctx.Err(); err != nil {
-			return
+		if err := ctx.Err(); err != nil || (stop != nil && stop()) {
+			break // 中止/新事件到达 → 停止投递，但仍输出本次已处理的结果
 		}
 		cid := l.env.DB.GetFid(filepath.Dir(fPath))
 		if cid == "" {
@@ -32,8 +55,9 @@ func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid stri
 			continue
 		}
 		l.uploadOneFile(ctx, cid, fPath)
+		uploaded++
 	}
-	slog.Info("本地目录同步已调度", "目录", currentPath, "耗时", time.Since(start), "上传任务数", len(uploadPaths))
+	slog.Info("同步本地目录", "目录", currentPath, "上传文件", uploaded)
 }
 
 // scanDir 对比一个目录的数据库记录与本地实际内容，返回需要上传的文件列表。
@@ -41,14 +65,18 @@ func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid stri
 // 对比分两步：
 //  1. 遍历数据库中该目录的子项：本地没有了 → 待删除；两边都在 → 进一步比对内容；
 //  2. 剩下的本地新增项（数据库里没有的）：目录先建云端目录再递归，文件直接列入待上传。
-func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string) []string {
+//
+// scanDir 递归扫描本地目录，与数据库比对，返回需要上传的本地文件路径列表。
+// 云端目录的创建和文件的删除在这里同步完成，文件上传则交给 syncDir 异步调度。
+// stop 叠加到每个既有 ctx.Err 检查点，使云端操作粒度可快速中断（详见 syncDir）。
+func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, stop func() bool) []string {
 	slog.Debug("扫描本地文件", "处理目录", currentPath)
 	start := time.Now()
 	defer func() {
 		slog.Debug("本地文件扫描完成", "处理目录", currentPath, "耗时", time.Since(start))
 	}()
 
-	if err := ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil || (stop != nil && stop()) {
 		return nil
 	}
 
@@ -63,7 +91,7 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string) []s
 
 	// 第一步：遍历数据库子项，与本地对比
 	l.env.DB.ScanChildren(ctx, currentPath, func(name string, dbFid string, dbSize int64) {
-		if err := ctx.Err(); err != nil {
+		if err := ctx.Err(); err != nil || (stop != nil && stop()) {
 			return
 		}
 		localFile, exists := localFiles[name]
@@ -77,7 +105,7 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string) []s
 
 		if localFile.IsDir() {
 			if dbSize == db.SizeDir {
-				uploads = append(uploads, l.scanDir(ctx, fullPath, dbFid)...)
+				uploads = append(uploads, l.scanDir(ctx, fullPath, dbFid, stop)...)
 			}
 			return
 		}
@@ -101,7 +129,7 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string) []s
 
 	// 第二步：处理本地新增项（不在数据库中的）
 	for name, entry := range localFiles {
-		if err := ctx.Err(); err != nil {
+		if err := ctx.Err(); err != nil || (stop != nil && stop()) {
 			return uploads
 		}
 		fullPath := filepath.Join(currentPath, name)
@@ -111,7 +139,7 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string) []s
 				slog.Error("创建云端目录失败", "路径", fullPath, "错误", err)
 				continue
 			}
-			uploads = append(uploads, l.scanDir(ctx, fullPath, fid)...)
+			uploads = append(uploads, l.scanDir(ctx, fullPath, fid, stop)...)
 		} else {
 			uploads = append(uploads, fullPath)
 		}

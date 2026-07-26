@@ -100,6 +100,9 @@ func (l *Local) doUpload(ctx context.Context, cid, fPath string) {
 		return
 	}
 
+	// 计时仅覆盖真正上传（网络+落库），不含本地查重/Stat 的极快开销。
+	// doUpload 由上传 worker 同步执行（阻塞到上传完成），此处耗时即真实单文件上传耗时。
+	upStart := time.Now()
 	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
 	if isStrm {
 		err = l.upStrmTask(ctx, cid, fPath)
@@ -107,9 +110,9 @@ func (l *Local) doUpload(ctx context.Context, cid, fPath string) {
 		err = l.upFileTask(ctx, cid, fPath, fileInfo)
 	}
 	if err != nil {
-		slog.Error("同步失败", "文件", fPath, "错误", err)
+		slog.Error("同步失败", "文件", fPath, "错误", err, "耗时", time.Since(upStart))
 	} else {
-		slog.Info("上传文件完成", "文件", fPath)
+		slog.Info("上传文件完成", "文件", fPath, "耗时", time.Since(upStart))
 	}
 }
 

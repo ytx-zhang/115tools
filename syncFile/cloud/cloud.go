@@ -91,10 +91,11 @@ func (c *Cloud) Start(parentCtx context.Context) {
 				// 数据库已有同路径记录：FID 一致说明是同一文件，跳过；
 				// FID 不一致说明云端存在过期/重复副本，删除冗余项。
 				if dbFid != fid {
+					t0 := time.Now()
 					if err := c.env.API.DeleteFile(ctx, fid); err != nil {
 						core.FailLog(&c.stats, savePath, "清理云端冗余项失败", err)
 					} else {
-						slog.Info("删除云端冗余项", "路径", savePath, "云端FID", fid)
+						slog.Info("删除云端冗余项", "路径", savePath, "云端FID", fid, "耗时", time.Since(t0))
 					}
 				}
 				return nil

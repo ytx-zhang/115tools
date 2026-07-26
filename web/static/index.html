@@ -150,7 +150,7 @@
             <label>回收/临时目录 <input name="temp_path"></label>
             <label>STRM 直链 URL <input name="strm_url"></label>
             <label>种子临时目录 <small class="muted">离线下载上传种子的云端目录，留空用根目录</small> <input name="torrent_path" placeholder="留空则根目录"></label>
-            <label>本地同步静默窗口（秒，0 为默认 15）<input name="settle_seconds" type="number" min="0"></label>
+            <label>本地同步去抖窗口（秒，0 为默认 5，上限 10）<input name="debounce_seconds" type="number" min="0" max="10"></label>
           </div>
           <div class="card">
             <h3>定时全量同步 <small class="muted">兜底文件监听漏掉的本地变化 + 云端全量扫描；改动后同步器热重载生效</small></h3>

@@ -1,7 +1,7 @@
 // settings.js —— 配置查看与修改（保存后实时生效）
 import { api, toast } from './api.js';
 
-const FIELDS = ['sync_path', 'strm_path', 'temp_path', 'strm_url', 'torrent_path', 'settle_seconds', 'cron_interval_hours', 'auth_username'];
+const FIELDS = ['sync_path', 'strm_path', 'temp_path', 'strm_url', 'torrent_path', 'debounce_seconds', 'cron_interval_hours', 'auth_username'];
 
 export function initSettings() {
   bindOnce();
@@ -52,7 +52,7 @@ async function save(e) {
     temp_path: form.elements['temp_path'].value.trim(),
     strm_url: form.elements['strm_url'].value.trim(),
     torrent_path: form.elements['torrent_path'].value.trim(),
-    settle_seconds: +form.elements['settle_seconds'].value || 0,
+    debounce_seconds: +form.elements['debounce_seconds'].value || 0,
     cron_enabled: form.elements['cron_enabled'].checked,
     cron_interval_hours: +form.elements['cron_interval_hours'].value || 12,
     auth_username: form.elements['auth_username'].value.trim(),

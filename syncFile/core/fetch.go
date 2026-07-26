@@ -33,18 +33,20 @@ func ProcessCloudFile(path string, e Entry) (savePath string, saveSize int64) {
 // 成功返回 nil；失败已通过 FailLog 记录（计失败数 + ERROR 日志），调用方直接跳过即可。
 func (e *Env) FetchAndSave(ctx context.Context, pickCode, fid, savePath string, isVideo bool, stats *TaskStats) error {
 	if isVideo {
+		t0 := time.Now()
 		if err := e.SaveStrmFile(pickCode, fid, savePath); err != nil {
 			FailLog(stats, savePath, "创建strm文件失败", err)
 			return err
 		}
-		slog.Info("新增STRM文件", "文件", savePath)
+		slog.Info("新增STRM文件", "文件", savePath, "耗时", time.Since(t0))
 		return nil
 	}
+	t0 := time.Now()
 	if err := e.DownloadFile(ctx, pickCode, savePath); err != nil {
 		FailLog(stats, savePath, "下载文件失败", err)
 		return err
 	}
-	slog.Info("下载文件成功", "文件", savePath)
+	slog.Info("下载文件成功", "文件", savePath, "耗时", time.Since(t0))
 	return nil
 }
 

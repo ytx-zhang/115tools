@@ -143,9 +143,10 @@ func (s *Strm) Stop() {
 func (s *Strm) moveStrmPathFiles(ctx context.Context, paths []string) {
 	fidsStr := strings.Join(paths, ",")
 	count := len(paths)
+	t0 := time.Now()
 	if err := s.env.API.MoveFile(ctx, fidsStr, s.env.Paths.TempFid); err != nil {
 		core.FailLog(&s.stats, "TempPath", "移动文件至 TempPath 失败", err)
 	} else {
-		slog.Info("移动文件至 TempPath", "文件数量", count, "路径", fidsStr)
+		slog.Info("移动文件至 TempPath", "文件数量", count, "路径", fidsStr, "耗时", time.Since(t0))
 	}
 }

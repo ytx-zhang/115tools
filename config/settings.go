@@ -16,7 +16,7 @@ type Editable struct {
 	TempPath          string `json:"temp_path"`
 	StrmUrl           string `json:"strm_url"`
 	TorrentPath       string `json:"torrent_path"`
-	SettleSeconds     int    `json:"settle_seconds"`
+	DebounceSeconds   int    `json:"debounce_seconds"`
 	CronEnabled       bool   `json:"cron_enabled"`
 	CronIntervalHours int    `json:"cron_interval_hours"`
 	AuthUsername      string `json:"auth_username"`
@@ -44,7 +44,7 @@ func (c *Config) Snapshot() Editable {
 		TempPath:          c.TempPath,
 		StrmUrl:           c.StrmUrl,
 		TorrentPath:       c.TorrentPath,
-		SettleSeconds:     c.SettleSeconds,
+		DebounceSeconds:   c.DebounceSeconds,
 		CronEnabled:       c.CronEnabled,
 		CronIntervalHours: c.CronIntervalHours,
 		AuthUsername:      c.Auth.Username,
@@ -94,7 +94,7 @@ func (c *Config) Update(e Editable) (needReload bool, err error) {
 		e.StrmPath != c.StrmPath ||
 		e.TempPath != c.TempPath ||
 		e.StrmUrl != c.StrmUrl ||
-		e.SettleSeconds != c.SettleSeconds ||
+		e.DebounceSeconds != c.DebounceSeconds ||
 		e.CronEnabled != c.CronEnabled ||
 		e.CronIntervalHours != c.CronIntervalHours
 
@@ -103,7 +103,7 @@ func (c *Config) Update(e Editable) (needReload bool, err error) {
 	c.TempPath = e.TempPath
 	c.StrmUrl = e.StrmUrl
 	c.TorrentPath = e.TorrentPath
-	c.SettleSeconds = e.SettleSeconds
+	c.DebounceSeconds = e.DebounceSeconds
 	c.CronEnabled = e.CronEnabled
 	// 间隔 <=0 视为使用默认 12 小时，避免 0 触发即时死循环
 	c.CronIntervalHours = e.CronIntervalHours

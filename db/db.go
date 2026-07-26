@@ -192,6 +192,97 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 	}
 }
 
+// RenamePrefix 把「以 oldPrefix 自身及 oldPrefix/ 为前缀」的所有记录的 key 前缀
+// 从 oldPrefix 改写为 newPrefix，value（fid/size）保持不变。
+//
+// 用途：本地「目录重命名/移动」后，云端只需 MoveFile/UpdateFile 目录 FID（FID 不变），
+// 本地 DB 里整棵子树的路径 key 却都要跟着换前缀。因为云端 FID 没变，所以这里只改
+// key、value 原样搬迁，实现「零字节」地把云端 FID 重新映射到新的本地路径。
+//
+// 实现与 BatchClearPaths 同一套前缀扫描惯用法（严格区分「目录自身」与「后代」，
+// 用 oldPrefix+"/" 做后代前缀，避免 a/b 误匹配 a/bc），只是把「删除」换成
+// 「删旧 key + 写新 key」，并分块提交控制单事务大小。
+func (d *DB) RenamePrefix(oldPrefix, newPrefix string) {
+	if oldPrefix == "" || newPrefix == "" || oldPrefix == newPrefix {
+		return
+	}
+
+	// 待迁移项：旧 key、新 key、value（均为拷贝，避免游标失效后引用底层内存）
+	type kv struct{ oldKey, newKey, val []byte }
+	var items []kv
+
+	// 第一步：只读收集 (旧key → 新key, value)
+	err := d.boltDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(d.bucketName)
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		selfBytes := []byte(oldPrefix)
+		childPrefix := make([]byte, len(selfBytes)+1)
+		copy(childPrefix, selfBytes)
+		childPrefix[len(selfBytes)] = '/'
+
+		for k, v := c.Seek(selfBytes); k != nil; k, v = c.Next() {
+			// 只处理「目录自身」与「oldPrefix/ 前缀的后代」，其余立即停止
+			if !bytes.Equal(k, selfBytes) && !bytes.HasPrefix(k, childPrefix) {
+				break
+			}
+			var nk []byte
+			if bytes.Equal(k, selfBytes) {
+				// 目录自身：key 直接换成 newPrefix
+				nk = []byte(newPrefix)
+			} else {
+				// 后代：保留 oldPrefix/ 之后的相对部分，拼到 newPrefix 后面
+				suffix := k[len(childPrefix):]
+				nk = make([]byte, len(newPrefix)+1+len(suffix))
+				copy(nk, newPrefix)
+				nk[len(newPrefix)] = '/'
+				copy(nk[len(newPrefix)+1:], suffix)
+			}
+			oldCopy := make([]byte, len(k))
+			copy(oldCopy, k)
+			valCopy := make([]byte, len(v))
+			copy(valCopy, v)
+			items = append(items, kv{oldKey: oldCopy, newKey: nk, val: valCopy})
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Error("[数据库] 前缀重键(收集)失败", "旧前缀", oldPrefix, "新前缀", newPrefix, "错误信息", err)
+		return
+	}
+	if len(items) == 0 {
+		return
+	}
+
+	// 第二步：分块写事务，每块「删旧 key + 写新 key」
+	const renameChunkSize = 2000
+	for start := 0; start < len(items); start += renameChunkSize {
+		end := min(start+renameChunkSize, len(items))
+		chunk := items[start:end]
+		if err := d.boltDB.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket(d.bucketName)
+			if b == nil {
+				return nil
+			}
+			for _, it := range chunk {
+				if err := b.Delete(it.oldKey); err != nil {
+					return err
+				}
+				if err := b.Put(it.newKey, it.val); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			slog.Error("[数据库] 前缀重键(写入)失败", "数量", len(chunk), "错误信息", err)
+			return
+		}
+	}
+	slog.Debug("[数据库] 前缀重键完成", "旧前缀", oldPrefix, "新前缀", newPrefix, "条目数", len(items))
+}
+
 // CountRecursive 递归统计 path 下所有子条目的总数（含文件和子目录）。
 // 通过 bbolt 前缀扫描实现，数百万条目录毫秒级完成，远比 GetFileList API 调用便宜。
 func (d *DB) CountRecursive(path string) int64 {

@@ -169,7 +169,7 @@ strm_url: http://your-server:8080
 
 # 本地同步静默窗口（秒）：监听事件后等待该时长内无新事件才执行同步，
 # 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 15 秒。
-settle_seconds: 15
+debounce_seconds: 5
 
 # 管理面板登录验证（username 留空则关闭验证；/download 直链始终免验证，供 Emby 使用）
 auth:

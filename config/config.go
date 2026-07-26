@@ -19,9 +19,10 @@ type Config struct {
 	StrmUrl     string `yaml:"strm_url"`
 	TorrentPath string `yaml:"torrent_path"` // 离线下载上传种子的云端临时目录，为空则用根目录
 
-	// 本地同步静默窗口（秒）：监听事件后等待该时长内无新事件才执行同步，
-	// 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 15 秒。
-	SettleSeconds int `yaml:"settle_seconds"`
+	// 本地同步去抖窗口（秒）：监听事件后等待该时长内无新事件才执行同步，
+	// 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 5 秒。
+	// 上限 10 秒，防止窗口过长导致本地变更迟迟不生效。
+	DebounceSeconds int `yaml:"debounce_seconds"`
 
 	// 是否启用定时全量同步：false 表示关闭，仅靠本地文件监听同步，不做定时兜底扫描。
 	// 旧版默认开启；升级用户若配置文件未显式写该字段，按「开启」处理（见 New）。
@@ -99,6 +100,16 @@ func New(path string) (*Config, error) {
 		tmp.Config.CronIntervalHours = 12
 	}
 
+	// 兼容旧配置：旧版用 settle_seconds，新版用 debounce_seconds。
+	// 当配置文件里没显式写 debounce_seconds 但写了 settle_seconds 时，回退使用旧值。
+	var rawSettle struct {
+		SettleSeconds int `yaml:"settle_seconds"`
+	}
+	_ = yaml.Unmarshal(data, &rawSettle)
+	if tmp.Config.DebounceSeconds == 0 && rawSettle.SettleSeconds != 0 {
+		tmp.Config.DebounceSeconds = rawSettle.SettleSeconds
+	}
+
 	cfg := &tmp.Config
 	cfg.path = path
 	cfg.token = tmp.Token
@@ -118,8 +129,8 @@ temp_path: ""
 strm_url: ""
 torrent_path: ""
 
-# 本地同步静默窗口（秒）：监听事件后等待该时长无新事件再同步；0 表示默认 15 秒
-settle_seconds: 0
+# 本地同步去抖窗口（秒）：监听事件后等待该时长无新事件再同步；0 表示默认 5 秒（上限 10）
+debounce_seconds: 0
 
 # 定时全量同步：开启后每 cron_interval_hours 小时做一次全量扫描
 # （兜底文件监听可能漏掉的本地变化 + 云端全量同步）。关闭则仅依赖本地文件监听

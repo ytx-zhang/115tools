@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // moveChunk 单次 MoveFile 请求的视频 FID 上限，避免逗号串过长。
@@ -19,12 +20,13 @@ const moveChunk = 500
 // addCloudFolder 在云端目录 currentCID 下创建子目录 fileName，
 // 并把 本地路径 → 新目录 FID 记入数据库（后续其子文件上传时要用父目录 FID）。
 func (l *Local) addCloudFolder(ctx context.Context, currentCID, fileName, fullPath string) (string, error) {
+	start := time.Now()
 	fid, err := l.env.API.AddFolder(ctx, currentCID, fileName)
 	if err != nil {
 		return "", fmt.Errorf("[%s]: 创建云端文件夹失败: %w", fullPath, err)
 	}
 	l.env.DB.SaveRecord(fullPath, fid, db.SizeDir)
-	slog.Info("创建云端目录", "路径", fullPath, "云端FID", fid)
+	slog.Info("创建云端目录", "路径", fullPath, "云端FID", fid, "耗时", time.Since(start))
 	return fid, nil
 }
 
@@ -82,19 +84,21 @@ func (l *Local) cloudCleanTask(ctx context.Context, fPaths []string, workPath st
 		for start := 0; start < len(moveFids); start += moveChunk {
 			end := min(start+moveChunk, len(moveFids))
 			chunk := moveFids[start:end]
-			slog.Info("移动云端视频到临时目录", "路径", joined, "数量", len(chunk))
+			t0 := time.Now()
 			if err := l.env.API.MoveFile(ctx, strings.Join(chunk, ","), l.env.Paths.TempFid); err != nil {
 				return fmt.Errorf("[%s]: 批量移动云端视频失败: %w", workPath, err)
 			}
+			slog.Info("移动云端视频到临时目录", "路径", joined, "数量", len(chunk), "耗时", time.Since(t0))
 		}
 	}
 
 	// 2. 批量删除（普通文件 + 目录，进 115 回收站）
 	if len(deleteFids) > 0 {
-		slog.Info("删除云端项(进回收站)", "路径", joined, "数量", len(deleteFids))
+		t0 := time.Now()
 		if err := l.env.API.DeleteFile(ctx, strings.Join(deleteFids, ",")); err != nil {
 			return fmt.Errorf("[%s]: 批量删除云端项失败: %w", workPath, err)
 		}
+		slog.Info("删除云端项(进回收站)", "路径", joined, "数量", len(deleteFids), "耗时", time.Since(t0))
 	}
 
 	// 3. 清理数据库记录（连子项一起清）

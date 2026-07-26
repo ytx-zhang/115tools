@@ -52,7 +52,7 @@ func NewEnv(cfg *config.Config, api *drive.Open115, boltDB *db.DB) *Env {
 			TempPath: cfg.TempPath,
 			StrmPath: cfg.StrmPath,
 			StrmUrl:  cfg.StrmUrl,
-			Settle:   SettleDuration(cfg.SettleSeconds),
+			Debounce: DebounceDuration(cfg.DebounceSeconds),
 		},
 		Sem: make(chan struct{}, 5),
 
