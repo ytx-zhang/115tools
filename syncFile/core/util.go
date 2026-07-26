@@ -1,7 +1,6 @@
 package core
 
 import (
-	"log/slog"
 	"net/url"
 	"os"
 	"slices"
@@ -10,9 +9,17 @@ import (
 
 // 本文件是与具体业务流程无关的纯工具函数集合。
 
-// VideoExts 视频文件扩展名白名单。
-// 提为包级变量，避免 CheckVideo 每次调用都重新分配切片。
-var VideoExts = []string{".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv"}
+// DefaultVideoExts 视频文件扩展名内置默认白名单（常见视频格式）。
+// 与 config.DefaultVideoExts 保持一致——运行期可由配置覆盖（见 NewEnv / web 保存配置）。
+var DefaultVideoExts = []string{
+	".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv",
+	".m4v", ".mpg", ".mpeg", ".webm", ".rmvb", ".3gp", ".vob",
+}
+
+// VideoExts 当前生效的视频扩展名白名单。初始值等于 DefaultVideoExts，
+// 运行期由配置覆盖（NewEnv 在每次启动/热重载时从 cfg 注入；web 保存配置后即时刷新）。
+// CheckVideo 直接读它判断文件是否视频。
+var VideoExts = append([]string(nil), DefaultVideoExts...)
 
 // CheckVideo 判断一个文件是否应按「视频」处理（视频上传后要替换为 .strm 索引）。
 // 两个条件：扩展名在白名单内，且体积不小于 10MB
@@ -39,16 +46,4 @@ func ExtractPickcode(fPath string) (pickcode, fid string) {
 	pickcode = u.Query().Get("pickcode")
 	fid = u.Query().Get("fid")
 	return
-}
-
-// FailLog 统一记录一次任务失败，做且只做两件事：
-//  1. 失败计数 +1（供任务卡片的「失败 N」与「零失败才移动文件」门控使用）；
-//  2. 输出一条 ERROR 级结构化日志（经 logstream 进入前端日志卡片，
-//     按「错误」级别过滤即可查看全部失败明细）。
-//
-// 旧的「失败明细列表」设计已删除——同一错误记两处是典型的重复记账，
-// 现在日志管道是唯一权威来源。
-func FailLog(stats *TaskStats, path, action string, err error) {
-	stats.AddFailed(1)
-	slog.Error(action, "文件", path, "错误", err)
 }

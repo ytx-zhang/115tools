@@ -109,8 +109,12 @@ func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 		savePath = "/"
 	}
 
-	// 种子文件上传到配置的临时目录（未配置则根目录，"/" 避免回退到 strm_path）
+	// 种子文件上传到临时目录：优先 torrent_path，未配置则回退 temp_path（临时目录），
+	// 再空才用根目录 "/"（避免回退到 strm_path）。
 	torrentPath := strings.TrimSpace(cfg.TorrentPath)
+	if torrentPath == "" {
+		torrentPath = strings.TrimSpace(cfg.TempPath)
+	}
 	if torrentPath == "" {
 		torrentPath = "/"
 	}

@@ -95,12 +95,14 @@ func (s *Strm) Start(parentCtx context.Context) {
 		return
 	}
 
-	// 遍历云端媒体库。致命错误已由回调内的 FailLog 逐条记录，返回值显式忽略。
+	// 遍历云端媒体库。回调内已逐条 slog.Error 记录错误（STRM 模块单独累加失败计数，
+	// 供「零失败才移动原件」门控使用），返回值显式忽略。
 	_ = s.env.WalkCloud(ctx, s.env.Paths.StrmPath, info.Fid, core.Visitor{
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			appendMoveFid(path, fid)
 			if err := os.MkdirAll(path, 0755); err != nil {
-				core.FailLog(&s.stats, path, "创建目录失败", err)
+				slog.Error("创建目录失败", "文件", path, "错误", err)
+				s.stats.AddFailed(1)
 				return false, nil
 			}
 			return true, nil
@@ -112,7 +114,8 @@ func (s *Strm) Start(parentCtx context.Context) {
 				return nil // 本地已有 .strm/文件，跳过
 			}
 			s.stats.AddTotal(1)
-			if err := s.env.FetchAndSave(ctx, pickCode, fid, savePath, e.IsVideo, &s.stats); err != nil {
+			if err := s.env.FetchAndSave(ctx, pickCode, fid, savePath, e.IsVideo); err != nil {
+				s.stats.AddFailed(1)
 				return nil
 			}
 			s.stats.AddCompleted(1)
@@ -145,8 +148,9 @@ func (s *Strm) moveStrmPathFiles(ctx context.Context, paths []string) {
 	count := len(paths)
 	t0 := time.Now()
 	if err := s.env.API.MoveFile(ctx, fidsStr, s.env.Paths.TempFid); err != nil {
-		core.FailLog(&s.stats, "TempPath", "移动文件至 TempPath 失败", err)
+		slog.Error("移动文件至 TempPath 失败", "错误", err)
+		s.stats.AddFailed(1)
 	} else {
-		slog.Info("移动文件至 TempPath", "文件数量", count, "路径", fidsStr, "耗时", time.Since(t0))
+		slog.Info("移动文件至 TempPath", "文件数量", count, "耗时", time.Since(t0))
 	}
 }

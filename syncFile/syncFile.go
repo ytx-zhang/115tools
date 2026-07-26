@@ -53,6 +53,12 @@ func New(ctx context.Context, cfg *config.Config, api *drive.Open115, boltDB *db
 	env := core.NewEnv(cfg, api, boltDB)
 	s := &SyncFile{env: env}
 
+	// 第零步：把配置里写好的目录都建出来（本地镜像目录建本地、云端目录建云端），
+	// 避免「目录不存在」直接让后续初始化 / 同步起不来。必须在 initRoot 之前。
+	if err := s.ensureDirs(ctx); err != nil {
+		return nil, err
+	}
+
 	// 第一步：初始化编排（必须先于模块启动）。
 	// initRoot 需要扫描云端建立数据库索引，local 的扫描对比依赖这些记录。
 	if err := s.initRoot(ctx); err != nil {

@@ -67,15 +67,15 @@ func (c *Cloud) Start(parentCtx context.Context) {
 	c.cancel = cancel
 	slog.Info("开始同步云端文件...")
 
-	// 遍历整棵云端目录树。致命错误已由回调内的 FailLog 逐条记录，
-	// WalkCloud 的返回值（仅 GetFileList 致命失败）这里显式忽略。
+	// 遍历整棵云端目录树。回调内已逐条 slog.Error 记录错误（云端同步不依赖失败计数，
+	// 仅把错误统一进日志卡片），WalkCloud 的返回值（仅 GetFileList 致命失败）这里显式忽略。
 	_ = c.env.WalkCloud(ctx, c.env.Paths.SyncPath, c.env.Paths.SyncFid, core.Visitor{
 		SkipByCount: true, // 计数跳过优化：没变化的目录整棵跳过，大库二次同步提速明显
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			// 数据库里没有的目录 = 云端新增目录 → 本地创建并记录
 			if c.env.DB.GetFid(path) == "" {
 				if err := os.MkdirAll(path, 0755); err != nil {
-					core.FailLog(&c.stats, path, "创建目录失败", err)
+					slog.Error("创建目录失败", "文件", path, "错误", err)
 					return false, nil
 				}
 				c.env.DB.SaveRecord(path, fid, db.SizeDir)
@@ -93,7 +93,7 @@ func (c *Cloud) Start(parentCtx context.Context) {
 				if dbFid != fid {
 					t0 := time.Now()
 					if err := c.env.API.DeleteFile(ctx, fid); err != nil {
-						core.FailLog(&c.stats, savePath, "清理云端冗余项失败", err)
+						slog.Error("清理云端冗余项失败", "文件", savePath, "错误", err)
 					} else {
 						slog.Info("删除云端冗余项", "路径", savePath, "云端FID", fid, "耗时", time.Since(t0))
 					}
@@ -102,7 +102,7 @@ func (c *Cloud) Start(parentCtx context.Context) {
 			}
 			// 本地没有的新文件：下载（视频则生成 .strm），成功后记录数据库
 			c.stats.AddTotal(1)
-			if err := c.env.FetchAndSave(ctx, pickCode, fid, savePath, e.IsVideo, &c.stats); err != nil {
+			if err := c.env.FetchAndSave(ctx, pickCode, fid, savePath, e.IsVideo); err != nil {
 				return nil
 			}
 			c.env.DB.SaveRecord(savePath, fid, saveSize)

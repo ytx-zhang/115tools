@@ -1,5 +1,12 @@
 /* 小部件：任务卡片 / 进度条 / 徽标 / 表格 / 日志（过滤按钮与日志行） / 横幅 / Toast */
 
+/* 必填项标记（红色星号） */
+.req {
+  color: #e5484d;
+  font-weight: 700;
+  margin-right: 4px;
+}
+
 /* 任务卡片 */
 .task-nums {
   font-size: 26px;
@@ -159,6 +166,20 @@ th {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+/* chip 右侧小圆角计数胶囊：实时显示各级别日志条数；color: inherit 让选中/未选中都可读 */
+.chip-count {
+  display: inline-block;
+  min-width: 16px;
+  margin-left: 4px;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .18);
+  color: inherit;
 }
 
 /* 运行日志 */

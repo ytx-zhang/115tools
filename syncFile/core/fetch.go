@@ -30,12 +30,13 @@ func ProcessCloudFile(path string, e Entry) (savePath string, saveSize int64) {
 }
 
 // FetchAndSave 按文件类型把云端文件落地：视频写 .strm 索引文件，普通文件真实下载。
-// 成功返回 nil；失败已通过 FailLog 记录（计失败数 + ERROR 日志），调用方直接跳过即可。
-func (e *Env) FetchAndSave(ctx context.Context, pickCode, fid, savePath string, isVideo bool, stats *TaskStats) error {
+// 成功返回 nil；失败时仅输出一条 ERROR 级日志（经 logstream 进入前端日志卡片），
+// 不在此计数——是否累加失败计数交给调用方（STRM 模块需要零失败门控，云端同步不需要）。
+func (e *Env) FetchAndSave(ctx context.Context, pickCode, fid, savePath string, isVideo bool) error {
 	if isVideo {
 		t0 := time.Now()
 		if err := e.SaveStrmFile(pickCode, fid, savePath); err != nil {
-			FailLog(stats, savePath, "创建strm文件失败", err)
+			slog.Error("创建strm文件失败", "文件", savePath, "错误", err)
 			return err
 		}
 		slog.Info("新增STRM文件", "文件", savePath, "耗时", time.Since(t0))
@@ -43,7 +44,7 @@ func (e *Env) FetchAndSave(ctx context.Context, pickCode, fid, savePath string, 
 	}
 	t0 := time.Now()
 	if err := e.DownloadFile(ctx, pickCode, savePath); err != nil {
-		FailLog(stats, savePath, "下载文件失败", err)
+		slog.Error("下载文件失败", "文件", savePath, "错误", err)
 		return err
 	}
 	slog.Info("下载文件成功", "文件", savePath, "耗时", time.Since(t0))

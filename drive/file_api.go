@@ -3,7 +3,9 @@ package drive
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
+	"strings"
 )
 
 // 本文件是 115 文件/目录操作 API：下载直链、目录信息、文件列表、增删移改。
@@ -70,6 +72,42 @@ func (d *Open115) AddFolder(ctx context.Context, pid, name string) (fid string, 
 	}
 	fid = res.Data.FileId
 	return
+}
+
+// EnsureCloudDir 确保云端 path 表示的目录（及其所有缺失的祖先目录）存在，
+// 返回最终目录的 FID。path 必须是绝对路径（以 "/" 开头）。
+//
+// 用途：初始化 / 热重载时，配置里写好的云端目录（sync_path / strm_path / temp_path）
+// 若尚未在 115 创建，这里逐层下降、缺失的层用 AddFolder 建出来，避免「目录不存在」
+// 直接让同步起不来。实现从根目录出发，对每一层先 GetDirInfo 判存在、缺失再 AddFolder。
+//
+// 幂等：目录已存在时直接复用其 FID，不重复创建。
+func (d *Open115) EnsureCloudDir(ctx context.Context, path string) (string, error) {
+	if err := checkCtx(ctx); err != nil {
+		return "", err
+	}
+	// 起点：115 根目录 FID 恒为 "0"，无需经 get_info 反推（根目录 get_info 返回的是子项数组而非单对象）。
+	parentFid := "0"
+	cur := ""
+	for seg := range strings.SplitSeq(path, "/") {
+		if seg == "" {
+			continue // 前导或重复的 "/" 会产生空段，跳过
+		}
+		cur = cur + "/" + seg
+		info, err := d.GetDirInfo(ctx, cur)
+		if err == nil {
+			parentFid = info.Fid // 该层已存在，继续向下
+			continue
+		}
+		// 该层不存在 → 在 parentFid 下创建。
+		fid, err := d.AddFolder(ctx, parentFid, seg)
+		if err != nil {
+			return "", fmt.Errorf("创建云端目录 %s 失败: %w", cur, err)
+		}
+		slog.Info("[初始化] 已自动创建云端目录", "路径", cur, "云端FID", fid)
+		parentFid = fid
+	}
+	return parentFid, nil
 }
 
 // MoveFile 把云端文件/目录移动到目标目录 cid。

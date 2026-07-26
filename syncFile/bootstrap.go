@@ -4,6 +4,7 @@ import (
 	"115tools/db"
 	"115tools/syncFile/core"
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -126,16 +127,10 @@ func (s *SyncFile) initRoot(parentCtx context.Context) error {
 // 设计要点：与旧版「优先读数据库缓存」不同，这里每次启动都向 115 实时查询，
 // 结果只回填内存（core.Paths.TempFid），不再写入数据库。原因：temp_path 可能
 // 被配置改动、云端手动重建，落库反而会用到陈旧（可能已失效）的 FID。
-// 顺带清理旧版本落库的 TempPath 孤儿记录（该路径下从未写入子条目，清空无副作用）。
 func (s *SyncFile) initTemp(ctx context.Context) error {
 	if err := context.Cause(ctx); err != nil {
 		slog.Warn("[任务中止] Temp目录初始化", "错误信息", err)
 		return err
-	}
-
-	// 旧版曾把 TempFid 落库，这里清掉历史孤儿记录（该路径下无子条目可误伤）。
-	if old := s.env.DB.GetFid(s.env.Paths.TempPath); old != "" {
-		s.env.DB.BatchClearPaths([]string{s.env.Paths.TempPath})
 	}
 
 	// 每次都读云端，结果仅存内存。
@@ -144,5 +139,50 @@ func (s *SyncFile) initTemp(ctx context.Context) error {
 		return err
 	}
 	s.env.Paths.TempFid = info.Fid
+	return nil
+}
+
+// ensureDirs 在初始化编排之前，把配置里写好的目录选项都建好：
+//   - 本地镜像目录（sync_path / strm_path）用 os.MkdirAll 建本地目录；
+//   - 云端目录（sync_path / strm_path / temp_path）用 AddFolder 逐层建（见 drive.EnsureCloudDir）。
+//
+// 这样用户只需在面板填好路径、无需手动去 115 建目录，同步即可启动。
+//
+// 关于哪些目录要建本地：
+//   - sync_path / strm_path 是「云端路径即本地镜像路径」的双栖路径——
+//     云端遍历出的路径串直接用作本地 .strm 落盘路径、本地的 fswatcher 也监听该路径，
+//     故两者都需在本地建目录。
+//   - temp_path 是纯云端回收目录（只作为云端 FID 移动目标，无本地落盘含义），
+//     故只为它建云端目录、不建本地目录。
+//
+// 任一目录为空（未配置）则跳过；全部幂等，已存在不会重复创建。
+func (s *SyncFile) ensureDirs(ctx context.Context) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	// path=目录路径；local=是否同时需在本地建目录（双栖镜像路径为 true）。
+	dirs := []struct {
+		path  string
+		local bool
+	}{
+		{s.env.Paths.SyncPath, true},
+		{s.env.Paths.StrmPath, true},
+		{s.env.Paths.TempPath, false},
+	}
+	for _, d := range dirs {
+		if strings.TrimSpace(d.path) == "" {
+			continue
+		}
+		// 本地镜像目录：缺了就建（云端路径串直接作为本地路径）。
+		if d.local {
+			if err := os.MkdirAll(d.path, 0755); err != nil {
+				return fmt.Errorf("[初始化] 创建本地目录失败 %s: %w", d.path, err)
+			}
+		}
+		// 云端目录：逐层确保存在（含缺失的祖先目录），返回最终 FID 供后续使用。
+		if _, err := s.env.API.EnsureCloudDir(ctx, d.path); err != nil {
+			return fmt.Errorf("[初始化] 创建云端目录失败 %s: %w", d.path, err)
+		}
+	}
 	return nil
 }

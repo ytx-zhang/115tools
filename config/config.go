@@ -17,19 +17,21 @@ type Config struct {
 	StrmPath    string `yaml:"strm_path"`
 	TempPath    string `yaml:"temp_path"`
 	StrmUrl     string `yaml:"strm_url"`
-	TorrentPath string `yaml:"torrent_path"` // 离线下载上传种子的云端临时目录，为空则用根目录
+	TorrentPath string `yaml:"torrent_path"` // 离线下载上传种子的云端临时目录；为空则用临时目录（temp_path），再空用根目录
+
+	// 视频文件扩展名白名单：命中且体积达阈值的文件按「视频」处理
+	// （上传后替换为 .strm 索引而非落地原文件）。为空时使用内置默认（见 DefaultVideoExts）。
+	// 可通过配置文件或 Web 设置页修改，二者保持一致。
+	VideoExts []string `yaml:"video_exts"`
 
 	// 本地同步去抖窗口（秒）：监听事件后等待该时长内无新事件才执行同步，
 	// 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 5 秒。
 	// 上限 10 秒，防止窗口过长导致本地变更迟迟不生效。
 	DebounceSeconds int `yaml:"debounce_seconds"`
 
-	// 是否启用定时全量同步：false 表示关闭，仅靠本地文件监听同步，不做定时兜底扫描。
-	// 旧版默认开启；升级用户若配置文件未显式写该字段，按「开启」处理（见 New）。
-	CronEnabled bool `yaml:"cron_enabled"`
-
-	// 定时全量同步间隔（小时）：本地→云端兜底扫描 + 云端全量同步。0 表示默认 12 小时。
-	CronIntervalHours int `yaml:"cron_interval_hours"`
+	// Cron 定时全量同步配置（嵌套段，YAML 键 cron）。
+	// 旧版用顶层 cron_enabled / cron_interval_hours，现已统一到本段，不再兼容旧字段。
+	Cron CronConfig `yaml:"cron"`
 
 	// Auth 前端管理页登录凭据；Username 为空表示关闭登录验证。
 	// 密码仅以 bcrypt 哈希存储（PasswordHash），绝不保存明文。
@@ -42,10 +44,28 @@ type Config struct {
 	token tokenData
 }
 
+// DefaultVideoExts 视频文件扩展名内置默认白名单（常见视频格式）。
+// 与 syncFile/core.DefaultVideoExts 保持一致——配置未显式设置 video_exts 时使用它，
+// 运行期也可由配置覆盖（见 settings.Update / core.NewEnv）。
+var DefaultVideoExts = []string{
+	".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv",
+	".m4v", ".mpg", ".mpeg", ".webm", ".rmvb", ".3gp", ".vob",
+}
+
 // AuthConfig 前端登录的账号密码；密码仅以 bcrypt 哈希存储。
 type AuthConfig struct {
 	Username     string `yaml:"username"`
 	PasswordHash string `yaml:"password_hash"`
+}
+
+// CronConfig 定时全量同步配置（嵌套段，YAML 键 cron）。
+// 旧版用顶层 cron_enabled / cron_interval_hours，现已统一到本段，不再兼容旧字段。
+// Enabled 用 *bool：nil 表示未显式设置，按「默认开启」处理；
+// 只有显式写 enabled: false（面板取消勾选或手动 YAML）才是真正关闭，
+// 确保「默认开启」与「用户能关掉」两个语义同时成立。
+type CronConfig struct {
+	Enabled       *bool `yaml:"enabled"`        // 是否启用；nil = 未设置，默认开启
+	IntervalHours int   `yaml:"interval_hours"` // 间隔（小时），0 表示默认 12
 }
 
 type tokenData struct {
@@ -87,17 +107,12 @@ func New(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
-	// 兼容旧配置：旧版没有 cron_enabled 字段（旧默认=开启）。当配置文件里没显式写
-	// cron_enabled 时，按「开启、间隔 12 小时」处理，保持升级后行为不变。
-	var rawCron struct {
-		CronEnabled *bool `yaml:"cron_enabled"`
-	}
-	_ = yaml.Unmarshal(data, &rawCron)
-	if rawCron.CronEnabled == nil {
-		tmp.Config.CronEnabled = true
-	}
-	if tmp.Config.CronIntervalHours <= 0 {
-		tmp.Config.CronIntervalHours = 12
+	// 定时全量同步配置已由嵌套 cron 段统一承载，不再兼容旧顶层字段。
+	// 间隔兜底：IntervalHours <= 0 时使用默认 12 小时（避免 0 触发即时死循环）。
+	// Enabled 不在此兜底——缺省（nil）由 CronEnabled() 方法按「默认开启」处理，
+	// 只有显式 enabled: false 才真正关闭（见 CronConfig 注释）。
+	if tmp.Config.Cron.IntervalHours <= 0 {
+		tmp.Config.Cron.IntervalHours = 12
 	}
 
 	// 兼容旧配置：旧版用 settle_seconds，新版用 debounce_seconds。
@@ -108,6 +123,11 @@ func New(path string) (*Config, error) {
 	_ = yaml.Unmarshal(data, &rawSettle)
 	if tmp.Config.DebounceSeconds == 0 && rawSettle.SettleSeconds != 0 {
 		tmp.Config.DebounceSeconds = rawSettle.SettleSeconds
+	}
+
+	// 视频扩展名白名单：配置文件未显式写 video_exts 时回退内置默认。
+	if len(tmp.Config.VideoExts) == 0 {
+		tmp.Config.VideoExts = append([]string(nil), DefaultVideoExts...)
 	}
 
 	cfg := &tmp.Config
@@ -129,15 +149,32 @@ temp_path: ""
 strm_url: ""
 torrent_path: ""
 
+# 视频文件扩展名白名单（命中且体积达阈值按视频处理，生成 .strm 而非下载原文件）。
+# 留空则使用内置默认；亦可在 Web 设置页修改。删除此段即恢复内置默认。
+video_exts:
+  - .mp4
+  - .mkv
+  - .avi
+  - .mov
+  - .ts
+  - .flv
+  - .wmv
+  - .m4v
+  - .mpg
+  - .mpeg
+  - .webm
+  - .rmvb
+  - .3gp
+  - .vob
+
 # 本地同步去抖窗口（秒）：监听事件后等待该时长无新事件再同步；0 表示默认 5 秒（上限 10）
 debounce_seconds: 0
 
-# 定时全量同步：开启后每 cron_interval_hours 小时做一次全量扫描
+# 定时全量同步：开启后每 interval_hours 小时做一次全量扫描
 # （兜底文件监听可能漏掉的本地变化 + 云端全量同步）。关闭则仅依赖本地文件监听
-cron_enabled: true
-
-# 定时全量同步间隔（小时）：0 表示默认 12 小时
-cron_interval_hours: 12
+cron:
+  enabled: true
+  interval_hours: 12
 
 # 管理面板登录：username 留空表示关闭登录验证（仅内网安全时使用）
 auth:
@@ -178,12 +215,18 @@ func (c *Config) RequiredMissing() []string {
 	return miss
 }
 
-// CronInterval 返回定时全量同步间隔；CronIntervalHours <= 0 时回退默认 12 小时。
+// CronEnabled 返回定时全量同步是否启用：未显式设置（Enabled 为 nil）按「默认开启」处理，
+// 仅显式 enabled: false 才返回 false（用户可在面板取消勾选真正关闭）。
+func (c *Config) CronEnabled() bool {
+	return c.Cron.Enabled == nil || *c.Cron.Enabled
+}
+
+// CronInterval 返回定时全量同步间隔；Cron.IntervalHours <= 0 时回退默认 12 小时。
 func (c *Config) CronInterval() time.Duration {
-	if c.CronIntervalHours <= 0 {
+	if c.Cron.IntervalHours <= 0 {
 		return 12 * time.Hour
 	}
-	return time.Duration(c.CronIntervalHours) * time.Hour
+	return time.Duration(c.Cron.IntervalHours) * time.Hour
 }
 
 // IsSyncReady 配置是否已足以启动同步器。

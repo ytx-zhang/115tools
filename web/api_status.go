@@ -17,7 +17,7 @@ import (
 //   - ready=false 表示同步器未就绪，需结合 config_ready 区分：
 //     · config_ready=false → 配置不完整（前端显示「请补齐配置」横幅 + 缺失项）；
 //     · config_ready=true  → 热重载进行中或初始化失败（前端显示「重载中」横幅）。
-//   - sync/strm 为各自的任务进度（总数/完成/失败计数/运行中）。
+//   - sync/strm 为各自的任务进度（总数/完成/运行中）。
 //     失败原因明细不在此推送——统一走 /api/logs 日志管道，
 //     前端在日志卡片按「错误」级别过滤即可查看（避免同一错误记两处）。
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

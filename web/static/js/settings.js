@@ -1,7 +1,10 @@
 // settings.js —— 配置查看与修改（保存后实时生效）
 import { api, toast } from './api.js';
 
-const FIELDS = ['sync_path', 'strm_path', 'temp_path', 'strm_url', 'torrent_path', 'debounce_seconds', 'cron_interval_hours', 'auth_username'];
+const FIELDS = ['sync_path', 'strm_path', 'temp_path', 'strm_url', 'torrent_path', 'debounce_seconds', 'auth_username'];
+
+// videoExtsDefault 当前内置默认白名单（供「恢复默认值」按钮使用），由 load() 刷新。
+let videoExtsDefault = [];
 
 export function initSettings() {
   bindOnce();
@@ -13,6 +16,12 @@ function bindOnce() {
   if (bound) return;
   bound = true;
   document.getElementById('config-form').addEventListener('submit', save);
+  // 「恢复默认值」：把输入框填回内置默认并直接提交保存，即时生效。
+  document.getElementById('video-exts-reset').addEventListener('click', () => {
+    document.getElementById('config-form').elements['video_exts'].value =
+      (videoExtsDefault || []).join(', ');
+    document.getElementById('config-form').requestSubmit();
+  });
 }
 
 async function load() {
@@ -20,8 +29,9 @@ async function load() {
     const cfg = await api('/api/config');
     const form = document.getElementById('config-form');
     for (const f of FIELDS) form.elements[f].value = cfg[f] ?? '';
-    // 定时全量同步开关（复选框）：默认开启
-    form.elements['cron_enabled'].checked = cfg.cron_enabled !== false;
+    // 定时全量同步：嵌套 cron 段。开关默认开启、间隔默认 12 小时。
+    form.elements['cron_enabled'].checked = cfg.cron?.enabled !== false;
+    form.elements['cron_interval_hours'].value = cfg.cron?.interval_hours || 12;
     // 密码与 refresh_token 不回显明文：仅清空并给占位提示
     form.elements['auth_password'].value = '';
     form.elements['auth_password'].placeholder =
@@ -29,6 +39,10 @@ async function load() {
     form.elements['refresh_token'].value = '';
     form.elements['refresh_token'].placeholder =
       cfg.has_refresh_token ? '已配置，留空则保持不变' : '未配置';
+    // 视频扩展名：以逗号分隔回显当前生效值；记录内置默认供「恢复默认值」使用。
+    form.elements['video_exts'].value = (cfg.video_exts || []).join(', ');
+    videoExtsDefault = cfg.video_exts_default || [];
+
     // 配置不完整时，在设置页顶部给出提示与缺失项。
     const sb = document.getElementById('settings-banner');
     if (cfg.config_ready) {
@@ -53,8 +67,11 @@ async function save(e) {
     strm_url: form.elements['strm_url'].value.trim(),
     torrent_path: form.elements['torrent_path'].value.trim(),
     debounce_seconds: +form.elements['debounce_seconds'].value || 0,
-    cron_enabled: form.elements['cron_enabled'].checked,
-    cron_interval_hours: +form.elements['cron_interval_hours'].value || 12,
+    cron: {
+      enabled: form.elements['cron_enabled'].checked,
+      interval_hours: +form.elements['cron_interval_hours'].value || 12,
+    },
+    video_exts: form.elements['video_exts'].value.split(',').map(s => s.trim()).filter(Boolean),
     auth_username: form.elements['auth_username'].value.trim(),
     auth_password: form.elements['auth_password'].value,
     // 有输入才提交；留空表示保持不变（后端跳过校验，不改动 token）

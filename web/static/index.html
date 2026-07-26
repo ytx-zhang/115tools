@@ -49,7 +49,6 @@
               <h3>云端同步</h3><span class="badge" data-role="badge">空闲</span>
             </div>
             <div class="task-nums"><b data-role="done">0</b> / <span data-role="total">0</span>
-              <small class="muted" data-role="failed"></small>
             </div>
             <div class="progress"><i data-role="bar"></i></div>
             <button class="btn primary" data-role="toggle" data-task="sync">开始同步</button>
@@ -59,7 +58,6 @@
               <h3>STRM 生成</h3><span class="badge" data-role="badge">空闲</span>
             </div>
             <div class="task-nums"><b data-role="done">0</b> / <span data-role="total">0</span>
-              <small class="muted" data-role="failed"></small>
             </div>
             <div class="progress"><i data-role="bar"></i></div>
             <button class="btn primary" data-role="toggle" data-task="strm">开始生成</button>
@@ -71,10 +69,10 @@
             <h3>日志</h3>
             <div class="card-actions">
               <div class="log-filter" id="log-filter">
-                <button type="button" class="chip active" data-lv="all">全部</button>
-                <button type="button" class="chip" data-lv="info">信息</button>
-                <button type="button" class="chip" data-lv="warn">警告</button>
-                <button type="button" class="chip" data-lv="error">错误</button>
+                <button type="button" class="chip active" data-lv="all">全部 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-lv="info">信息 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-lv="warn">警告 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-lv="error">错误 <span class="chip-count">0</span></button>
               </div>
               <label class="chk"><input type="checkbox" id="log-pause">暂停滚动</label>
               <button class="btn ghost" id="log-clear" type="button">清空</button>
@@ -144,27 +142,35 @@
         <div id="settings-banner" class="banner" hidden></div>
         <form id="config-form">
           <div class="card">
-            <h3>同步配置 <small class="muted">保存后自动生效；不完整时仅保存不启动同步</small></h3>
-            <label>云端同步目录 <input name="sync_path"></label>
-            <label>STRM 生成起始目录 <input name="strm_path"></label>
-            <label>回收/临时目录 <input name="temp_path"></label>
-            <label>STRM 直链 URL <input name="strm_url"></label>
-            <label>种子临时目录 <small class="muted">离线下载上传种子的云端目录，留空用根目录</small> <input name="torrent_path" placeholder="留空则根目录"></label>
-            <label>本地同步去抖窗口（秒，0 为默认 5，上限 10）<input name="debounce_seconds" type="number" min="0" max="10"></label>
+            <h3>115 账号凭证 <small class="muted">115的 refresh_token；保存后 115 会自动轮换</small></h3>
+            <label><span class="req">*</span> refresh_token <small class="muted">115 开放平台 refresh_token，用于换取访问令牌；首次必填，保存后由程序自动刷新轮换；留空同步不启动</small> <input name="refresh_token" type="password" placeholder="未配置" autocomplete="off"></label>
           </div>
           <div class="card">
-            <h3>定时全量同步 <small class="muted">兜底文件监听漏掉的本地变化 + 云端全量扫描；改动后同步器热重载生效</small></h3>
-            <label class="chk"><input type="checkbox" name="cron_enabled"> 启用定时全量同步（关闭后仅依赖本地文件监听）</label>
-            <label>同步间隔（小时，0 为默认 12）<input name="cron_interval_hours" type="number" min="1"></label>
-          </div>
-          <div class="card">
-            <h3>115 账号凭证 <small class="muted">仅用于紧急更换 refresh_token；保存后 115 会自动轮换</small></h3>
-            <label>refresh_token <input name="refresh_token" type="password" placeholder="未配置" autocomplete="off"></label>
+            <h3>同步配置 <small class="muted">必填项未设置不启用同步</small></h3>
+            <label><span class="req">*</span> 同步目录 <small class="muted">本地同步到云端的目录，本地与云端路径需一致；</small> <input name="sync_path" placeholder="/媒体库"></label>
+            <label><span class="req">*</span> STRM 生成目录 <small class="muted">手动生成 STRM 文件的目录，本地与云端路径需一致；</small> <input name="strm_path" placeholder="/待整理"></label>
+            <label><span class="req">*</span> 云端临时目录 <small class="muted">用于存放同步后本地不存在的 strm 文件对应视频；</small> <input name="temp_path" placeholder="/Temp"></label>
+            <label><span class="req">*</span> STRM链接URL <small class="muted">用于生成 .strm 文件内的播放直链，一般填写 http://设备IP:容器映射端口（如 http://192.168.1.10:8089）</small> <input name="strm_url" placeholder="http://设备IP:端口号"></label>
+            <label>种子临时目录 <small class="muted">离线下载上传种子的云端目录，留空用临时目录</small> <input name="torrent_path" placeholder="留空则临时目录"></label>
+            <label>本地同步去抖窗口 <small class="muted">定时多少秒本地文件没变化，触发扫描目录；0 表示默认 5 秒（上限 10）</small> <input name="debounce_seconds" type="number" min="0" max="10"></label>
+            <div class="card">
+              <h3>视频文件扩展名 <small class="muted">本地上传时识别视频：命中扩展名且体积达标，上传后本地保留 .strm 并且删除视频文件</small></h3>
+              <label>扩展名（逗号分隔，如 .mp4, .mkv）<input name="video_exts" placeholder=".mp4, .mkv, ..."></label>
+              <div class="row">
+                <button type="button" class="btn ghost" id="video-exts-reset">恢复默认值</button>
+                <span class="muted">改动后点「保存配置」生效（恢复默认会直接保存）</span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>定时全量同步 <small class="muted">兜底文件监听漏掉的本地变化 + 云端全量扫描；改动后同步器热重载生效</small></h3>
+              <label class="chk"><input type="checkbox" name="cron_enabled"> 启用定时全量同步（关闭后仅依赖本地文件监听）</label>
+              <label>同步间隔 <small class="muted">小时，0 表示默认 12（兜底本地监听漏掉的变更 + 云端全量扫描）</small> <input name="cron_interval_hours" type="number" min="1"></label>
+            </div>
           </div>
           <div class="card">
             <h3>登录验证 <small class="muted">用户名留空即关闭验证；/download 直链始终免验证</small></h3>
-            <label>用户名 <input name="auth_username" autocomplete="off"></label>
-            <label>密码 <input name="auth_password" type="password" placeholder="留空则保持不变" autocomplete="new-password"></label>
+            <label>用户名 <small class="muted">管理面板登录用户名；留空即关闭登录验证（仅建议内网使用）</small> <input name="auth_username" autocomplete="off"></label>
+            <label>密码 <small class="muted">管理面板登录密码；设置用户名后必填；留空表示保持原密码不变（首次需设置）</small> <input name="auth_password" type="password" placeholder="留空则保持不变" autocomplete="new-password"></label>
           </div>
           <button type="submit" class="btn primary">保存配置</button>
         </form>

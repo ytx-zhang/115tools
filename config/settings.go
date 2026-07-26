@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -11,26 +12,38 @@ import (
 // AuthPassword 在 Snapshot 输出时恒为空（不回传密码）；
 // Update 时留空表示保持原密码不变。
 type Editable struct {
-	SyncPath          string `json:"sync_path"`
-	StrmPath          string `json:"strm_path"`
-	TempPath          string `json:"temp_path"`
-	StrmUrl           string `json:"strm_url"`
-	TorrentPath       string `json:"torrent_path"`
-	DebounceSeconds   int    `json:"debounce_seconds"`
-	CronEnabled       bool   `json:"cron_enabled"`
-	CronIntervalHours int    `json:"cron_interval_hours"`
-	AuthUsername      string `json:"auth_username"`
-	AuthPassword      string `json:"auth_password,omitempty"`
-	HasPassword       bool   `json:"has_password,omitempty"` // 仅 Snapshot 输出
+	SyncPath        string   `json:"sync_path"`
+	StrmPath        string   `json:"strm_path"`
+	TempPath        string   `json:"temp_path"`
+	StrmUrl         string   `json:"strm_url"`
+	TorrentPath     string   `json:"torrent_path"`
+	DebounceSeconds int      `json:"debounce_seconds"`
+	Cron            CronJSON `json:"cron"`
+	AuthUsername    string   `json:"auth_username"`
+	AuthPassword    string   `json:"auth_password,omitempty"`
+	HasPassword     bool     `json:"has_password,omitempty"` // 仅 Snapshot 输出
 	// RefreshToken：快照只回显 has_refresh_token（绝不回显明文）；
 	// 保存时若非空则用新值校验并替换，空表示保持不变。
 	RefreshToken    string `json:"refresh_token,omitempty"`
 	HasRefreshToken bool   `json:"has_refresh_token,omitempty"` // 仅 Snapshot 输出
 
+	// VideoExts 视频文件扩展名白名单（命中且体积达阈值按视频处理）。
+	// 快照回显当前生效值（未设置则为内置默认）；保存时按用户输入覆盖。
+	VideoExts []string `json:"video_exts"`
+	// VideoExtsDefault 仅 Snapshot 输出：内置默认白名单，供前端「恢复默认值」按钮使用。
+	VideoExtsDefault []string `json:"video_exts_default,omitempty"`
+
 	// ConfigReady / MissingFields 仅由 GET /api/config 返回（供前端展示配置完备状态），
 	// PUT 请求中忽略这两个字段。
 	ConfigReady   bool     `json:"config_ready,omitempty"`
 	MissingFields []string `json:"missing_fields,omitempty"`
+}
+
+// CronJSON 是定时全量同步配置的前端传输结构（用普通 bool，避免 JSON 出现 null）。
+// 后端的 *bool 语义在 Snapshot/Update 处归一：nil → true（默认开启）。
+type CronJSON struct {
+	Enabled       bool `json:"enabled"`
+	IntervalHours int  `json:"interval_hours"`
 }
 
 // Snapshot 返回当前可编辑配置的副本（不含密码明文，也不回显 refresh_token 明文）。
@@ -39,20 +52,49 @@ func (c *Config) Snapshot() Editable {
 	defer c.mu.RUnlock()
 	missing := c.RequiredMissing() // 算一次，ConfigReady 与 MissingFields 都从它派生
 	return Editable{
-		SyncPath:          c.SyncPath,
-		StrmPath:          c.StrmPath,
-		TempPath:          c.TempPath,
-		StrmUrl:           c.StrmUrl,
-		TorrentPath:       c.TorrentPath,
-		DebounceSeconds:   c.DebounceSeconds,
-		CronEnabled:       c.CronEnabled,
-		CronIntervalHours: c.CronIntervalHours,
-		AuthUsername:      c.Auth.Username,
-		HasPassword:       c.Auth.PasswordHash != "",
-		HasRefreshToken:   c.token.RefreshToken != "",
-		ConfigReady:       len(missing) == 0,
-		MissingFields:     missing,
+		SyncPath:        c.SyncPath,
+		StrmPath:        c.StrmPath,
+		TempPath:        c.TempPath,
+		StrmUrl:         c.StrmUrl,
+		TorrentPath:     c.TorrentPath,
+		DebounceSeconds: c.DebounceSeconds,
+		Cron: CronJSON{
+			Enabled:       c.CronEnabled(), // 归一：nil 或 true → true，前端始终收到布尔
+			IntervalHours: c.Cron.IntervalHours,
+		},
+		AuthUsername:     c.Auth.Username,
+		HasPassword:      c.Auth.PasswordHash != "",
+		HasRefreshToken:  c.token.RefreshToken != "",
+		VideoExts:        c.VideoExts,
+		VideoExtsDefault: DefaultVideoExts,
+		ConfigReady:      len(missing) == 0,
+		MissingFields:    missing,
 	}
+}
+
+// normalizeVideoExts 清洗用户输入的扩展名白名单：去空格、统一小写、补前导点、
+// 去空、去重；全空时回退内置默认（保证运行期不会因空白名单把一切判为非视频）。
+func normalizeVideoExts(in []string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, e := range in {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		if _, ok := seen[e]; ok {
+			continue
+		}
+		seen[e] = struct{}{}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return append([]string(nil), DefaultVideoExts...)
+	}
+	return out
 }
 
 // GetAuth 返回登录凭据；username 为空表示未启用登录验证。
@@ -95,20 +137,24 @@ func (c *Config) Update(e Editable) (needReload bool, err error) {
 		e.TempPath != c.TempPath ||
 		e.StrmUrl != c.StrmUrl ||
 		e.DebounceSeconds != c.DebounceSeconds ||
-		e.CronEnabled != c.CronEnabled ||
-		e.CronIntervalHours != c.CronIntervalHours
+		e.Cron.Enabled != c.CronEnabled() ||
+		e.Cron.IntervalHours != c.Cron.IntervalHours
 
 	c.SyncPath = e.SyncPath
 	c.StrmPath = e.StrmPath
 	c.TempPath = e.TempPath
 	c.StrmUrl = e.StrmUrl
 	c.TorrentPath = e.TorrentPath
+	c.VideoExts = normalizeVideoExts(e.VideoExts)
 	c.DebounceSeconds = e.DebounceSeconds
-	c.CronEnabled = e.CronEnabled
-	// 间隔 <=0 视为使用默认 12 小时，避免 0 触发即时死循环
-	c.CronIntervalHours = e.CronIntervalHours
-	if c.CronIntervalHours <= 0 {
-		c.CronIntervalHours = 12
+	// 定时全量同步：用堆分配的 *bool 承载（避免局部变量取地址导致悬空指针）。
+	// 前端始终提交明确 true/false，故此处直接按用户意图落盘；
+	// 间隔 <=0 视为使用默认 12 小时，避免 0 触发即时死循环。
+	p := new(bool)
+	*p = e.Cron.Enabled
+	c.Cron = CronConfig{Enabled: p, IntervalHours: e.Cron.IntervalHours}
+	if c.Cron.IntervalHours <= 0 {
+		c.Cron.IntervalHours = 12
 	}
 
 	switch {

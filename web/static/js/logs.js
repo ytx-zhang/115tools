@@ -9,6 +9,34 @@ let logsEs = null;     // 日志 SSE 连接
 let logPaused = false; // 暂停自动滚动（用户上翻查看历史时勾选）
 let logFilter = 'all'; // 当前级别过滤器：all / info / warn / error
 
+// 各类型日志计数（纯前端，随日志流累加；清空/重连归零），仅作 chip 小标签展示。
+// debug 不属于任一可见级别，只计入「全部」。
+const counts = { all: 0, info: 0, warn: 0, error: 0 };
+
+// resetCounts 把所有计数与 chip 上的显示归零。
+function resetCounts() {
+  counts.all = counts.info = counts.warn = counts.error = 0;
+  document.querySelectorAll('#log-filter .chip').forEach(ch => {
+    const s = ch.querySelector('.chip-count');
+    if (s) s.textContent = '0';
+  });
+}
+
+// bumpCount 累加计数并刷新 chip 显示。
+function bumpCount(level) {
+  counts.all++;
+  const allEl = document.querySelector('#log-filter .chip[data-lv="all"] .chip-count');
+  if (allEl) allEl.textContent = counts.all;
+  // counts 用小写键（info/warn/error）；renderLog 传来的 level 是大写，需统一小写比对。
+  // debug 不属任一可见级别，只计入「全部」。
+  const key = String(level).toLowerCase();
+  if (key in counts) {
+    counts[key]++;
+    const el = document.querySelector(`#log-filter .chip[data-lv="${key}"] .chip-count`);
+    if (el) el.textContent = counts[key];
+  }
+}
+
 // initLogs 初始化日志卡片（进入仪表盘时由 dashboard.js 调用）。
 export function initLogs() {
   connectLogs();
@@ -50,9 +78,10 @@ function connectLogs() {
   logsEs.onopen = () => {
     // 连接已建立：重连时服务端会重新回放近期日志，先清空旧内容避免重复。
     // 注意服务端在回放前先发 ": connected" 注释帧，本 onopen 必在其 onmessage 之前触发，
-    // 因此此处清空不会误删即将到达的回放数据。
+    // 因此此处清空不会误删即将到达的回放数据。计数同步归零，待回放重建。
     const box = document.getElementById('log-box');
     if (box) box.innerHTML = '<div class="muted empty">暂无日志</div>';
+    resetCounts();
   };
   logsEs.onerror = () => {
     // 断线（含 401 / 服务重启）：若会话失效则退回登录页，否则 3 秒后重连
@@ -66,10 +95,11 @@ function connectLogs() {
   };
 }
 
-// clearLogs 清空：页面 DOM 与服务端内存缓冲一起清。
+// clearLogs 清空：页面 DOM 与服务端内存缓冲一起清，计数同步归零。
 async function clearLogs() {
   const box = document.getElementById('log-box');
   if (box) box.innerHTML = '<div class="muted empty">暂无日志</div>';
+  resetCounts();
   try { await api('/api/logs/clear', { method: 'POST' }); } catch { /* 忽略 */ }
 }
 
@@ -117,6 +147,8 @@ function renderLog(en) {
 
   line.append(t, lv, msg);
   box.appendChild(line);
+
+  bumpCount(level); // 累加对应级别计数（纯前端小标签展示）
 
   // 控制 DOM 体积，最多保留 300 条
   while (box.childElementCount > 300) box.removeChild(box.firstElementChild);

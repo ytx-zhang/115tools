@@ -41,7 +41,7 @@ function connect() {
 const startText = { sync: '开始同步', strm: '开始生成' };
 
 // render 刷新整个仪表盘：配置/热重载横幅 + 两张任务卡片。
-// 失败原因明细不在状态里推送（统一走日志卡片按「错误」过滤），这里只展示失败计数。
+// 失败原因明细由日志卡片（按「错误」过滤）统一展示，状态卡片只显示任务进度。
 function render(data) {
   // 配置不完整：优先提示补齐（比热重载更关键）。
   const cfgBanner = document.getElementById('config-banner');
@@ -60,17 +60,15 @@ function renderCard(name, st) {
   const card = document.getElementById(`card-${name}`);
   const q = role => card.querySelector(`[data-role=${role}]`);
   const running = !!st?.running;
-  const total = st?.total || 0, done = st?.completed || 0, failed = st?.failed || 0;
+  const total = st?.total || 0, done = st?.completed || 0;
 
   q('done').textContent = done;
   q('total').textContent = total;
-  q('failed').textContent = failed ? `失败 ${failed}` : '';
   q('bar').style.width = total ? `${Math.min(100, done / total * 100)}%` : '0';
 
   const badge = q('badge');
   if (!st) { badge.textContent = '未就绪'; badge.className = 'badge warn'; }
   else if (running) { badge.textContent = '运行中'; badge.className = 'badge run'; }
-  else if (failed) { badge.textContent = '有失败'; badge.className = 'badge err'; }
   else { badge.textContent = '空闲'; badge.className = 'badge'; }
 
   const btn = q('toggle');

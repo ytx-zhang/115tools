@@ -37,13 +37,17 @@ type Env struct {
 	Sem   chan struct{}  // 云端 API 并发配额（容量 5），仅在 GetFileList 调用期间持有
 
 	// 定时全量同步配置（由 config 注入，运行期只读）。
-	CronEnabled  bool          // 是否启用定时全量同步（配置 cron_enabled，默认开启）
-	CronInterval time.Duration // 定时全量同步间隔（配置 cron_interval_hours，默认 12h）
+	CronEnabled  bool          // 是否启用定时全量同步（配置 cron.enabled；未设置默认开启）
+	CronInterval time.Duration // 定时全量同步间隔（配置 cron.interval_hours，默认 12h）
 }
 
 // NewEnv 根据配置创建共享运行环境。
 // 调用方：syncFile 根包的 New()；每次启动/热重载时调用一次。
 func NewEnv(cfg *config.Config, api *drive.Open115, boltDB *db.DB) *Env {
+	// 把配置里的视频扩展名白名单注入运行期变量（首次启动与每次热重载都走这里，
+	// 保证 VideoExts 永远与当前配置一致）。
+	VideoExts = cfg.VideoExts
+
 	return &Env{
 		API: api,
 		DB:  boltDB,
@@ -56,7 +60,7 @@ func NewEnv(cfg *config.Config, api *drive.Open115, boltDB *db.DB) *Env {
 		},
 		Sem: make(chan struct{}, 5),
 
-		CronEnabled:  cfg.CronEnabled,
+		CronEnabled:  cfg.CronEnabled(),
 		CronInterval: cfg.CronInterval(),
 	}
 }
