@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -44,22 +43,14 @@ func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*Dow
 		return nil, err
 	}
 
-	// res.Data 以 fid 为键、可能为多条目；对键排序后取首个，避免 map 遍历的随机性。
-	if len(res.Data) == 0 {
-		return nil, fmt.Errorf("未提取到下载信息")
+	for fid, item := range res.Data {
+		return &DownloadUrlInfo{
+			Fid:  fid,
+			Url:  item.Url.Url,
+			Name: item.FileName,
+		}, nil
 	}
-	keys := make([]string, 0, len(res.Data))
-	for fid := range res.Data {
-		keys = append(keys, fid)
-	}
-	sort.Strings(keys)
-	fid := keys[0]
-	item := res.Data[fid]
-	return &DownloadUrlInfo{
-		Fid:  fid,
-		Url:  item.Url.Url,
-		Name: item.FileName,
-	}, nil
+	return nil, fmt.Errorf("未提取到下载信息")
 }
 
 // AddFolder 在云端目录 pid 下创建子目录 name，返回新目录的 FID。
