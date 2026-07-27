@@ -3,8 +3,8 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 
-	"115tools/internal/media"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -76,13 +76,62 @@ func (c *Config) Snapshot() Editable {
 		HasPassword:          c.Auth.PasswordHash != "",
 		HasRefreshToken:      c.token.RefreshToken != "",
 		VideoExts:            c.VideoExts,
-		VideoExtsDefault:     media.DefaultVideoExts,
+		VideoExtsDefault:     DefaultVideoExts,
 		UploadExclude:        c.UploadExclude,
-		UploadExcludeDefault: media.DefaultUploadExclude,
+		UploadExcludeDefault: DefaultUploadExclude,
 		EmbyIgnoreEnabled:    c.EmbyIgnoreOn(),
 		ConfigReady:          len(missing) == 0,
 		MissingFields:        missing,
 	}
+}
+
+// normalizeVideoExts 清洗用户输入的扩展名白名单：去空格、统一小写、补前导点、
+// 去空、去重；全空时回退内置默认（保证运行期不会因空白名单把一切判为非视频）。
+func normalizeVideoExts(in []string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, e := range in {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		if _, ok := seen[e]; ok {
+			continue
+		}
+		seen[e] = struct{}{}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return append([]string(nil), DefaultVideoExts...)
+	}
+	return out
+}
+
+// normalizeUploadExclude 清洗用户输入的上传排除名单：去空格、小写、去空、去重；
+// 全空时回退内置默认（保证运行期不会因空白名单把一切临时文件都上传）。
+// 与 syncFile/core.normalizeUploadExclude 逻辑一致（config 不能 import core，故刻意重复）。
+// 注意：不强制补前导点——否则 .DS_Store 会被加成 .ds_store 而整名匹配失败。
+func normalizeUploadExclude(in []string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, e := range in {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if _, ok := seen[e]; ok {
+			continue
+		}
+		seen[e] = struct{}{}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return append([]string(nil), DefaultUploadExclude...)
+	}
+	return out
 }
 
 // GetAuth 返回登录凭据；username 为空表示未启用登录验证。
@@ -133,8 +182,8 @@ func (c *Config) Update(e Editable) (needReload bool, err error) {
 	c.TempPath = e.TempPath
 	c.StrmUrl = e.StrmUrl
 	c.TorrentPath = e.TorrentPath
-	c.VideoExts = media.NormalizeVideoExts(e.VideoExts)
-	c.UploadExclude = media.NormalizeUploadExclude(e.UploadExclude)
+	c.VideoExts = normalizeVideoExts(e.VideoExts)
+	c.UploadExclude = normalizeUploadExclude(e.UploadExclude)
 	// Emby 排除文件开关：用堆分配的 *bool 承载（避免局部变量取地址导致悬空指针）。
 	// 前端始终提交明确 true/false；nil 仅出现在未通过本结构写入时，默认按开启处理。
 	pe := new(bool)

@@ -45,8 +45,8 @@ type Env struct {
 // 调用方：syncFile 根包的 New()；每次启动/热重载时调用一次。
 func NewEnv(cfg *config.Config, api *drive.Open115, boltDB *db.DB) *Env {
 	// 把配置里的视频扩展名白名单注入运行期变量（首次启动与每次热重载都走这里，
-	// 保证 VideoExts 永远与当前配置一致）。用原子写避免与并发读取 CheckVideo 竞争。
-	VideoExts.Store(&cfg.VideoExts)
+	// 保证 VideoExts 永远与当前配置一致）。
+	VideoExts = cfg.VideoExts
 
 	// 把配置里的上传排除名单注入运行期变量（下载器/系统临时文件后缀），
 	// 首次启动与每次热重载都走这里，保证与当前配置一致。

@@ -5,23 +5,21 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"sync/atomic"
-
-	"115tools/internal/media"
 )
 
 // 本文件是与具体业务流程无关的纯工具函数集合。
 
-// VideoExts 当前生效的视频扩展名白名单，用 atomic.Pointer 持有切片头，
-// 避免 sync/upload 并发 goroutine 读取时，与 web 保存配置 / 热重载的写入产生数据竞争。
-// 初始值在 init 中 Store 内置默认，保证 Load 在 NewEnv 调用前也永不为 nil。
-var VideoExts atomic.Pointer[[]string]
-
-func init() {
-	// 初始值设为内置默认（见 media.DefaultVideoExts），保证程序在 NewEnv 尚未调用前即可生效。
-	defaults := append([]string(nil), media.DefaultVideoExts...)
-	VideoExts.Store(&defaults)
+// DefaultVideoExts 视频文件扩展名内置默认白名单（常见视频格式）。
+// 与 config.DefaultVideoExts 保持一致——运行期可由配置覆盖（见 NewEnv / web 保存配置）。
+var DefaultVideoExts = []string{
+	".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv",
+	".m4v", ".mpg", ".mpeg", ".webm", ".rmvb", ".3gp", ".vob",
 }
+
+// VideoExts 当前生效的视频扩展名白名单。初始值等于 DefaultVideoExts，
+// 运行期由配置覆盖（NewEnv 在每次启动/热重载时从 cfg 注入；web 保存配置后即时刷新）。
+// CheckVideo 直接读它判断文件是否视频。
+var VideoExts = append([]string(nil), DefaultVideoExts...)
 
 // CheckVideo 判断一个文件是否应按「视频」处理（视频上传后要替换为 .strm 索引）。
 // 两个条件：扩展名在白名单内，且体积不小于 10MB
@@ -30,7 +28,7 @@ func CheckVideo(ext string, size int64) bool {
 	if size < 10*1024*1024 {
 		return false
 	}
-	return slices.Contains(*VideoExts.Load(), strings.ToLower(ext))
+	return slices.Contains(VideoExts, strings.ToLower(ext))
 }
 
 // ExtractPickcode 从 .strm 文件内容中解析出 pickcode 与 fid。

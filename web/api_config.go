@@ -46,7 +46,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	// 视频扩展名白名单改动即时生效：运行期分类直接读 core.VideoExts，
 	// 这里在 Update 落盘后刷新（即使未触发同步器热重载也要生效）。
 	if len(s.Cfg.VideoExts) > 0 {
-		core.VideoExts.Store(&s.Cfg.VideoExts)
+		core.VideoExts = s.Cfg.VideoExts
 	}
 
 	// 上传排除名单改动即时生效：readLocalDir 实时读 core.IsUploadExcluded，
