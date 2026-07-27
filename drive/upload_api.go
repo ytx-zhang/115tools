@@ -104,8 +104,14 @@ func (d *Open115) doUpload(ctx context.Context, src uploadSource, cid, signKey, 
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("签名检查格式错误: %s", signCheck)
 		}
-		start, _ := strconv.ParseInt(parts[0], 10, 64)
-		end, _ := strconv.ParseInt(parts[1], 10, 64)
+		start, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("无效的 sign_check %q: %w", signCheck, err)
+		}
+		end, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("无效的 sign_check %q: %w", signCheck, err)
+		}
 		newSignKey := getMapString(initData, "sign_key")
 		newSignVal := src.partialHash(start, end)
 		return d.doUpload(ctx, src, cid, newSignKey, newSignVal)
