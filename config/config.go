@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"115tools/internal/media"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,13 +23,13 @@ type Config struct {
 	TorrentPath string `yaml:"torrent_path"` // 离线下载上传种子的云端临时目录；为空则用临时目录（temp_path），再空用根目录
 
 	// 视频文件扩展名白名单：命中且体积达阈值的文件按「视频」处理
-	// （上传后替换为 .strm 索引而非落地原文件）。为空时使用内置默认（见 DefaultVideoExts）。
+	// （上传后替换为 .strm 索引而非落地原文件）。为空时使用内置默认（见 media.DefaultVideoExts）。
 	// 可通过配置文件或 Web 设置页修改，二者保持一致。
 	VideoExts []string `yaml:"video_exts"`
 
 	// 上传排除名单：这些后缀（或整名，如 .DS_Store / Thumbs.db）的文件不上传，
 	// 且云端已存在的同名项会被联动清理。用于跳过下载器/系统的临时半成品文件。
-	// 为空时使用内置默认（见 DefaultUploadExclude）；可通过配置文件或 Web 设置页修改。
+	// 为空时使用内置默认（见 media.DefaultUploadExclude）；可通过配置文件或 Web 设置页修改。
 	UploadExclude []string `yaml:"upload_exclude"`
 
 	// 本地同步去抖窗口（秒）：监听事件后等待该时长内无新事件才执行同步，
@@ -57,21 +58,9 @@ type Config struct {
 	token tokenData
 }
 
-// DefaultVideoExts 视频文件扩展名内置默认白名单（常见视频格式）。
-// 与 syncFile/core.DefaultVideoExts 保持一致——配置未显式设置 video_exts 时使用它，
-// 运行期也可由配置覆盖（见 settings.Update / core.NewEnv）。
-var DefaultVideoExts = []string{
-	".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv",
-	".m4v", ".mpg", ".mpeg", ".webm", ".rmvb", ".3gp", ".vob",
-}
-
-// DefaultUploadExclude 上传排除名单内置默认（下载器/系统临时文件后缀）。
-// 与 syncFile/core.DefaultUploadExclude 保持一致——配置未显式设置 upload_exclude 时使用它，
-// 运行期也可由配置覆盖（见 settings.Update / core.NewEnv）。
-var DefaultUploadExclude = []string{
-	".part", ".partial", ".aria2", ".crdownload", ".download",
-	".tmp", ".!qB", ".DS_Store", "Thumbs.db",
-}
+// 视频扩展名白名单与上传排除名单的内置默认，统一由 internal/media 持有
+// （见 media.DefaultVideoExts / media.DefaultUploadExclude），config 与
+// syncFile/core 共享同一份，避免两者各自定义后漂移。
 
 // AuthConfig 前端登录的账号密码；密码仅以 bcrypt 哈希存储。
 type AuthConfig struct {
@@ -148,12 +137,12 @@ func New(path string) (*Config, error) {
 
 	// 视频扩展名白名单：配置文件未显式写 video_exts 时回退内置默认。
 	if len(tmp.Config.VideoExts) == 0 {
-		tmp.Config.VideoExts = append([]string(nil), DefaultVideoExts...)
+		tmp.Config.VideoExts = append([]string(nil), media.DefaultVideoExts...)
 	}
 
 	// 上传排除名单：配置文件未显式写 upload_exclude 时回退内置默认。
 	if len(tmp.Config.UploadExclude) == 0 {
-		tmp.Config.UploadExclude = append([]string(nil), DefaultUploadExclude...)
+		tmp.Config.UploadExclude = append([]string(nil), media.DefaultUploadExclude...)
 	}
 
 	cfg := &tmp.Config
