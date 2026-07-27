@@ -56,7 +56,8 @@ func main() {
 	//    /download 是 Emby 播放视频的直链依赖，必须尽早可用且【不做登录验证】，
 	//    因此在其余管理路由之前启动、且不经过 web 包的鉴权中间件。
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /download", strmServer.New(apiClient).RedirectToRealURL)
+	strmSrv := strmServer.New(apiClient)
+	mux.HandleFunc("GET /download", strmSrv.RedirectToRealURL)
 
 	server := &http.Server{
 		Addr:    ":8080",
@@ -123,6 +124,8 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("强制关闭 HTTP 服务器", "错误信息", err)
 	}
+	// 停止 strmServer 后台清理协程，避免进程退出时协程泄漏。
+	strmSrv.Stop()
 	slog.Debug("正在等待后台任务完成...")
 	wg.Wait()
 	slog.Info("程序已安全退出。")
