@@ -14,27 +14,29 @@ import (
 // 本文件实现「目录级全量对比」：递归对比数据库记录与本地文件系统，
 // 找出需要上传的新文件和需要云端清理的已删项。
 
-// FullScan 对主同步目录做一次完整递归同步（扫描块入口，不可中断）。
+// FullScan 对主同步目录做一次完整递归同步（扫描块入口）。
 // 用于：程序启动后的首次收敛、定时全量扫描兜底。复用与监控块完全相同的 syncDir，
 // 保证全量扫描与实时增量行为完全一致。主目录云端 FID 未就绪时跳过（不应发生）。
+// 全量扫描传 recursive=true，递归下钻整棵子树。
 func (l *Local) FullScan(ctx context.Context) {
 	if l.env.Paths.SyncFid == "" {
 		slog.Warn("主同步目录云端FID未就绪，跳过全量扫描", "路径", l.env.Paths.SyncPath)
 		return
 	}
-	l.syncDir(ctx, l.env.Paths.SyncPath, l.env.Paths.SyncFid, nil)
+	l.syncDir(ctx, l.env.Paths.SyncPath, l.env.Paths.SyncFid, true)
 }
 
 // syncDir 同步一个目录：先扫描出差异，再把需要上传的文件逐个投递到上传队列。
 // 上传本身是异步的（3 个常驻 worker 消费），本函数只负责「调度」。
+// 取消通过 ctx（监控块退出、全量扫描被取消）传递，syncDir 幂等、跑到底无副作用。
 //
-// stop 为 nil 表示不可中断。全量扫描与实时增量监控统一传 nil——监控块改用按目录
-// 静默窗口，处理期间来的新事件只被重新登记、待该目录再次静默后才处理，故无需中断
-// 当前流程（syncDir 幂等，跑到底无副作用）。
-func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid string, stop func() bool) {
-	// 阶段一：扫描（递归比对数据库与本地，找出待上传文件）
+// recursive=true 递归下钻整棵子树（全量扫描/定时兜底用）；
+// recursive=false 只处理本目录的直接子项，子目录交给它们各自的事件（监控块用），
+// 避免每一层目录被反复递归多次。
+func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid string, recursive bool) {
+	// 阶段一：扫描（比对数据库与本地，找出待上传文件）
 	scanStart := time.Now()
-	uploadPaths := l.scanDir(ctx, currentPath, currentFid, stop)
+	uploadPaths := l.scanDir(ctx, currentPath, currentFid, recursive)
 	slog.Info("扫描本地目录", "目录", currentPath, "需要上传文件", len(uploadPaths), "耗时", time.Since(scanStart))
 
 	// 无变更无需进入同步阶段，扫描日志已说明
@@ -47,8 +49,8 @@ func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid stri
 	// 故此处不计时——真实上传耗时由上传 worker（doUpload）单独记录。
 	uploaded := 0
 	for _, fPath := range uploadPaths {
-		if err := ctx.Err(); err != nil || (stop != nil && stop()) {
-			break // 中止/新事件到达 → 停止投递，但仍输出本次已处理的结果
+		if err := ctx.Err(); err != nil {
+			break // 取消 → 停止投递，但仍输出本次已处理的结果
 		}
 		cid := l.env.DB.GetFid(filepath.Dir(fPath))
 		if cid == "" {
@@ -65,19 +67,24 @@ func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid stri
 //
 // 对比分两步：
 //  1. 遍历数据库中该目录的子项：本地没有了 → 待删除；两边都在 → 进一步比对内容；
-//  2. 剩下的本地新增项（数据库里没有的）：目录先建云端目录再递归，文件直接列入待上传。
+//  2. 剩下的本地新增项（数据库里没有的）：目录先建云端目录（仅在 recursive 时递归下钻），
+//     文件直接列入待上传。
 //
-// scanDir 递归扫描本地目录，与数据库比对，返回需要上传的本地文件路径列表。
+// scanDir 扫描本地目录，与数据库比对，返回需要上传的本地文件路径列表。
 // 云端目录的创建和文件的删除在这里同步完成，文件上传则交给 syncDir 异步调度。
-// stop 叠加到每个既有 ctx.Err 检查点，供调用方在需要时中止（现统一传 nil，不中断）。
-func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, stop func() bool) []string {
+// 取消通过 ctx 传递，叠加到各检查点（ScanChildren 回调、新增项循环）。
+//
+// recursive=true 时对子目录继续递归下钻（全量扫描/定时兜底）；
+// recursive=false 时只处理本目录直接子项，新子目录仍会建好云端目录并写回 FID（供其子目录
+// 各自的事件使用），但不再下钻——交给监控块各自的 processReady 处理，避免重复扫描整棵子树。
+func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, recursive bool) []string {
 	slog.Debug("扫描本地文件", "处理目录", currentPath)
 	start := time.Now()
 	defer func() {
 		slog.Debug("本地文件扫描完成", "处理目录", currentPath, "耗时", time.Since(start))
 	}()
 
-	if err := ctx.Err(); err != nil || (stop != nil && stop()) {
+	if err := ctx.Err(); err != nil {
 		return nil
 	}
 
@@ -92,7 +99,7 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, sto
 
 	// 第一步：遍历数据库子项，与本地对比
 	l.env.DB.ScanChildren(ctx, currentPath, func(name string, dbFid string, dbSize int64) {
-		if err := ctx.Err(); err != nil || (stop != nil && stop()) {
+		if err := ctx.Err(); err != nil {
 			return
 		}
 		localFile, exists := localFiles[name]
@@ -105,8 +112,8 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, sto
 		delete(localFiles, name) // 两边都在的项从 map 移除，剩下的就是本地新增
 
 		if localFile.IsDir() {
-			if dbSize == db.SizeDir {
-				uploads = append(uploads, l.scanDir(ctx, fullPath, dbFid, stop)...)
+			if dbSize == db.SizeDir && recursive {
+				uploads = append(uploads, l.scanDir(ctx, fullPath, dbFid, recursive)...)
 			}
 			return
 		}
@@ -130,7 +137,7 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, sto
 
 	// 第二步：处理本地新增项（不在数据库中的）
 	for name, entry := range localFiles {
-		if err := ctx.Err(); err != nil || (stop != nil && stop()) {
+		if err := ctx.Err(); err != nil {
 			return uploads
 		}
 		fullPath := filepath.Join(currentPath, name)
@@ -140,7 +147,9 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, sto
 				slog.Error("创建云端目录失败", "路径", fullPath, "错误", err)
 				continue
 			}
-			uploads = append(uploads, l.scanDir(ctx, fullPath, fid, stop)...)
+			if recursive {
+				uploads = append(uploads, l.scanDir(ctx, fullPath, fid, recursive)...)
+			}
 		} else {
 			uploads = append(uploads, fullPath)
 		}

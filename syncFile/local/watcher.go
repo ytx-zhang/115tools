@@ -1,6 +1,7 @@
 package local
 
 import (
+	"115tools/db"
 	"context"
 	"log/slog"
 	"path/filepath"
@@ -15,8 +16,12 @@ import (
 //
 // 监听器完全「不懂」业务逻辑，只把原始事件对应的「父目录」登记进待处理表，
 // 按目录各自独立做静默窗口（目录自身 Debounce 秒内无新事件才处理），再对
-// 「云端已存在」的父目录跑 syncDir 递归。syncDir 递归会补全缺失子孙，故
-// 云端不存在的父目录直接跳过也丢不了数据。
+// 每个待处理目录跑 syncDir。每个目录只处理自身直接子项（syncDir 非递归），
+// 子目录交给它们各自的事件，避免同一棵子树被多层目录事件重复扫描。
+//
+// 若某目录在云端/数据库均无记录（fid==""），先用 EnsureCloudDir 从云端根逐级确认、
+// 自动创建（含缺失的祖先目录）并写回 FID，再同步——即便只监控到最深层目录、其祖先
+// 未被事件触发，也不会漏传。
 //
 // 事件类型完全无视（连 rename 也走 syncDir）——换取零类型判断，代价是改名时
 // 旧视频进 TempFid、新文件重传（已确认接受）。
@@ -73,7 +78,7 @@ func (l *Local) watchPump(ctx context.Context) {
 		})
 	}
 
-	// processReady 取出所有已静默目录，逐个对「云端已存在」的父目录跑 syncDir。
+	// processReady 取出所有已静默目录，逐个同步（缺失的父目录自动云端创建）。
 	// 不自行中断：syncDir 跑到底（幂等）；处理期间目录又来新事件会被 arm 重新登记，
 	// 待其再次静默后处理。
 	processReady := func() {
@@ -85,15 +90,26 @@ func (l *Local) watchPump(ctx context.Context) {
 		ready = make(map[string]struct{})
 		mu.Unlock()
 
-		// 收敛：只在本轮批处理跑一次，避免递归 syncDir 对同一棵子树重复扫描。
+		// 仅排序（父目录先于子目录），不丢弃任何目录：每个目录都只处理自身直接子项
+		// （syncDir 非递归），由各自事件触发，故全部保留、仅按路径升序保证父 FID 先就绪。
 		folders = convergeFolders(folders)
 
 		for _, f := range folders {
 			fid := l.env.DB.GetFid(f)
 			if fid == "" {
-				continue // 父目录云端不存在 → 跳过，祖先事件会覆盖
+				// 父目录在云端/数据库均无记录：自动创建（含缺失的祖先目录）后再同步。
+				// EnsureCloudDir 从云端根逐级确认、已存在则复用 FID，
+				// 即使只监控到最深层目录、祖先未被事件触发，也不会漏传。
+				var err error
+				fid, err = l.env.API.EnsureCloudDir(ctx, f)
+				if err != nil {
+					slog.Error("自动创建云端目录失败，跳过", "路径", f, "错误", err)
+					continue
+				}
+				l.env.DB.SaveRecord(f, fid, db.SizeDir)
 			}
-			l.syncDir(ctx, f, fid, nil)
+			// 非递归：只处理本目录直接子项，子目录交给它们各自的事件，避免重复下钻。
+			l.syncDir(ctx, f, fid, false)
 		}
 	}
 
@@ -119,38 +135,13 @@ func (l *Local) watchPump(ctx context.Context) {
 	}
 }
 
-// convergeFolders 丢弃「祖先也在列表」的文件夹，避免递归 syncDir 对同一棵子树重复扫描。
+// convergeFolders 对本轮待处理目录排序。监控块已改为「每目录只处理自身直接子项」
+// （syncDir 非递归），因此不再丢弃子孙目录——每个目录都独立、由各自事件触发。
 //
-// 云端与 DB 均为树结构，子孙不可能脱离祖先独立存在——某文件夹的祖先若也在列表里，
-// 祖先的递归 syncDir 必然覆盖它；即便祖先因云端 fid 为空被跳过，子孙 fid 也必为空、
-// 本就会被跳过，故丢弃无害。
-//
-// 先按路径升序排序，祖先必然先于子孙出现；于是向上爬时只需在「已保留集合」(keptSet)
-// 里找祖先——被丢弃文件夹的最深祖先必是保留项（自身无祖先在列表里），爬到的第一个命中
-// 即其最深保留祖先，绝不会漏判；未命中则 f 自身是新的最上层，纳入 keptSet。
+// 仅按路径升序排序，保证父目录先于子目录处理，使子目录的 addCloudFolder 能拿到
+// 已经建好的父 FID。原「丢弃祖先在列表中的子孙」逻辑已不适用（非递归后子孙须独立处理），
+// 故此处只排序、保留全部目录。
 func convergeFolders(folders []string) []string {
-	sort.Strings(folders)
-	kept := folders[:0]
-	keptSet := make(map[string]struct{}, len(folders))
-	for _, f := range folders {
-		redundant := false
-		// 从 f 的父目录开始向上爬，命中已保留集合即判冗余丢弃。
-		// 注意：filepath.Dir(根目录) 返回根自身（如 Dir("/")=="/"、Dir("Z:\\")=="Z:\\"），
-		// 爬到根后 a 不再变化，若以「a != f」作终止条件会恒真 → 无限循环（watchPump 卡死、
-		// 增量同步永不触发）。故必须显式判断「已爬到根」才停止。
-		for a := filepath.Dir(f); ; a = filepath.Dir(a) {
-			if _, ok := keptSet[a]; ok {
-				redundant = true
-				break
-			}
-			if parent := filepath.Dir(a); parent == a {
-				break // 已到根目录，无法再向上，停止爬升
-			}
-		}
-		if !redundant {
-			kept = append(kept, f)
-			keptSet[f] = struct{}{}
-		}
-	}
-	return kept
+	sort.Strings(folders) // 升序：父目录必然先于子目录，保证父 FID 先就绪
+	return folders
 }
