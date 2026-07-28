@@ -68,7 +68,7 @@ func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid stri
 //
 // scanDir 扫描本地目录，与数据库比对，返回需要上传的本地文件路径列表。
 // 云端目录的创建和文件的删除在这里同步完成，文件上传则交给 syncDir 异步调度。
-// 取消通过 ctx 传递，叠加到各检查点（ScanChildren 回调、新增项循环）。
+// 取消通过 ctx 传递，叠加到各检查点（dbChildren 快照循环、新增项循环）。
 //
 // recursive=true 时对子目录继续递归下钻（全量扫描/定时兜底）；
 // recursive=false 时只处理本目录直接子项，新子目录仍会建好云端目录并写回 FID（供其子目录
@@ -92,39 +92,66 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, rec
 
 	var deletes []string
 	var uploads []string
+	// strmRefreshes 收集「mtime 变了但 fid 一致」的 .strm：本地已知变更，需刷新数据库 size。
+	// 对比循环已在读事务之外，先收集再统一写仅为减少写事务次数。
+	var strmRefreshes []struct {
+		path string
+		fid  string
+		size int64
+	}
 
-	// 第一步：遍历数据库子项，与本地对比
-	l.env.DB.ScanChildren(ctx, currentPath, func(name string, dbFid string, dbSize int64) {
+	// 第一步：一次性读取数据库该目录直属子项（单个短读事务内完成，立即关闭），
+	// 之后所有对比/递归/写库都在读事务之外进行，杜绝「读事务贯穿递归」导致的写饥饿死锁。
+	dbChildren := l.env.DB.ScanChildren(ctx, currentPath)
+
+	// 第二步：拿快照比对，全部在读事务之外
+	for _, ch := range dbChildren {
 		if err := ctx.Err(); err != nil {
-			return
+			break
 		}
+		name, dbFid, dbSize := ch.Name, ch.Fid, ch.Size
 		localFile, exists := localFiles[name]
 		fullPath := filepath.Join(currentPath, name)
 
 		if !exists {
 			deletes = append(deletes, fullPath) // 云端存在，本地不存在 → 删除
-			return
+			continue
 		}
 		delete(localFiles, name) // 两边都在的项从 map 移除，剩下的就是本地新增
 
 		if localFile.IsDir() {
 			if dbSize == db.SizeDir && recursive {
+				// 递归下钻：此时已不在任何读事务内，子 scanDir 各自开/关自己的短读事务，无嵌套死锁。
 				uploads = append(uploads, l.scanDir(ctx, fullPath, dbFid, recursive)...)
 			}
-			return
+			continue
 		}
 
 		// 对比文件内容是否变化
 		fileInfo, err := localFile.Info()
 		if err != nil {
-			return
+			continue
 		}
-		localSize := compareLocalFile(l.env.DB, fullPath, name, dbFid, dbSize, fileInfo)
+		localSize, refreshed := compareLocalFile(fullPath, name, dbFid, dbSize, fileInfo)
+		if refreshed {
+			// 收集刷新，循环结束后统一 SaveRecord（读事务外，安全且可批量）。
+			strmRefreshes = append(strmRefreshes, struct {
+				path string
+				fid  string
+				size int64
+			}{fullPath, dbFid, localSize})
+			continue
+		}
 		if localSize >= 0 && localSize != dbSize {
 			deletes = append(deletes, fullPath)
 			uploads = append(uploads, fullPath)
 		}
-	})
+	}
+
+	// .strm mtime 变更刷新（fid 一致）：读事务之外统一写库，避免长事务/嵌套写锁。
+	for _, r := range strmRefreshes {
+		l.env.DB.SaveRecord(r.path, r.fid, r.size)
+	}
 
 	// 云端删除与数据库清理（本地已删的项）
 	if err := l.cloudCleanTask(ctx, deletes, currentPath); err != nil {
@@ -159,27 +186,27 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, rec
 // .strm 文件用修改时间（Unix 秒）代替文件大小；普通文件直接返回字节数。
 // 返回 -1 表示文件不可读。fileInfo 由调用方通过 DirEntry.Info() 提供，避免重复 os.Stat。
 //
-// .strm 特殊逻辑：若只是修改时间变了、但内容里的 fid 与数据库一致，
-// 视为本地已知变更（例如 STRM 生成模块刚重写了它），直接更新数据库记录
-// 并返回原 dbSize——让调用方判定为「无变化」，不触发删除+重新上传。
-func compareLocalFile(boltDB *db.DB, fullPath, name, dbFid string, dbSize int64, fileInfo os.FileInfo) int64 {
+// 第二个返回值 refreshed 标记：当 .strm 的修改时间变了、但内容里的 fid 与数据库一致时，
+// 视为本地已知变更（例如 STRM 生成模块刚重写了它），应当刷新数据库记录的 size 为新的 mtime。
+// 本函数不写库——调用方在「读事务之外」的对比循环里收集这些项，循环结束后统一 SaveRecord，
+// 既能避免长事务，又能把多次刷新合并为批量写，减少写事务次数。
+func compareLocalFile(fullPath, name, dbFid string, dbSize int64, fileInfo os.FileInfo) (int64, bool) {
 	if fileInfo == nil {
-		return -1
+		return -1, false
 	}
 	isStrm := strings.EqualFold(filepath.Ext(name), ".strm")
 	if !isStrm {
-		return fileInfo.Size()
+		return fileInfo.Size(), false
 	}
 	localSize := fileInfo.ModTime().Unix()
 	if localSize != dbSize {
 		_, fid := core.ExtractPickcode(fullPath)
 		if fid == dbFid {
-			boltDB.SaveRecord(fullPath, fid, localSize)
-			// 返回 dbSize 使调用方判定「无变化」，不触发删除+重新上传
-			return dbSize
+			// 本地已知变更：标记需刷新数据库 size，调用方在事务外统一 SaveRecord。
+			return localSize, true
 		}
 	}
-	return localSize
+	return localSize, false
 }
 
 // readLocalDir 读取目录内容到 map，key 为文件名，供快速查找比对。

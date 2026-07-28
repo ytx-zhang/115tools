@@ -72,14 +72,11 @@ func (s *SyncFile) initRoot(parentCtx context.Context) error {
 	// 记录根目录自身，供后续相对路径拼接与扫描定位。
 	s.env.DB.SaveRecord(s.env.Paths.SyncPath, cloudFid, db.SizeDir)
 
-	// 批量写入器：扫描产生的大量写入合并为少量数据库事务；遍历成功后才落盘。
-	// 注意：仅在扫描成功时 Flush——若扫描失败，下方会 BatchClearPaths 清理数据库，
-	// 此时若仍执行 Flush 会把半成品缓冲写回，破坏清理。
-	writer := db.NewBatchWriter(s.env.DB, 0)
 	var scanErr error
 	defer func() {
-		if scanErr == nil {
-			writer.Flush()
+		if scanErr != nil {
+			// 扫描失败：清理已写入的半成品索引（直接落库，无需回滚缓冲）。
+			s.env.DB.BatchClearPaths([]string{s.env.Paths.SyncPath})
 		}
 	}()
 
@@ -89,7 +86,7 @@ func (s *SyncFile) initRoot(parentCtx context.Context) error {
 	//     大小值用其修改时间（视为「已同步过」），否则记 0（触发后续重新生成）。
 	scanErr = s.env.WalkCloud(ctx, s.env.Paths.SyncPath, s.env.Paths.SyncFid, core.Visitor{
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
-			writer.Put(path, fid, db.SizeDir)
+			s.env.DB.SaveRecord(path, fid, db.SizeDir)
 			return true, nil
 		},
 		VisitFile: func(_ context.Context, path, fid, _ string, e core.Entry) error {
@@ -103,7 +100,7 @@ func (s *SyncFile) initRoot(parentCtx context.Context) error {
 					}
 				}
 			}
-			writer.Put(path, fid, saveSize)
+			s.env.DB.SaveRecord(path, fid, saveSize)
 			return nil
 		},
 	}, stopWithErr)
@@ -114,7 +111,6 @@ func (s *SyncFile) initRoot(parentCtx context.Context) error {
 	if err := context.Cause(ctx); err != nil {
 		if scanStarted {
 			slog.Error("云端扫描被中止，正在清理数据库", "错误信息", err)
-			s.env.DB.BatchClearPaths([]string{s.env.Paths.SyncPath})
 		}
 		return err
 	}

@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"go.etcd.io/bbolt"
 )
@@ -31,15 +30,19 @@ type DB struct {
 	mu         sync.Mutex // 保护 Compact 期间的 boltDB 替换
 }
 
+// Child 是某目录直属子项的一条快照。
+type Child struct {
+	Name string
+	Fid  string
+	Size int64
+}
+
 // New 初始化数据库实例。
 func New(path string) (*DB, error) {
 	db, err := bbolt.Open(path, 0600, nil)
 	if err != nil {
 		return nil, fmt.Errorf("[数据库] 开启失败: %w", err)
 	}
-
-	// 优化性能设置
-	db.MaxBatchDelay = 100 * time.Millisecond
 
 	instance := &DB{
 		boltDB:     db,
@@ -114,81 +117,49 @@ func (d *DB) GetFid(localPath string) (fid string) {
 	return
 }
 
-// SaveRecord 使用 Batch 批量保存记录
+// SaveRecord 写入单条记录（bbolt 原生短事务，无需额外 Batch 缓冲）。
 func (d *DB) SaveRecord(localPath string, fid string, size int64) {
 	val := encodeValue(fid, size)
-	d.boltDB.Batch(func(tx *bbolt.Tx) error {
+	d.boltDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		return b.Put([]byte(localPath), val)
 	})
 }
 
-// BatchClearPaths 批量删除传入路径（含目录的全部子条目）。
-// 实现拆为“只读收集所有待删 key”与“分块批量删除”两步：
-//   - 收集阶段用只读事务，避免在单个写事务中长时间持锁；
-//   - 删除阶段按 deleteChunkSize 分块，每块一个事务，控制单事务大小。
+// BatchClearPaths 删除传入路径（含目录的全部子条目）。
+// 一次性在单个写事务内用游标遍历并删除，不另做「收集+分块」——
+// bbolt 自身对短时并发写入/删除已优化良好，且写事务对读事务（MVCC 快照）无阻塞，
+// 旧的分块逻辑只是多余复杂度。
 func (d *DB) BatchClearPaths(fPaths []string) {
 	if len(fPaths) == 0 {
 		return
 	}
 
-	// 第一步：收集所有待删 key（自身 + 目录子项）
-	var keys [][]byte
-	seen := make(map[string]struct{}, len(fPaths))
-	err := d.boltDB.View(func(tx *bbolt.Tx) error {
+	err := d.boltDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		if b == nil {
 			return nil
 		}
-		c := b.Cursor()
 		for _, fPath := range fPaths {
 			selfBytes := []byte(fPath)
 			childPrefix := make([]byte, len(selfBytes)+1)
 			copy(childPrefix, selfBytes)
 			childPrefix[len(selfBytes)] = '/'
 
-			// 从 selfBytes 起扫描，覆盖自身与所有子项
+			c := b.Cursor()
 			for k, _ := c.Seek(selfBytes); k != nil; k, _ = c.Next() {
 				if !bytes.Equal(k, selfBytes) && !bytes.HasPrefix(k, childPrefix) {
 					break
 				}
-				ks := string(k)
-				if _, dup := seen[ks]; dup {
-					continue
+				if err := c.Delete(); err != nil {
+					return err
 				}
-				seen[ks] = struct{}{}
-				keyCopy := make([]byte, len(k))
-				copy(keyCopy, k)
-				keys = append(keys, keyCopy)
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		slog.Error("[数据库] 批量清理(收集)失败", "数量", len(fPaths), "错误信息", err)
-		return
-	}
-
-	// 第二步：分块删除
-	const deleteChunkSize = 2000
-	for start := 0; start < len(keys); start += deleteChunkSize {
-		end := min(start+deleteChunkSize, len(keys))
-		chunk := keys[start:end]
-		if err := d.boltDB.Update(func(tx *bbolt.Tx) error {
-			b := tx.Bucket(d.bucketName)
-			if b == nil {
-				return nil
-			}
-			for _, k := range chunk {
-				if err := b.Delete(k); err != nil {
-					return err
-				}
-			}
-			return nil
-		}); err != nil {
-			slog.Error("[数据库] 批量清理(删除)失败", "数量", len(chunk), "错误信息", err)
-			return
-		}
+		slog.Error("[数据库] 批量清理失败", "数量", len(fPaths), "错误信息", err)
 	}
 }
 
@@ -212,11 +183,14 @@ func (d *DB) CountRecursive(path string) int64 {
 	return count
 }
 
-// ScanChildren 遍历 workPath 的直属子条目，对每个子条目回调 (name, fid, size)。
+// ScanChildren 读取 workPath 的直属子条目，在「单个短读事务」内一次性收集后返回快照。
+// 事务在返回前已关闭，调用方据此做对比/递归/写库等重活，绝不在读事务内做事——
+// 否则读事务会被「持锁贯穿整棵子树递归」，运行期其它 goroutine 的 SaveRecord（写锁）
+// 一旦等待，Go 的 sync.RWMutex 会让后续嵌套 RLock 阻塞以避免写饥饿 → 永久卡死。
 // 通过 0xFF 跳转直接跳过深层子目录，避免无谓遍历。
-func (d *DB) ScanChildren(ctx context.Context, workPath string, handler func(name string, fid string, size int64)) {
+func (d *DB) ScanChildren(ctx context.Context, workPath string) []Child {
 	if err := ctx.Err(); err != nil {
-		return
+		return nil
 	}
 	prefix := workPath
 	if !strings.HasSuffix(prefix, "/") {
@@ -224,6 +198,7 @@ func (d *DB) ScanChildren(ctx context.Context, workPath string, handler func(nam
 	}
 	prefixBytes := []byte(prefix)
 
+	var out []Child
 	d.boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		if b == nil {
@@ -255,12 +230,13 @@ func (d *DB) ScanChildren(ctx context.Context, workPath string, handler func(nam
 			}
 
 			fid, size, _ := decodeValue(v)
-			handler(string(relBytes), fid, size)
+			out = append(out, Child{Name: string(relBytes), Fid: fid, Size: size})
 
 			k, v = c.Next()
 		}
 		return nil
 	})
+	return out
 }
 
 // ListStrmFids 递归返回 dirPath 目录下所有 .strm 文件对应的云端视频 FID。
@@ -360,7 +336,6 @@ func reopen(path string) (*bbolt.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.MaxBatchDelay = 100 * time.Millisecond
 	return db, nil
 }
 
