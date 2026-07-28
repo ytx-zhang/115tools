@@ -31,6 +31,14 @@ func CheckVideo(ext string, size int64) bool {
 	return slices.Contains(VideoExts, strings.ToLower(ext))
 }
 
+// IsVideoExt 仅按扩展名判断是否为视频（不关心体积），供「体积未达阈值的视频文件」识别使用。
+// 与 CheckVideo 的区别：CheckVideo 额外要求体积不小于 10MB 才算视频；
+// 而本函数只要扩展名在白名单内即返回 true，用于捕获「扩展名是视频、但体积过小（如未下完的片段）」
+// 这类需特殊处理的文件。调用方：syncFile/local 的 doUpload。
+func IsVideoExt(ext string) bool {
+	return slices.Contains(VideoExts, strings.ToLower(ext))
+}
+
 // ExtractPickcode 从 .strm 文件内容中解析出 pickcode 与 fid。
 // .strm 内容形如 http://host/download?pickcode=xxx&fid=yyy。
 // 文件不存在或内容不是合法 URL 时返回两个空串，调用方按「无 pickcode」处理。

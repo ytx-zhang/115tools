@@ -107,14 +107,16 @@ func (l *Local) doUpload(ctx context.Context, cid, fPath string) {
 		return
 	}
 
-	// 同名 .strm 已存在、但本文件未达视频阈值（不会被当作视频替换）：
+	// 同名 .strm 已存在、且本文件是「视频扩展名但体积未达阈值」的片段（如未下完的小 mp4）：
 	// 按需求「不处理、不上传」，仅告警（扫描到该目录时提示一次），避免云端 strm 与同名文件并存。
+	// 注意：只拦截视频扩展名；.nfo/.jpg/.srt 等本就该正常上传的伴随文件不在此列，照常上传。
 	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
+	isVideoExt := core.IsVideoExt(filepath.Ext(fPath))
 	isVideo := core.CheckVideo(filepath.Ext(fPath), fileInfo.Size())
-	if !isStrm && !isVideo {
+	if !isStrm && isVideoExt && !isVideo {
 		strmKey := strings.TrimSuffix(fPath, filepath.Ext(fPath)) + ".strm"
 		if l.env.DB.GetFid(strmKey) != "" {
-			slog.Warn("同名 strm 已存在但该文件未达视频阈值，跳过上传（不会替换 strm 指向的视频）",
+			slog.Warn("同名 strm 已存在但该视频文件未达体积阈值，跳过上传（不会替换 strm 指向的视频）",
 				"文件", fPath, "strm", strmKey)
 			return
 		}
