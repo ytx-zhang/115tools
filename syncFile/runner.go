@@ -7,10 +7,13 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // Runner 管理 SyncFile 实例的生命周期，支持配置变更后的「热重载」：
-// 取消旧实例的 ctx → 等待其全部协程退出 → 用最新配置重建实例。
+// 取消旧实例的 ctx（监听器/上传 worker/定时任务/云端同步随之退出）→ 带超时
+// 有限等待旧实例收尾 → 用最新配置重建实例。旧实例残留协程会随 ctx 取消自行退出，
+// 最终收尾由该实例 New() 时登记的 appWg.Go(r.wg.Wait) 兜底（进程退出前等完即可）。
 //
 // 【为什么要它】路径类配置（同步目录/strm 目录等）修改后必须重建 SyncFile
 // 才能生效；有了 Runner，用户在面板改配置后无需重启程序。
@@ -105,14 +108,33 @@ func (r *Runner) Reload() {
 	defer r.reloadMu.Unlock()
 
 	r.mu.Lock()
+	oldWg := r.wg // 旧实例的私有等待组，下方带超时等待其收尾
 	if r.cancel != nil {
 		slog.Info("[RELOAD] 停止旧同步器实例...")
 		r.cur = nil
 		r.notifyStats() // 通知前端进入「未就绪」状态
-		r.cancel()
-		r.wg.Wait() // 等监听器/上传 worker/定时任务全部退出
+		r.cancel()      // 取消旧实例 ctx：监听器/上传 worker/定时任务/云端同步全部随之退出
 	}
 	r.mu.Unlock() // 见 startLocked 说明：下方 New() 很慢，先把读保护锁让出
+
+	// 不在此无限阻塞等待旧实例收尾（原 r.wg.Wait()）：旧实例所有协程都随上面的
+	// ctx 取消而退出，其最终收尾由该实例 New() 时登记的 appWg.Go(r.wg.Wait) 兜底
+	// （进程退出前等完即可）。若改为阻塞等待，一旦旧实例有协程未及时退出
+	// （例如 115 接口慢、或未来某路径未尊重 ctx 取消，典型如「还有上传任务在跑」），
+	// 热重载就会永久卡在「重建中」——前端一直显示「配置热重载中，同步器正在重建」，
+	// 且因其运行在后台 goroutine，连日志都看不出卡在哪。
+	// 故改用「带超时的有限等待」：给旧实例 3s 收尾窗口，超时即放手重建；残留协程
+	// 随后会在 ctx 取消下自行退出。新建实例与残留旧协程并发无害——二者共用同一
+	// boltDB，bbolt 已串行化读写，不存在竞态损坏。
+	if oldWg != nil {
+		done := make(chan struct{})
+		go func() { oldWg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			slog.Warn("[RELOAD] 旧实例未在 3s 内退出，强制重建（残留协程将随 ctx 取消自行退出）")
+		}
+	}
 
 	if err := r.startLocked(); err != nil {
 		slog.Error("[RELOAD] 同步器重建失败，请检查新配置", "错误信息", err)
