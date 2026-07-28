@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -124,7 +125,11 @@ func (d *Open115) doUpload(ctx context.Context, src uploadSource, cid, signKey, 
 		fid := getMapString(cbResp, "data", "file_id")
 		pc := getMapString(cbResp, "data", "pick_code")
 		if fid == "" || pc == "" {
-			return nil, fmt.Errorf("OSS上传返回信息缺失")
+			// OSS 回调 115 成功后应回 data.file_id / data.pick_code；
+			// 缺失时把整个 cbResp 打出来，便于定位是 115 返回结构变化、
+			// 还是回调失败（常带 code/message 说明原因）。
+			raw, _ := json.Marshal(cbResp)
+			return nil, fmt.Errorf("OSS上传返回信息缺失: cbResp=%s", string(raw))
 		}
 		return &UploadFileInfo{Fid: fid, PickCode: pc}, nil
 
