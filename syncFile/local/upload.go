@@ -60,8 +60,10 @@ func (l *Local) uploadOneFile(ctx context.Context, cid, fPath string) {
 // 返回 true 让上层跳过，避免重复上传产生云端副本。
 //
 // 判定键与签名刻意与 upFileTask / upStrmTask 的落库保持一致：
-//   - 视频：落库键为「同名 .strm」、签名是时间戳版本号，存在即视为已完成（不比对时间戳）；
-//   - .strm 文件：落库键即自身、签名为时间戳，同样存在即视为已完成；
+//   - 视频：落库键为「同名 .strm」、签名是时间戳版本号。注意：本地视频与同名 .strm
+//     共存视为「替换旧视频」的意图，故不再因同名 .strm 存在而判定已完成，而是放行，
+//     由 upFileTask 把云端旧视频移入回收目录后重新上传；
+//   - .strm 文件：落库键即自身、签名为时间戳，存在即视为已完成；
 //   - 其余普通文件：落库键即自身、签名为字节数，大小一致才视为已完成。
 func (l *Local) alreadyUploaded(fPath string, fileInfo os.FileInfo) bool {
 	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
@@ -74,9 +76,14 @@ func (l *Local) alreadyUploaded(fPath string, fileInfo os.FileInfo) bool {
 	if dbFid == "" {
 		return false
 	}
-	// 视频 / .strm 以时间戳为签名，无法与本地字节大小比较，仅判存在即可
-	if isStrm || core.CheckVideo(filepath.Ext(fPath), fileInfo.Size()) {
-		return true
+	if isStrm {
+		return true // .strm 文件：存在即视为已完成
+	}
+	// 视频文件：本地视频与同名 .strm 共存视为「需要替换/覆盖旧视频」，
+	// 不再因 .strm 已存在而跳过，交由 upFileTask 把云端旧视频移入回收目录后重新上传。
+	// 并发重复任务由 doUpload 的 inFlight 去重。
+	if core.CheckVideo(filepath.Ext(fPath), fileInfo.Size()) {
+		return false
 	}
 	return fileInfo.Size() == dbSize
 }
@@ -100,10 +107,30 @@ func (l *Local) doUpload(ctx context.Context, cid, fPath string) {
 		return
 	}
 
+	// 同名 .strm 已存在、但本文件未达视频阈值（不会被当作视频替换）：
+	// 按需求「不处理、不上传」，仅告警（扫描到该目录时提示一次），避免云端 strm 与同名文件并存。
+	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
+	isVideo := core.CheckVideo(filepath.Ext(fPath), fileInfo.Size())
+	if !isStrm && !isVideo {
+		strmKey := strings.TrimSuffix(fPath, filepath.Ext(fPath)) + ".strm"
+		if l.env.DB.GetFid(strmKey) != "" {
+			slog.Warn("同名 strm 已存在但该文件未达视频阈值，跳过上传（不会替换 strm 指向的视频）",
+				"文件", fPath, "strm", strmKey)
+			return
+		}
+	}
+
+	// 并发去重：替换场景下同名视频不再因 .strm 已存在而跳过，
+	// 故需靠 inFlight 防止同一路径的重复任务被多个 worker 同时上传产生云端副本。
+	if _, loaded := l.inFlight.LoadOrStore(fPath, struct{}{}); loaded {
+		slog.Debug("文件正在上传，跳过重复任务", "文件", fPath)
+		return
+	}
+	defer l.inFlight.Delete(fPath)
+
 	// 计时仅覆盖真正上传（网络+落库），不含本地查重/Stat 的极快开销。
 	// doUpload 由上传 worker 同步执行（阻塞到上传完成），此处耗时即真实单文件上传耗时。
 	upStart := time.Now()
-	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
 	if isStrm {
 		err = l.upStrmTask(ctx, cid, fPath)
 	} else {

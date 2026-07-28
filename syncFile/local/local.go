@@ -16,7 +16,7 @@
 // 【极简事件处理】
 // 监听器完全「不懂」业务逻辑：无视事件类型（连 rename/move 也走 syncDir），
 // 只记父目录。每个目录只处理自身直接子项（syncDir 非递归），子目录各自会由
-// 自己的事件触发；云端还不存在的父目录由 EnsureCloudDir 从根逐级补建缺失祖先后再同步。
+// 自己的事件触发；云端还不存在的父目录由 AddCloudFolder 从根逐级补建缺失祖先后再同步。
 //
 // 【与其他模块的边界】
 //   - 本模块只认「本地 → 云端」方向；「云端 → 本地」是 cloud 模块的事；
@@ -36,6 +36,11 @@ type Local struct {
 
 	// ── 上传任务队列（upload.go）──
 	uploadJobs chan uploadJob // 上传任务队列，常驻 worker 消费
+
+	// inFlight 并发上传去重：key=本地路径，value=struct{}，上传期间占位。
+	// 替换场景下同名视频不再因 .strm 已存在而跳过，靠它防止同一路径的重复任务
+	// 被多个 worker 同时上传产生云端副本。sync.Map 零值可用，无需在 New 中初始化。
+	inFlight sync.Map
 }
 
 // New 创建本地同步模块实例（仅初始化状态，不启动协程）。
