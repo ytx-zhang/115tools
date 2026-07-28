@@ -31,11 +31,12 @@ type Runner struct {
 	// 新实例的进度统计器仍向同一个通道发信号，web 层 SSE 无需感知实例替换。
 	statsCh chan struct{}
 
-	mu     sync.Mutex
-	cur    *SyncFile          // 当前实例（热重载进行中为 nil）
-	ctx    context.Context    // 当前实例的生命周期 ctx
-	cancel context.CancelFunc // 取消当前实例
-	wg     *sync.WaitGroup    // 当前实例的私有等待组（热重载时等它清空）
+	mu       sync.Mutex  // 保护 cur/ctx/cancel/wg 的读访问（Current/TaskCtx/StatusSnapshot）
+	reloadMu sync.Mutex  // 序列化热重载本身，避免并发 Reload 重复重建实例
+	cur      *SyncFile          // 当前实例（热重载进行中为 nil）
+	ctx      context.Context    // 当前实例的生命周期 ctx
+	cancel   context.CancelFunc // 取消当前实例
+	wg       *sync.WaitGroup    // 当前实例的私有等待组（热重载时等它清空）
 }
 
 // NewRunner 创建 Runner（此时尚未启动实例，需再调用 Start）。
@@ -67,15 +68,20 @@ func (r *Runner) StatsNotify() <-chan struct{} {
 
 // Start 首次启动同步器实例。
 func (r *Runner) Start() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	return r.startLocked()
 }
 
-// startLocked 创建新实例；调用方必须持有 r.mu。
+// startLocked 创建新实例。
+// ⚠️ 关键：New() 内含「云端全量扫描建库 + 本地首次全量扫描」，对大媒体库可能持续数分钟。
+// 期间必须释放 mu，否则所有依赖 Current()/TaskCtx() 的接口（保存配置、状态 SSE、任务启停）
+// 都会被同一把锁阻塞、表现为「点保存没反应 / 请求一直待处理」。释放后 Current() 短暂返回
+// nil，前端据 config_ready 显示「重载中」即可，不影响其它接口响应。
+// 自身管理 mu（调用方不要持锁）。
 func (r *Runner) startLocked() error {
+	r.mu.Lock()
 	ctx, cancel := context.WithCancel(r.appCtx)
 	wg := &sync.WaitGroup{}
+	r.mu.Unlock() // 见上方说明：New() 很慢，先让出读保护锁
 
 	s, err := New(ctx, r.cfg, r.api, r.db, wg, r.statsCh)
 	if err != nil {
@@ -84,7 +90,9 @@ func (r *Runner) startLocked() error {
 		return err
 	}
 
+	r.mu.Lock()
 	r.cur, r.ctx, r.cancel, r.wg = s, ctx, cancel, wg
+	r.mu.Unlock()
 	// 将实例协程纳入全局等待，确保进程退出前收尾完成
 	r.appWg.Go(wg.Wait)
 	return nil
@@ -93,9 +101,10 @@ func (r *Runner) startLocked() error {
 // Reload 热重载：停止旧实例并用最新配置重建，使路径类配置实时生效。
 // 重载期间 Current() 返回 nil，web 层据此提示「未就绪」。
 func (r *Runner) Reload() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
 
+	r.mu.Lock()
 	if r.cancel != nil {
 		slog.Info("[RELOAD] 停止旧同步器实例...")
 		r.cur = nil
@@ -103,6 +112,7 @@ func (r *Runner) Reload() {
 		r.cancel()
 		r.wg.Wait() // 等监听器/上传 worker/定时任务全部退出
 	}
+	r.mu.Unlock() // 见 startLocked 说明：下方 New() 很慢，先把读保护锁让出
 
 	if err := r.startLocked(); err != nil {
 		slog.Error("[RELOAD] 同步器重建失败，请检查新配置", "错误信息", err)

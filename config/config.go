@@ -68,9 +68,11 @@ var DefaultVideoExts = []string{
 // DefaultUploadExclude 上传排除名单内置默认（下载器/系统临时文件后缀）。
 // 与 syncFile/core.DefaultUploadExclude 保持一致——配置未显式设置 upload_exclude 时使用它，
 // 运行期也可由配置覆盖（见 settings.Update / core.NewEnv）。
+// 注意：名单统一小写——运行期匹配时文件名会被 ToLower 后比较（见 core.IsUploadExcluded），
+// 故默认也用小写，保证「恢复默认值」回填与已清洗（小写）的生效值一致，前端不再出现「变大写」。
 var DefaultUploadExclude = []string{
 	".part", ".partial", ".aria2", ".crdownload", ".download",
-	".tmp", ".!qB", ".DS_Store", "Thumbs.db",
+	".tmp", ".!qb", ".ds_store", "thumbs.db",
 }
 
 // AuthConfig 前端登录的账号密码；密码仅以 bcrypt 哈希存储。

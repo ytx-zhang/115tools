@@ -16,16 +16,20 @@ import (
 // Thumbs.db 这类无扩展名的系统垃圾文件）或「扩展名命中」（如 .part、.crdownload）
 // 任一成立，即跳过该文件——不上传，同时让云端已存在的同名项被判定为「本地已删」
 // 而联动清理。
+// 注意：名单统一小写——运行期匹配时文件名会被 ToLower 后比较（见 IsUploadExcluded），
+// 故默认也用小写，保证「恢复默认值」回填与已清洗（小写）的生效值一致，前端不再出现「变大写」。
+// 这类无扩展名系统文件（.ds_store / thumbs.db）虽磁盘上常为大写，但匹配是大小写无关（ToLower），
+// 且 normalizeUploadExclude 同样会小写化，所以用小写定义不影响实际命中。
 var DefaultUploadExclude = []string{
-	".part",       // 通用分片下载（aria2 / wget / 多数下载器）
-	".partial",    // 部分下载（Transmission / Deluge / 部分浏览器）
-	".aria2",      // aria2 控制文件（与无后缀的未下完本体成对出现）
+	".part",     // 通用分片下载（aria2 / wget / 多数下载器）
+	".partial",  // 部分下载（Transmission / Deluge / 部分浏览器）
+	".aria2",    // aria2 控制文件（与无后缀的未下完本体成对出现）
 	".crdownload", // Chrome 下载中
-	".download",   // Firefox / Edge 下载中
-	".tmp",        // 通用临时文件
-	".!qB",        // qBittorrent 下载中（movie.mkv.!qB 的扩展名即 .!qB）
-	".DS_Store",   // macOS 系统垃圾文件（无扩展名，需整名命中）
-	"Thumbs.db",   // Windows 系统缩略图缓存（无扩展名，需整名命中）
+	".download", // Firefox / Edge 下载中
+	".tmp",      // 通用临时文件
+	".!qb",      // qBittorrent 下载中（movie.mkv.!qB 的扩展名即 .!qb）
+	".ds_store", // macOS 系统垃圾文件（无扩展名，需整名命中）
+	"thumbs.db", // Windows 系统缩略图缓存（无扩展名，需整名命中）
 }
 
 // uploadExclude 当前生效的上传排除名单（小写、已去重），由 SetUploadExclude 原子替换。
@@ -58,8 +62,8 @@ func IsUploadExcluded(name string) bool {
 
 // normalizeUploadExclude 清洗上传排除名单：去空格、小写、去空、去重；
 // 全空时回退内置默认（保证运行期不会因空白名单把一切临时文件都上传）。
-// 注意：不强制补前导点——否则 .DS_Store 会被加成 .ds_store 而整名匹配失败，
-// 这类无扩展名系统文件需原样保留。
+// 注意：不强制补前导点（如 .DS_Store 已是带点的整名）；匹配时文件名会先 ToLower，
+// 与已小写化的名单比较，故大小写无关，无需原样保留大小写。
 func normalizeUploadExclude(in []string) []string {
 	seen := make(map[string]struct{})
 	var out []string

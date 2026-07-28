@@ -113,7 +113,8 @@ func normalizeVideoExts(in []string) []string {
 // normalizeUploadExclude 清洗用户输入的上传排除名单：去空格、小写、去空、去重；
 // 全空时回退内置默认（保证运行期不会因空白名单把一切临时文件都上传）。
 // 与 syncFile/core.normalizeUploadExclude 逻辑一致（config 不能 import core，故刻意重复）。
-// 注意：不强制补前导点——否则 .DS_Store 会被加成 .ds_store 而整名匹配失败。
+// 注意：不强制补前导点（如 .DS_Store 已是带点的整名）。匹配时文件名会先 ToLower 再比，
+// 与已小写化的名单比较，大小写无关，无需原样保留大小写。
 func normalizeUploadExclude(in []string) []string {
 	seen := make(map[string]struct{})
 	var out []string
