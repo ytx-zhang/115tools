@@ -57,12 +57,17 @@ func New(env *core.Env) *Local {
 //  2. 文件监听器：监视主同步目录的实时变动，经按目录静默窗口后触发 syncDir；
 //  3. 上传 worker：从 uploadJobs 消费真正的上传任务。
 func (l *Local) Start(ctx context.Context, wg *sync.WaitGroup) {
-	// 必须先启动上传 worker 再跑同步：FullScan 是同步的，会把待上传文件投递进
+	// 必须先启动上传 worker 再跑同步：FullScan 会把待上传文件投递进
 	// uploadJobs（缓冲仅 64）；若 worker 尚未启动，待上传数超过缓冲时第 N 个投递会
-	// 永久阻塞在 channel 发送上，而 worker 要等 FullScan 返回后才由下方 wg.Go 创建，
-	// 形成「FullScan 等 worker 消费 ↔ worker 等 FullScan 返回」的死锁（进程卡死、无日志）。
-	// 故 startUploadWorkers 必须先于 FullScan 启动，watchPump 顺序无关。
+	// 永久阻塞在 channel 发送上（v0.8.2 死锁坑）。故 worker 必须先于扫描启动，
+	// watchPump 顺序无关。
 	wg.Go(func() { l.startUploadWorkers(ctx, uploadWorkerCount) })
 	wg.Go(func() { l.watchPump(ctx) })
-	l.FullScan(ctx) // 启动后先全量收敛一次，此时 worker 已在后台消费队列
+	// 首启全量扫描放到后台异步跑（与定时全量兜底路径一致）：FullScan 是同步的，
+	// 会把待上传文件逐个投递进 uploadJobs，待上传量大时须等待 worker 消费腾出缓冲
+	// 才继续。若放在 New() 同步调用链内，会阻塞 New() 返回，导致前端在 FullScan
+	// 把所有文件「投递完」之前一直 ready=false，显示「配置热重载中，同步器正在重建」
+	// （实际是首启、且上传正由 worker 在后台进行）——大媒体库/重启后大量待传时尤其明显。
+	// 改为后台 goroutine：New() 立即就绪，全量收敛在后台进行，不再卡前端。
+	wg.Go(func() { l.FullScan(ctx) })
 }

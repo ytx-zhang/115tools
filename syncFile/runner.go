@@ -75,11 +75,12 @@ func (r *Runner) Start() error {
 }
 
 // startLocked 创建新实例。
-// ⚠️ 关键：New() 内含「云端全量扫描建库 + 本地首次全量扫描」，对大媒体库可能持续数分钟。
-// 期间必须释放 mu，否则所有依赖 Current()/TaskCtx() 的接口（保存配置、状态 SSE、任务启停）
-// 都会被同一把锁阻塞、表现为「点保存没反应 / 请求一直待处理」。释放后 Current() 短暂返回
-// nil，前端据 config_ready 显示「重载中」即可，不影响其它接口响应。
-// 自身管理 mu（调用方不要持锁）。
+// ⚠️ 关键：New() 内含「云端全量扫描建库（initRoot）+ 启动本地同步模块」。其中本地首次
+// 全量扫描（FullScan）已改为后台异步（见 local.Start），不阻塞 New() 返回；但 initRoot
+// 的云端扫描对大媒体库仍可能持续数分钟，期间必须释放 mu，否则所有依赖 Current()/TaskCtx()
+// 的接口（保存配置、状态 SSE、任务启停）都会被同一把锁阻塞、表现为「点保存没反应 / 请求
+// 一直待处理」。释放后 Current() 短暂返回 nil，前端据 config_ready 显示「重载中」即可，
+// 不影响其它接口响应。自身管理 mu（调用方不要持锁）。
 func (r *Runner) startLocked() error {
 	r.mu.Lock()
 	ctx, cancel := context.WithCancel(r.appCtx)
