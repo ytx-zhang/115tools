@@ -2,31 +2,20 @@ package core
 
 import "time"
 
-// Paths 集中保存三个功能模块（local/cloud/strm）共同使用的路径配置与云端目录 FID。
-//
-// 字段分两类：
-//   - 配置类（SyncPath/TempPath/StrmPath/StrmUrl/Debounce）：来自 config.yaml，
-//     在 NewEnv 时写入，之后只读；
-//   - 初始化补全类（SyncFid/TempFid）：程序启动时由 bootstrap 阶段查询云端后
-//     回填，之后只读。注意两者的持久化口径不同（见字段注释）：SyncFid 的
-//     目录树索引落在数据库、仅 FID 本身每次启动重新向云端核对；TempFid 完全
-//     不落库，仅存内存，避免配置改目录/云端手动重建后用到陈旧 FID。
-//
-// 因为存在「先构造、后回填 FID」的过程，所以 Paths 以指针形式存放在 Env 中，
-// 各模块持有的是同一份，bootstrap 回填的结果对所有模块立即可见。
+// Paths 集中保存路径配置与云端目录 FID。以指针存放在 Env 中，
+// bootstrap 回填 FID 后对所有模块立即可见。
+// SyncFid 索引落库但每次启动重新核对；TempFid 仅存内存不落库。
 type Paths struct {
-	SyncPath string        // 主同步目录（本地与云端保持一致的根目录）
-	SyncFid  string        // 主同步目录对应的云端 FID（bootstrap 每轮启动读云端核对，目录树索引落库）
-	TempPath string        // 云端回收/临时目录（待清理的云端文件先移入这里，而非直接删除）
-	TempFid  string        // 回收目录的云端 FID（bootstrap 每轮启动读云端、仅存内存、不落库）
-	StrmPath string        // STRM 生成的起始目录（云端媒体库根目录）
-	StrmUrl  string        // STRM 文件内容中的 302 直链前缀（指向本程序的 /download 接口）
-	Debounce time.Duration // 本地同步去抖窗口：文件事件后等待该时长内无新事件才真正同步
+	SyncPath string
+	SyncFid  string
+	TempPath string
+	TempFid  string
+	StrmPath string
+	StrmUrl  string
+	Debounce time.Duration
 }
 
-// DebounceDuration 把配置里的秒数转换为去抖窗口时长。
-// 配置为 0 或负数时使用默认值 5 秒；超过 10 秒强制钳到 10 秒，
-// 防止窗口过长导致本地变更迟迟不生效。
+// DebounceDuration 把秒数转为去抖窗口（0→默认5s，>10s钳到10s）。
 func DebounceDuration(secs int) time.Duration {
 	const (
 		def  = 5 * time.Second

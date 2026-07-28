@@ -12,22 +12,9 @@ import (
 	"github.com/sgtdi/fswatcher"
 )
 
-// watchPump 是文件监听器主循环（常驻协程，ctx 取消时退出）。
-//
-// 监听器完全「不懂」业务逻辑，只把原始事件对应的「父目录」登记进待处理表，
-// 按目录各自独立做静默窗口（目录自身 Debounce 秒内无新事件才处理），再对
-// 每个待处理目录跑 syncDir。每个目录只处理自身直接子项（syncDir 非递归），
-// 子目录交给它们各自的事件，避免同一棵子树被多层目录事件重复扫描。
-//
-// 若某目录在云端/数据库均无记录（fid==""），先用 AddCloudFolder 从云端根逐级确认、
-// 自动创建（含缺失的祖先目录）并写回 FID，再同步——即便只监控到最深层目录、其祖先
-// 未被事件触发，也不会漏传。
-//
-// 事件类型完全无视（连 rename 也走 syncDir）——换取零类型判断，代价是改名时
-// 旧视频进 TempFid、新文件重传（已确认接受）。
-//
-// 按目录静默（非全局单计时器）的好处：目录互不干扰；同时保留「整批消停才扫」，
-// 绝不扫半成品（大文件被原地拷贝时，直到它真正静默才上传）。
+// watchPump 是文件监听器主循环（常驻协程，ctx 取消退出）。
+// 无视事件类型，只记父目录 → 按目录静默窗口去抖 → syncDir 非递归扫描直属子项。
+// 云端无记录的目录先用 AddCloudFolder 补建祖先。子目录各自独立触发，避免重复扫描。
 func (l *Local) watchPump(ctx context.Context) {
 	watcher, err := fswatcher.New(
 		fswatcher.WithPath(l.env.Paths.SyncPath),

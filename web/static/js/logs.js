@@ -1,20 +1,12 @@
-// logs.js —— 统一日志流：连接 /api/logs SSE，渲染日志行，支持级别过滤/暂停滚动/清空。
-//
-// 运行日志与错误日志已合并为这一条管道：服务端 slog 输出的所有级别日志
-// （含失败明细的 ERROR 级）都经 logstream 推送过来。
-// 「错误」过滤按钮即等价于旧的独立错误日志卡片，且附带时间戳与上下文。
+// logs.js —— 日志流：渲染、级别过滤/暂停滚动/清空。
 import { api } from './api.js';
+import { connectSSE } from './sse.js';
 
-let logsEs = null;     // 日志 SSE 连接
-let logsSeq = 0;       // 连接序号：每次 connectLogs 自增，重连回调比对以防误关已重建的新连接
-let logPaused = false; // 暂停自动滚动（用户上翻查看历史时勾选）
-let logFilter = 'all'; // 当前级别过滤器：all / info / warn / error
-
-// 各类型日志计数（纯前端，随日志流累加；清空/重连归零），仅作 chip 小标签展示。
-// debug 不属于任一可见级别，只计入「全部」。
+let closeLogs = null;   // 日志 SSE 的关闭函数
+let logPaused = false;  // 暂停自动滚动
+let logFilter = 'all';  // all / info / warn / error
 const counts = { all: 0, info: 0, warn: 0, error: 0 };
 
-// resetCounts 把所有计数与 chip 上的显示归零。
 function resetCounts() {
   counts.all = counts.info = counts.warn = counts.error = 0;
   document.querySelectorAll('#log-filter .chip').forEach(ch => {
@@ -23,13 +15,10 @@ function resetCounts() {
   });
 }
 
-// bumpCount 累加计数并刷新 chip 显示。
 function bumpCount(level) {
   counts.all++;
   const allEl = document.querySelector('#log-filter .chip[data-lv="all"] .chip-count');
   if (allEl) allEl.textContent = counts.all;
-  // counts 用小写键（info/warn/error）；renderLog 传来的 level 是大写，需统一小写比对。
-  // debug 不属任一可见级别，只计入「全部」。
   const key = String(level).toLowerCase();
   if (key in counts) {
     counts[key]++;
@@ -38,9 +27,20 @@ function bumpCount(level) {
   }
 }
 
-// initLogs 初始化日志卡片（进入仪表盘时由 dashboard.js 调用）。
 export function initLogs() {
-  connectLogs();
+  const box = document.getElementById('log-box');
+  if (box && !box.querySelector('.log-line')) {
+    box.innerHTML = '<div class="muted empty">正在连接日志流…</div>';
+  }
+  closeLogs = connectSSE('/api/logs', {
+    onMessage: renderLog,
+    onOpen: () => {
+      // 重连时服务端会重新回放近期日志，先清空旧内容避免重复。
+      const box = document.getElementById('log-box');
+      if (box) box.innerHTML = '<div class="muted empty">暂无日志</div>';
+      resetCounts();
+    },
+  });
 
   const pause = document.getElementById('log-pause');
   if (pause) pause.onchange = e => { logPaused = e.target.checked; };
@@ -48,7 +48,6 @@ export function initLogs() {
   const clear = document.getElementById('log-clear');
   if (clear) clear.onclick = clearLogs;
 
-  // 级别过滤按钮组：点击切换过滤器，并对已有日志行即时生效
   document.querySelectorAll('#log-filter .chip').forEach(btn => {
     btn.onclick = () => {
       logFilter = btn.dataset.lv;
@@ -59,47 +58,11 @@ export function initLogs() {
   });
 }
 
-// stopLogs 关闭日志流（离开仪表盘时由 dashboard.js 调用）。
 export function stopLogs() {
-  logsEs?.close();
-  logsEs = null;
+  closeLogs?.();
+  closeLogs = null;
 }
 
-// connectLogs 打开日志 SSE。连接时服务端会先回放近期日志，再持续推送新日志。
-function connectLogs() {
-  logsEs?.close();
-  const box = document.getElementById('log-box');
-  if (box && !box.querySelector('.log-line')) {
-    box.innerHTML = '<div class="muted empty">正在连接日志流…</div>';
-  }
-  logsEs = new EventSource('/api/logs');
-  const mySeq = ++logsSeq;
-  logsEs.onmessage = e => {
-    try { renderLog(JSON.parse(e.data)); } catch { /* 忽略损坏帧 */ }
-  };
-  logsEs.onopen = () => {
-    // 连接已建立：重连时服务端会重新回放近期日志，先清空旧内容避免重复。
-    // 注意服务端在回放前先发 ": connected" 注释帧，本 onopen 必在其 onmessage 之前触发，
-    // 因此此处清空不会误删即将到达的回放数据。计数同步归零，待回放重建。
-    const box = document.getElementById('log-box');
-    if (box) box.innerHTML = '<div class="muted empty">暂无日志</div>';
-    resetCounts();
-  };
-  logsEs.onerror = () => {
-    // 断线（含 401 / 服务重启）：若会话失效则退回登录页，否则 3 秒后重连
-    logsEs?.close();
-    logsEs = null;
-    setTimeout(async () => {
-      // 本连接已不是最新发起的，说明期间已重建过，放弃这次重连，避免误关新连接
-      if (mySeq !== logsSeq) return;
-      if (!document.getElementById('view-dashboard').hidden) {
-        try { await api('/api/me'); connectLogs(); } catch { /* 401 已由事件处理 */ }
-      }
-    }, 3000);
-  };
-}
-
-// clearLogs 清空：页面 DOM 与服务端内存缓冲一起清，计数同步归零。
 async function clearLogs() {
   const box = document.getElementById('log-box');
   if (box) box.innerHTML = '<div class="muted empty">暂无日志</div>';
@@ -107,12 +70,10 @@ async function clearLogs() {
   try { await api('/api/logs/clear', { method: 'POST' }); } catch { /* 忽略 */ }
 }
 
-// matchFilter 判断某级别的日志行在当前过滤器下是否应显示。
 function matchFilter(level) {
   return logFilter === 'all' || level === logFilter.toUpperCase();
 }
 
-// applyFilter 按当前过滤器刷新已有日志行的显隐（纯前端行为，即时生效）。
 function applyFilter() {
   const box = document.getElementById('log-box');
   if (!box) return;
@@ -121,8 +82,6 @@ function applyFilter() {
   });
 }
 
-// renderLog 把一条日志渲染为一行：时间 + 级别徽标 + 消息。
-// 行始终加入 DOM，仅按过滤器决定显隐——这样切换过滤器能找回之前收到的行。
 function renderLog(en) {
   const box = document.getElementById('log-box');
   if (!box) return;
@@ -132,7 +91,7 @@ function renderLog(en) {
   const level = String(en.level || 'INFO').toUpperCase();
   const line = document.createElement('div');
   line.className = 'log-line lv-' + level.toLowerCase();
-  line.dataset.level = level; // 供过滤器判定
+  line.dataset.level = level;
   line.hidden = !matchFilter(level);
 
   const t = document.createElement('span');
@@ -152,10 +111,7 @@ function renderLog(en) {
   line.append(t, lv, msg);
   box.appendChild(line);
 
-  bumpCount(level); // 累加对应级别计数（纯前端小标签展示）
-
-  // 控制 DOM 体积，最多保留 300 条
+  bumpCount(level);
   while (box.childElementCount > 300) box.removeChild(box.firstElementChild);
-
   if (!logPaused) box.scrollTop = box.scrollHeight;
 }

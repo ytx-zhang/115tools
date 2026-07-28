@@ -1,20 +1,6 @@
-// Package cloud 是「云端同步」模块：负责把 115 云端的文件同步到本地
-// （云端 → 本地 的下载方向）。
-//
-// 【做什么】
-// 从主同步目录（SyncPath）出发，用 core.WalkCloud 递归遍历整棵云端目录树：
-//   - 遇到本地没有的目录 → 在本地创建；
-//   - 遇到本地没有的文件 → 普通文件下载、视频生成 .strm 索引；
-//   - 遇到数据库记录与云端 FID 不一致的项 → 说明云端出现了重复/过期副本，删除冗余项。
-//
-// 【怎么触发】
-// 由 web 面板手动触发（POST /api/task/sync）、或每 12 小时的定时全量同步触发；
-// Start 自带防重入（同一时间只跑一轮），Stop 用于面板手动停止。
-//
-// 【与其他模块的边界】
-// 与 local 模块不加锁互斥，靠幂等避让：本模块「先写文件、紧接着写数据库」，
-// 待 local 模块处理对应文件事件时数据库记录已就位，判定为「无变化」，
-// 不会把刚下载的文件又反向上传回云端。
+// Package cloud 是云端同步模块（云端 → 本地下载方向）。
+// 用 WalkCloud 遍历云端目录树：新目录本地创建、新文件下载/生成 .strm、
+// 冗余项清理。Start 自带防重入，与 local 模块靠幂等避让不加锁。
 package cloud
 
 import (
@@ -36,18 +22,18 @@ type Cloud struct {
 }
 
 // New 创建云端同步模块实例。
-// notify 是状态变更通知通道，由 Runner 创建并跨热重载共享（见 core.TaskStats）。
-// 调用方：syncFile 根包的 New()。
-func New(env *core.Env, notify chan struct{}) *Cloud {
+// onChange 是状态变更回调，由 Runner 注入（见 core.TaskStats）：每次进度变化时
+// 回调组装完整状态快照并广播给 web 层。调用方：syncFile 根包的 New()。
+func New(env *core.Env, onChange func()) *Cloud {
 	return &Cloud{
 		env:   env,
-		stats: core.NewTaskStats(notify),
+		stats: core.NewTaskStats(onChange),
 	}
 }
 
-// StatusJSON 返回任务进度的 JSON 快照，供根包拼装面板状态。
-func (c *Cloud) StatusJSON() string {
-	return c.stats.GetStatus()
+// Status 返回当前进度快照。
+func (c *Cloud) Status() *core.TaskProgress {
+	return c.stats.Status()
 }
 
 // Start 启动一轮云端全量同步（在调用方的协程中运行，通常由 web 层异步触发）。

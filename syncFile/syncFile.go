@@ -1,26 +1,8 @@
-// Package syncFile 是文件同步功能的「根包/门面」：本身不含具体业务逻辑，
-// 负责把 core（共享设施）与 local（本地同步）、cloud（云端同步）、strm（STRM 生成）
-// 三个功能模块装配成一个整体，并对外提供统一的调用入口。
+// Package syncFile 是文件同步功能的根包（门面）：装配 core/local/cloud/strm
+// 四个子模块，对外提供统一调用入口。生命周期由 Runner 管理（热重载）。
 //
-// 【本包包含什么】
-//   - syncFile.go：SyncFile 组合器与 New() 装配流程、对 web 层的五个门面方法；
-//   - bootstrap.go：启动时的初始化编排（建库扫描 initRoot、回收目录 initTemp）；
-//   - cron.go：每 12 小时的定时全量同步；
-//   - runner.go：Runner 热重载生命周期管理（配置变更后重建 SyncFile 实例）。
-//
-// 【各模块干什么】（要看具体业务，请直接进入对应子包）
-//   - local/  本地 → 云端：监听本地文件变化，上传新文件、清理云端多余项；
-//   - cloud/  云端 → 本地：全量遍历云端，下载新文件、为视频生成 .strm；
-//   - strm/   为云端媒体库批量生成 .strm 索引文件；
-//   - core/   三个模块共用的零件（运行环境/云端遍历器/进度统计/文件存取）。
-//
-// 【整体生命周期】
-//  1. main 建 Runner → Runner.Start → New()：
-//     构造 core.Env → initRoot 扫描云端建数据库索引 → initTemp 获取回收目录 FID
-//     → 构造 local/cloud/strm 三模块 → 启动 local 后台协程与定时任务；
-//  2. 本地同步（常驻）：文件事件 → 静默窗口 → 判定 → 上传/清理；
-//  3. 云端同步 / STRM 生成（面板手动或定时触发）：经下方门面方法启动；
-//  4. 配置变更：Runner.Reload 取消旧实例全部协程，用新配置重建。
+// 本包文件：syncFile.go（组合器+New+初始化编排+定时任务+门面方法）、runner.go（生命周期）。
+// 子模块：local（本地→云端）/cloud（云端→本地）/strm（批量生成.strm）/core（共享零件）。
 package syncFile
 
 import (
@@ -32,35 +14,33 @@ import (
 	"115tools/syncFile/local"
 	"115tools/syncFile/strm"
 	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 )
 
 // SyncFile 是三个功能模块的组合器，也是 web 层唯一的调用入口（门面）。
-// 它自身不实现业务，只把调用委托给对应模块。
 type SyncFile struct {
-	env   *core.Env    // 共享运行环境（三个模块共同依赖的「工具箱」）
-	local *local.Local // 本地同步模块（常驻：监听器 + 队列 + 上传池）
-	cloud *cloud.Cloud // 云端同步模块（按需触发的一轮轮全量任务）
-	strm  *strm.Strm   // STRM 生成模块（按需触发的一轮轮全量任务）
+	env   *core.Env
+	local *local.Local
+	cloud *cloud.Cloud
+	strm  *strm.Strm
 }
 
-// New 装配并初始化整个同步系统。
-//
-// statsChanged 是状态变更通知通道，由 Runner 创建并跨热重载实例共享：
-// 注入给 cloud/strm 两个任务的进度统计器，使 web 层 SSE 在实例替换后仍能持续接收。
-// wg 是全局等待组：本函数启动的后台协程都挂在它上面，保证进程退出前收尾完成。
-func New(ctx context.Context, cfg *config.Config, api *drive.Open115, boltDB *db.DB, wg *sync.WaitGroup, statsChanged chan struct{}) (*SyncFile, error) {
+// New 装配并初始化整个同步系统。onChange 是状态变更回调（由 Runner 注入，
+// 内部组装完整状态快照并广播，详见 core.TaskStats）；wg 挂接所有后台协程保证优雅退出。
+func New(ctx context.Context, cfg *config.Config, api *drive.Open115, boltDB *db.DB, wg *sync.WaitGroup, onChange func()) (*SyncFile, error) {
 	env := core.NewEnv(cfg, api, boltDB)
 	s := &SyncFile{env: env}
 
-	// 第零步：把配置里写好的目录都建出来（本地镜像目录建本地、云端目录建云端），
-	// 避免「目录不存在」直接让后续初始化 / 同步起不来。必须在 initRoot 之前。
 	if err := s.ensureDirs(ctx); err != nil {
 		return nil, err
 	}
-
-	// 第一步：初始化编排（必须先于模块启动）。
-	// initRoot 需要扫描云端建立数据库索引，local 的扫描对比依赖这些记录。
+	// initRoot 扫描云端建库索引，local 的扫描对比依赖这些记录
 	if err := s.initRoot(ctx); err != nil {
 		return nil, err
 	}
@@ -68,38 +48,183 @@ func New(ctx context.Context, cfg *config.Config, api *drive.Open115, boltDB *db
 		return nil, err
 	}
 
-	// 第二步：构造三个功能模块（共享同一个 env 与通知通道）。
 	s.local = local.New(env)
-	s.cloud = cloud.New(env, statsChanged)
-	s.strm = strm.New(env, statsChanged)
+	s.cloud = cloud.New(env, onChange)
+	s.strm = strm.New(env, onChange)
 
-	// 第三步：启动常驻后台协程（本地同步全套 + 定时全量同步）。
 	s.local.Start(ctx, wg)
 	wg.Go(func() { s.cronSync(ctx) })
 	return s, nil
 }
 
-// ──── 以下是 web 层调用的五个门面方法（签名与历史版本保持一致）────
+// ──── 初始化编排 ────
 
-// StartCloudSync 启动一轮云端全量同步（委托 cloud 模块；重复触发自动忽略）。
+// initRoot 建立主同步目录的数据库索引（以云端 FID 为准）。
+// FID 一致则复用索引；不一致或首次运行则全量扫描。
+// 扫描被中止时清理半成品索引，保证下次完整扫描。
+func (s *SyncFile) initRoot(parentCtx context.Context) error {
+	if err := context.Cause(parentCtx); err != nil {
+		slog.Warn("[任务中止] 初始化同步", "错误信息", err)
+		return err
+	}
+	ctx, cancel := context.WithCancelCause(parentCtx)
+	defer cancel(nil)
+	stopWithErr := func(err error) { cancel(err) }
+
+	info, err := s.env.API.GetDirInfo(ctx, s.env.Paths.SyncPath)
+	if err != nil {
+		return err
+	}
+	cloudFid := info.Fid
+	s.env.Paths.SyncFid = cloudFid
+
+	dbFid := s.env.DB.GetFid(s.env.Paths.SyncPath)
+	if dbFid != "" && dbFid == cloudFid {
+		return nil // 复用索引
+	}
+
+	scanStarted := true
+	if dbFid == "" {
+		slog.Info("初次运行，开始初始化云端数据库...")
+	} else {
+		slog.Info("[初始化] 云端目录 FID 已变更，将清空旧索引并重新全量扫描",
+			"旧FID", dbFid, "新FID", cloudFid)
+		s.env.DB.BatchClearPaths([]string{s.env.Paths.SyncPath})
+	}
+	s.env.DB.SaveRecord(s.env.Paths.SyncPath, cloudFid, db.SizeDir)
+
+	var scanErr error
+	defer func() {
+		if scanErr != nil {
+			s.env.DB.BatchClearPaths([]string{s.env.Paths.SyncPath})
+		}
+	}()
+
+	// 遍历云端目录树建索引：视频记为 .strm 路径（本地已存在指向同 FID 的 .strm 时用 mtime）
+	scanErr = s.env.WalkCloud(ctx, s.env.Paths.SyncPath, s.env.Paths.SyncFid, core.Visitor{
+		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
+			s.env.DB.SaveRecord(path, fid, db.SizeDir)
+			return true, nil
+		},
+		VisitFile: func(_ context.Context, path, fid, _ string, e core.Entry) error {
+			saveSize := e.Size
+			if e.IsVideo {
+				path = strings.TrimSuffix(path, filepath.Ext(path)) + ".strm"
+				saveSize = 0
+				if info, err := os.Stat(path); err == nil {
+					if _, localFid := core.ExtractPickcode(path); localFid == fid {
+						saveSize = info.ModTime().Unix()
+					}
+				}
+			}
+			s.env.DB.SaveRecord(path, fid, saveSize)
+			return nil
+		},
+	}, stopWithErr)
+	if scanErr != nil {
+		cancel(scanErr)
+	}
+
+	if err := context.Cause(ctx); err != nil {
+		if scanStarted {
+			slog.Error("云端扫描被中止，正在清理数据库", "错误信息", err)
+		}
+		return err
+	}
+
+	slog.Info("[初始化] 云端数据库初始化完成")
+	return nil
+}
+
+// initTemp 查询云端回收目录 FID，只存内存（不落库，避免 temp_path 变更后用过期 FID）。
+func (s *SyncFile) initTemp(ctx context.Context) error {
+	if err := context.Cause(ctx); err != nil {
+		slog.Warn("[任务中止] Temp目录初始化", "错误信息", err)
+		return err
+	}
+	info, err := s.env.API.GetDirInfo(ctx, s.env.Paths.TempPath)
+	if err != nil {
+		return err
+	}
+	s.env.Paths.TempFid = info.Fid
+	return nil
+}
+
+// ensureDirs 建好配置里的目录：双栖路径(sync/strm)建本地+云端，temp 只建云端。
+func (s *SyncFile) ensureDirs(ctx context.Context) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	dirs := []struct {
+		path  string
+		local bool
+	}{
+		{s.env.Paths.SyncPath, true},
+		{s.env.Paths.StrmPath, true},
+		{s.env.Paths.TempPath, false},
+	}
+	for _, d := range dirs {
+		if strings.TrimSpace(d.path) == "" {
+			continue
+		}
+		if d.local {
+			if err := os.MkdirAll(d.path, 0755); err != nil {
+				return fmt.Errorf("[初始化] 创建本地目录失败 %s: %w", d.path, err)
+			}
+		}
+		if _, err := local.AddCloudFolder(ctx, s.env, "", d.path); err != nil {
+			return fmt.Errorf("[初始化] 创建云端目录失败 %s: %w", d.path, err)
+		}
+	}
+	return nil
+}
+
+// ──── 定时任务 ────
+
+// cronSync 定时全量同步：每 CronInterval 触发本地全量扫描+云端同步。
+// cron.enabled=false 时挂起空转，仅依赖文件监听。
+func (s *SyncFile) cronSync(ctx context.Context) {
+	if !s.env.CronEnabled {
+		slog.Info("[定时] 定时全量同步已关闭（配置 cron.enabled=false），仅依赖本地文件监听")
+		<-ctx.Done()
+		return
+	}
+	interval := s.env.CronInterval
+	slog.Info("[定时] 定时全量同步已启用", "间隔", interval.String())
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			slog.Debug("触发定时全量同步任务")
+			s.local.FullScan(ctx)
+			s.cloud.Start(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// ──── web 层调用的门面方法 ────
+
 func (s *SyncFile) StartCloudSync(ctx context.Context) { s.cloud.Start(ctx) }
+func (s *SyncFile) StopCloudSync()                     { s.cloud.Stop() }
+func (s *SyncFile) StartAddStrm(ctx context.Context)   { s.strm.Start(ctx) }
+func (s *SyncFile) StopAddStrm()                       { s.strm.Stop() }
 
-// StopCloudSync 停止正在运行的云端同步。
-func (s *SyncFile) StopCloudSync() { s.cloud.Stop() }
-
-// StartAddStrm 启动一轮 STRM 生成任务（委托 strm 模块；重复触发自动忽略）。
-func (s *SyncFile) StartAddStrm(ctx context.Context) { s.strm.Start(ctx) }
-
-// StopAddStrm 停止正在运行的 STRM 生成任务。
-func (s *SyncFile) StopAddStrm() { s.strm.Stop() }
-
-// LocalFullScan 触发一次本地同步目录的全量扫描（委托 local 模块）。
-// 用于保存上传排除规则后，立即把云端误传的临时文件联动清理掉，
-// 不必等重启或下一个定时全量周期。
+// LocalFullScan 触发一次本地全量扫描（用于保存上传排除规则后联动清理云端存量）。
 func (s *SyncFile) LocalFullScan(ctx context.Context) { s.local.FullScan(ctx) }
 
-// StatusSnapshot 返回云端同步/STRM 生成两个任务的进度 JSON，供 web 层 SSE 推送。
-// 收口内部状态读取，web 层无需（也无法）触碰模块内部字段。
-func (s *SyncFile) StatusSnapshot() (syncJSON, strmJSON string) {
-	return s.cloud.StatusJSON(), s.strm.StatusJSON()
+// StatusView 是推送给前端的完整状态快照。
+type StatusView struct {
+	Ready       bool               `json:"ready"`
+	ConfigReady bool               `json:"config_ready"`
+	Missing     []string           `json:"missing"`
+	Sync        *core.TaskProgress `json:"sync"`
+	Strm        *core.TaskProgress `json:"strm"`
+}
+
+// StatusSnapshot 返回当前进度快照（仅 Sync/Strm，Ready 等由 web 层填充）。
+func (s *SyncFile) StatusSnapshot() *StatusView {
+	return &StatusView{Sync: s.cloud.Status(), Strm: s.strm.Status()}
 }

@@ -3,6 +3,7 @@
 package logstream
 
 import (
+	"115tools/event"
 	"context"
 	"log/slog"
 	"os"
@@ -60,20 +61,16 @@ type Entry struct {
 	Attrs string    `json:"attrs,omitempty"`
 }
 
-// Hub 保存近期日志并向订阅者广播。
+// Hub 保存近期日志并向订阅者广播，底层基于 event.Stream 事件流。
 type Hub struct {
-	mu   sync.RWMutex
-	seq  int64
-	buf  []Entry
-	subs map[chan Entry]struct{}
+	mu     sync.Mutex // 保护 seq 自增（Entry.Seq 赋值）
+	seq    int64
+	stream *event.Stream[Entry]
 }
 
 // NewHub 创建空 Hub。
 func NewHub() *Hub {
-	return &Hub{
-		buf:  make([]Entry, 0, ringSize),
-		subs: make(map[chan Entry]struct{}),
-	}
+	return &Hub{stream: event.New[Entry](ringSize)}
 }
 
 // Write 追加一条日志并广播给订阅者。并发安全。
@@ -81,66 +78,30 @@ func (h *Hub) Write(e Entry) {
 	h.mu.Lock()
 	h.seq++
 	e.Seq = h.seq
-	h.buf = append(h.buf, e)
-	if len(h.buf) > ringSize {
-		// 丢弃最旧，始终保持固定上限
-		h.buf = h.buf[len(h.buf)-ringSize:]
-	}
-	subs := make([]chan Entry, 0, len(h.subs))
-	for ch := range h.subs {
-		subs = append(subs, ch)
-	}
 	h.mu.Unlock()
-
-	for _, ch := range subs {
-		select {
-		case ch <- e:
-		default: // 订阅者处理过慢，丢弃本次推送，不影响其他订阅者
-		}
-	}
+	h.stream.Publish(e)
 }
 
 // Recent 返回 Seq 大于 after 的日志（最多 limit 条），用于订阅时的历史回放。
 func (h *Hub) Recent(after int64, limit int) []Entry {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	out := make([]Entry, 0, len(h.buf))
-	for _, e := range h.buf {
-		if e.Seq > after {
-			out = append(out, e)
-		}
-	}
-	if limit > 0 && len(out) > limit {
-		out = out[len(out)-limit:]
-	}
-	return out
+	return h.stream.Recent(after, limit)
 }
+
+// Events 返回日志事件订阅通道（与 syncFile.Runner.Events() 同款手感）。
+func (h *Hub) Events() chan Entry { return h.stream.Subscribe(subBuf) }
 
 // Subscribe 返回一个接收新日志的通道，需配对调用 Unsubscribe。
-func (h *Hub) Subscribe() chan Entry {
-	ch := make(chan Entry, subBuf)
-	h.mu.Lock()
-	h.subs[ch] = struct{}{}
-	h.mu.Unlock()
-	return ch
-}
+func (h *Hub) Subscribe() chan Entry { return h.stream.Subscribe(subBuf) }
 
 // Unsubscribe 移除订阅者并关闭通道。
-func (h *Hub) Unsubscribe(ch chan Entry) {
-	h.mu.Lock()
-	if _, ok := h.subs[ch]; ok {
-		delete(h.subs, ch)
-		close(ch)
-	}
-	h.mu.Unlock()
-}
+func (h *Hub) Unsubscribe(ch chan Entry) { h.stream.Unsubscribe(ch) }
 
 // Clear 清空内存中的日志缓冲（不影响正在进行的实时推送）。
 func (h *Hub) Clear() {
 	h.mu.Lock()
-	h.buf = h.buf[:0]
 	h.seq = 0
 	h.mu.Unlock()
+	h.stream.Reset()
 }
 
 // captureHandler 包裹任意 slog.Handler：先交由原 handler 输出（如 stdout），

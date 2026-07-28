@@ -8,46 +8,27 @@ import (
 	"sync"
 )
 
-// Entry 是 WalkCloud 遍历到「文件」时向 VisitFile 回调传递的元数据。
-// （目录不走这个结构，目录由 EnterDir 以 path/fid 两个参数单独回调。）
+// Entry 是 VisitFile 回调收到的文件元数据。
 type Entry struct {
-	IsVideo  bool   // 是否为视频文件（云端同步/STRM 场景中视频要落地为 .strm 而非下载）
-	Size     int64  // 文件大小（字节）
-	PickCode string // 115 的 pickcode，换取下载直链的凭证
+	IsVideo  bool
+	Size     int64
+	PickCode string
 }
 
-// Visitor 定义云端遍历的回调（访问者模式）：
-// WalkCloud 负责所有「体力活」——递归、并发控制、API 配额、分页、取消检查；
-// 具体「拿到一个目录/文件后做什么」由使用方通过回调告诉它。
-// 三个使用场景：bootstrap 建库扫描、cloud 云端同步、strm STRM 生成。
+// Visitor 定义云端遍历回调。WalkCloud 负责递归/并发/配额/分页/取消，
+// 使用方通过回调决定「拿到目录/文件后做什么」。
 type Visitor struct {
-	// EnterDir 处理目录项，返回 true 表示继续递归它的子目录。
-	EnterDir func(ctx context.Context, path, fid string) (descend bool, err error)
-	// VisitFile 处理文件项。
+	EnterDir  func(ctx context.Context, path, fid string) (descend bool, err error)
 	VisitFile func(ctx context.Context, path, fid, pickCode string, e Entry) error
-	// SkipByCount 开启「计数跳过」优化：进入每个目录前，先用一次轻量的
-	// GetDirInfo 拿到云端递归子项总数，与本地数据库的记录数比对，
-	// 一致说明该目录没变化，直接跳过、不再逐页拉取文件列表。
-	// 大媒体库二次同步时提速非常明显。仅云端全量同步开启。
+	// SkipByCount：云端总数与 DB 记录数一致则跳过该目录（大库二次同步提速）。
 	SkipByCount bool
 }
 
-// WalkCloud 递归遍历云端目录树，对每一项调用 Visitor 中对应的回调。
-//
-// 【执行流程】
-//  1. （可选）计数跳过：云端总数与 DB 记录数一致 → 整目录跳过；
-//  2. 获取 API 并发配额（容量 5）→ 调用 GetFileList 拉取该目录全部子项 → 立即释放配额；
-//  3. 遍历子项：目录交给 EnterDir，需要递归时以独立协程继续 walk
-//     （协程总数受 dirSem 容量 64 限制，防止超宽目录树把协程数打爆）；
-//  4. 文件交给 VisitFile 处理。
-//
-// 【错误约定】
-//   - GetFileList 致命失败：调用 onFatal（可为 nil）并返回错误，停止该分支；
-//   - 回调内的文件级错误由使用方自行记录，不向上传播（一个文件失败不拖垮整次遍历）。
+// WalkCloud 递归遍历云端目录树。流程：计数跳过（可选）→ 获取配额拉取子项 →
+// 目录交 EnterDir（递归受 dirSem 限制 64 协程）→ 文件交 VisitFile。
+// GetFileList 致命失败调 onFatal 并返回错误；文件级错误不向上传播。
 func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor, onFatal func(error)) error {
-	// dirSem 限制目录递归协程的总并发度。
-	// 与 Env.Sem（限制 API 并发）是两个独立的闸：一个管协程数量，一个管 API 调用频率。
-	dirSem := make(chan struct{}, 64)
+	dirSem := make(chan struct{}, 64) // 限制目录递归协程并发（与 Env.Sem 独立）
 
 	var walk func(path, fid string) error
 	walk = func(path, fid string) error {

@@ -9,17 +9,11 @@ import (
 
 // 本文件是与具体业务流程无关的纯工具函数集合。
 
-// DefaultVideoExts 视频文件扩展名内置默认白名单（常见视频格式）。
-// 与 config.DefaultVideoExts 保持一致——运行期可由配置覆盖（见 NewEnv / web 保存配置）。
-var DefaultVideoExts = []string{
-	".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv", ".wmv",
-	".m4v", ".mpg", ".mpeg", ".webm", ".rmvb", ".3gp", ".vob",
-}
-
-// VideoExts 当前生效的视频扩展名白名单。初始值等于 DefaultVideoExts，
-// 运行期由配置覆盖（NewEnv 在每次启动/热重载时从 cfg 注入；web 保存配置后即时刷新）。
-// CheckVideo 直接读它判断文件是否视频。
-var VideoExts = append([]string(nil), DefaultVideoExts...)
+// VideoExts 当前生效的视频扩展名白名单。core 不内置默认——初始为空名单，
+// 由 NewEnv 在每次启动/热重载时从 cfg.VideoExts 注入（config 负责提供默认白名单，
+// 见 config.DefaultVideoExts）；web 保存配置后即时刷新。CheckVideo 直接读它判断文件是否视频。
+// 为空名单时 CheckVideo/IsVideoExt 恒为 false（不识别任何视频）。
+var VideoExts []string
 
 // CheckVideo 判断一个文件是否应按「视频」处理（视频上传后要替换为 .strm 索引）。
 // 两个条件：扩展名在白名单内，且体积不小于 10MB

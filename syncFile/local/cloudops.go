@@ -15,24 +15,11 @@ import (
 // moveChunk 单次 MoveFile 请求的视频 FID 上限，避免逗号串过长。
 const moveChunk = 500
 
-// 本文件是本地同步模块专用的两个云端写操作：建目录、批量清理。
-// 它们只服务于「本地 → 云端」方向的业务，因此放在本模块内而非 core。
+// 本文件实现本地同步专用的两个云端写操作：建目录、批量清理。
 
-// AddCloudFolder 确保云端目录存在并返回其 FID，是「本地 → 云端」唯一的建目录入口。
-// 纯云端操作，不写数据库——FID 准确性由各调用方 / 初始化阶段负责：
-//
-//   - 扫描 / 监控发现的新目录由调用方 SaveRecord 落库；
-//
-//   - 初始化阶段 sync_path/strm_path/temp_path 的 FID 由 initRoot/initTemp
-//     经 GetDirInfo 实时核对回填（SyncFid 落库、TempFid 仅内存），无需在此写库。
-//
-//   - currentCID 非空：已知父目录 FID，直接在其下创建 path 的末级目录（扫描热路径用，
-//     单步、不逐级 GetDirInfo，保持全量扫描 O(N)）；
-//
-//   - currentCID 为空("")：仅知道根相对路径，从根 "0" 逐级 GetDirInfo 确认、缺失再建
-//     （初始化 / watcher 补建祖先目录用）。注意：是否「已存在」完全依赖该层 GetDirInfo
-//     成功判定；若某层 GetDirInfo 因网络/权限瞬时失败会被误判为不存在而 AddFolder 出同名
-//     目录，故严格意义上非幂等。初始化阶段目录一般已存在或仅新建一次，风险极低。
+// AddCloudFolder 确保云端目录存在并返回 FID。纯云端操作，不写库（FID 由调用方落库）。
+// currentCID 非空时直接在其下建末级目录（扫描热路径，单步）；
+// 为空时从根 "0" 逐级 GetDirInfo 确认、缺失再建（初始化/watcher 补建祖先用）。
 func AddCloudFolder(ctx context.Context, env *core.Env, currentCID, path string) (string, error) {
 	if currentCID != "" {
 		fid, err := env.API.AddFolder(ctx, currentCID, filepath.Base(path))
@@ -65,15 +52,9 @@ func AddCloudFolder(ctx context.Context, env *core.Env, currentCID, path string)
 	return parentFid, nil
 }
 
-// cloudCleanTask 批量清理「本地已删除」路径对应的云端项，分三类处理：
-//   - .strm 文件 → 数据库里存的就是云端视频 FID，直接 MoveFile 到 TempFid，永久保留反悔余地；
-//   - 目录 → 先递归把目录下所有 .strm 对应的云端视频 MoveFile 到 TempFid，
-//     再 DeleteFile 让目录（连同其余普通文件/子目录壳）进 115 回收站；
-//   - 普通文件 → 直接 DeleteFile 进 115 回收站。
-//
-// 先把视频挪走再删目录，保证「有价值视频」落在自己管理的 TempFid（不随回收站过期），
-// 而目录外壳/strm 指针/普通文件自然进 115 回收站限期清理，TempFid 不会被目录树污染。
-// 最后统一清理数据库记录（BatchClearPaths 连子项一起删）。workPath 仅用于错误定位。
+// cloudCleanTask 批量清理本地已删路径对应的云端项：
+// .strm→MoveFile 到 TempFid（保留视频）；目录→先搬子 .strm 视频再 DeleteFile；
+// 普通文件→DeleteFile。最后 BatchClearPaths 清库。
 func (l *Local) cloudCleanTask(ctx context.Context, fPaths []string, workPath string) error {
 	if len(fPaths) == 0 {
 		return nil

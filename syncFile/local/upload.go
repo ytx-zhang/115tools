@@ -55,16 +55,8 @@ func (l *Local) uploadOneFile(ctx context.Context, cid, fPath string) {
 	}
 }
 
-// alreadyUploaded 在真正上传前查数据库：若本地文件对应的云端记录已存在且内容一致，
-// 说明此前已成功上传（嵌套目录重复事件、手动重试、事件迟到乱序导致的二次入队皆会触发），
-// 返回 true 让上层跳过，避免重复上传产生云端副本。
-//
-// 判定键与签名刻意与 upFileTask / upStrmTask 的落库保持一致：
-//   - 视频：落库键为「同名 .strm」、签名是时间戳版本号。注意：本地视频与同名 .strm
-//     共存视为「替换旧视频」的意图，故不再因同名 .strm 存在而判定已完成，而是放行，
-//     由 upFileTask 把云端旧视频移入回收目录后重新上传；
-//   - .strm 文件：落库键即自身、签名为时间戳，存在即视为已完成；
-//   - 其余普通文件：落库键即自身、签名为字节数，大小一致才视为已完成。
+// alreadyUploaded 查数据库判断是否已上传过（防重复上传产生云端副本）。
+// .strm 存在即完成；普通文件比字节数；视频与同名 .strm 共存视为「替换旧视频」，放行重传。
 func (l *Local) alreadyUploaded(fPath string, fileInfo os.FileInfo) bool {
 	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
 	// 视频会被替换为 .strm 再落库，键要跟着变；.strm 与普通文件仍以自身为键
@@ -79,9 +71,7 @@ func (l *Local) alreadyUploaded(fPath string, fileInfo os.FileInfo) bool {
 	if isStrm {
 		return true // .strm 文件：存在即视为已完成
 	}
-	// 视频文件：本地视频与同名 .strm 共存视为「需要替换/覆盖旧视频」，
-	// 不再因 .strm 已存在而跳过，交由 upFileTask 把云端旧视频移入回收目录后重新上传。
-	// 并发重复任务由 doUpload 的 inFlight 去重。
+	// 视频与同名 .strm 共存 = 替换旧视频，放行重传（inFlight 去重）。
 	if core.CheckVideo(filepath.Ext(fPath), fileInfo.Size()) {
 		return false
 	}

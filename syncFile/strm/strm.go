@@ -1,21 +1,6 @@
-// Package strm 是「STRM 生成」模块：扫描云端媒体库目录（StrmPath），
-// 为其中的视频在本地生成 .strm 索引文件（非视频文件则真实下载）。
-//
-// 【与 strmServer 包的区别】
-//   - 本包（syncFile/strm）：批量「生成」.strm 索引文件的任务；
-//   - strmServer 包：/download 接口，播放时把 .strm 里的 URL 实时 302 到 115 直链。
-//
-// 一个是「造索引」，一个是「用索引」，职责完全不同。
-//
-// 【执行流程】
-//  1. 从 StrmPath 出发用 core.WalkCloud 遍历整棵目录树；
-//  2. 本地已存在的 .strm 跳过，缺失的逐个生成；
-//  3. 遍历期间把「顶层目录下的文件/目录 FID」收集到 moveFids；
-//  4. 任务结束且零失败时，把收集到的原始文件统一移入回收目录（TempPath）——
-//     因为索引已生成，云端原件留在原位会被 Emby 等媒体服务器重复扫到。
-//
-// 【触发方式】web 面板手动触发（POST /api/task/strm），Stop 手动停止；
-// Start 自带防重入。
+// Package strm 是 STRM 生成模块：扫描云端媒体库（StrmPath），
+// 为视频生成 .strm 索引文件，成功后把原件移入回收目录（避免 Emby 重复扫到）。
+// 与 strmServer 包的区别：本包「造索引」，strmServer「用索引」（/download 302）。
 package strm
 
 import (
@@ -43,18 +28,18 @@ type Strm struct {
 }
 
 // New 创建 STRM 生成模块实例。
-// notify 是状态变更通知通道，由 Runner 创建并跨热重载共享（见 core.TaskStats）。
-// 调用方：syncFile 根包的 New()。
-func New(env *core.Env, notify chan struct{}) *Strm {
+// onChange 是状态变更回调，由 Runner 注入（见 core.TaskStats）：每次进度变化时
+// 回调组装完整状态快照并广播给 web 层。调用方：syncFile 根包的 New()。
+func New(env *core.Env, onChange func()) *Strm {
 	return &Strm{
 		env:   env,
-		stats: core.NewTaskStats(notify),
+		stats: core.NewTaskStats(onChange),
 	}
 }
 
-// StatusJSON 返回任务进度的 JSON 快照，供根包拼装面板状态。
-func (s *Strm) StatusJSON() string {
-	return s.stats.GetStatus()
+// Status 返回当前进度快照。
+func (s *Strm) Status() *core.TaskProgress {
+	return s.stats.Status()
 }
 
 // Start 启动一轮 STRM 生成任务（在调用方的协程中运行，通常由 web 层异步触发）。

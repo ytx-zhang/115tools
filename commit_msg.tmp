@@ -1,0 +1,10 @@
+refactor: web/syncFile 改事件流模式、默认名单单一来源、移除恢复默认按钮
+
+- 新增 event/stream.go 泛型 fan-out 事件流原语（Publish 非阻塞广播 / Subscribe / Unsubscribe / Recent / Reset）
+- syncFile.Runner 改用 event.Stream[SyncEvent] 暴露 Events()，SyncEvent 自带完整 StatusView 快照，web 不再回拉；移除旧 statsCh/StatsNotify
+- core.TaskStats 通知从 chan struct{} 改为 onChange func() 闭包，解 config 依赖环（core 仍只依赖 config）
+- cloud/strm New 入参同步改为 func()
+- logstream.Hub 底层换 event.Stream[Entry]，新增 Events() 别名
+- 设置页移除两个「恢复默认值」按钮及相关 JS/配置字段
+- 默认名单改为 config 单一来源：core 不再内置默认常量，由 NewEnv 注入 cfg；upload_exclude 空=不排除任何文件，video_exts 默认白名单保留在 config 作安全网
+- 顺带修旧 statsCh 单通道多 SSE 客户端丢信号的竞态

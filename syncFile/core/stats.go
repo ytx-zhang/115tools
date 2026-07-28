@@ -1,49 +1,42 @@
 package core
 
-import (
-	"encoding/json"
-	"sync/atomic"
-)
+import "sync/atomic"
 
 // TaskStats 记录一个任务（云端同步 / STRM 生成）的实时进度，
-// 并在每次变化时通过 notify 通道知会 web 层，由 SSE 推送到前端面板。
+// 并在每次变化时通过 onChange 回调知会 web 层，由 SSE 推送到前端面板。
 //
 // 【并发设计】
 //   - total/completed/running 都是原子变量：遍历云端时是几十上百个协程
 //     并发累加进度，用原子操作避免加锁开销；
-//   - notify 是缓冲为 1 的通道且发送永远非阻塞：业务协程高频更新进度时
-//     不会被通知动作拖慢；偶尔丢掉中间信号也没有影响——前端收到任意一次
-//     信号后都会重新读取完整快照，最终一定一致。
+//   - onChange 由 Runner 提供并负责组装完整快照后 Publish 到事件流；其为非阻塞
+//     广播（慢订阅者丢事件），业务协程高频更新进度时不会被通知动作拖慢。
 //
 // 【状态接口只关心任务进度】
 // 失败明细统一走 slog → logstream → 前端日志卡片（按「错误」级别过滤即可查看），
 // 状态接口不重复记失败，保持轻量。
 type TaskStats struct {
-	total     atomic.Int64  // 需要处理的条目总数
-	completed atomic.Int64  // 已完成的条目数
-	running   atomic.Bool   // 任务是否正在运行（用于防止同一任务被重复启动）
-	notify    chan struct{} // 状态变更通知通道（由 Runner 创建、跨热重载实例共享）
+	total     atomic.Int64 // 需要处理的条目总数
+	completed atomic.Int64 // 已完成的条目数
+	running   atomic.Bool  // 任务是否正在运行（用于防止同一任务被重复启动）
+	onChange  func()       // 状态变更回调（由 Runner 注入；为 nil 时不通知）
 }
 
 // NewTaskStats 创建进度统计器。
-// notify 由 syncFile.Runner 创建并经根包注入；云端同步与 STRM 生成两个任务
-// 共用一个通道，web 层无需区分信号来自哪个任务——收到信号就读取全量快照。
-func NewTaskStats(notify chan struct{}) TaskStats {
-	return TaskStats{notify: notify}
+// onChange 由 syncFile.Runner 注入：云端同步与 STRM 生成两个任务共用同一回调，
+// 回调内组装完整状态快照并广播——web 层收到事件自带快照，无需回拉。
+func NewTaskStats(onChange func()) TaskStats {
+	return TaskStats{onChange: onChange}
 }
 
-// emitNotify 非阻塞地发送一次「状态有变化」信号。
-// 通道已满时直接丢弃本次信号（前端拿到任何一次信号都会读取最新快照，最终一致）。
+// emitNotify 非阻塞地触发一次「状态有变化」回调（onChange 为 nil 时静默跳过）。
 func (s *TaskStats) emitNotify() {
-	select {
-	case s.notify <- struct{}{}:
-	default:
+	if s.onChange != nil {
+		s.onChange()
 	}
 }
 
-// statsSnapshot 是推送给前端的 JSON 结构：只含任务进度状态，不含失败数。
-// 失败明细统一走 slog → logstream → 前端日志卡片，不在状态接口重复记录。
-type statsSnapshot struct {
+// TaskProgress 是任务进度的快照，供 web 层 SSE 推送。
+type TaskProgress struct {
 	Total     int64 `json:"total"`
 	Completed int64 `json:"completed"`
 	Running   bool  `json:"running"`
@@ -57,18 +50,13 @@ func (s *TaskStats) Reset() {
 	s.emitNotify()
 }
 
-// GetStatus 返回当前进度的 JSON 字符串，供 web 层 SSE 推送给前端。
-// 只含任务进度（总数/完成/运行中）；失败明细统一走日志卡片查看。
-func (s *TaskStats) GetStatus() string {
-	data, err := json.Marshal(statsSnapshot{
+// Status 返回当前进度快照。
+func (s *TaskStats) Status() *TaskProgress {
+	return &TaskProgress{
 		Total:     s.total.Load(),
 		Completed: s.completed.Load(),
 		Running:   s.running.Load(),
-	})
-	if err != nil {
-		return "{}"
 	}
-	return string(data)
 }
 
 // TryStart 原子地把 running 从 false 置为 true。

@@ -9,12 +9,10 @@ import (
 	"strings"
 )
 
-const _torrentMaxSize = 10 << 20 // 种子文件最大 10MB
+const _torrentMaxSize = 10 << 20
 
-// handleOfflineTasks 分页获取云下载任务列表：GET /api/offline/tasks?page=1
 func (s *Server) handleOfflineTasks(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	// OfflineTaskList 内部已对 page 做 max(page,1) 守卫，此处无需重复。
 	list, err := s.Api.OfflineTaskList(r.Context(), page)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "获取任务列表失败: %v", err)
@@ -23,7 +21,6 @@ func (s *Server) handleOfflineTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-// handleOfflineQuota 获取云下载配额。
 func (s *Server) handleOfflineQuota(w http.ResponseWriter, r *http.Request) {
 	quota, err := s.Api.OfflineQuotaInfo(r.Context())
 	if err != nil {
@@ -34,7 +31,7 @@ func (s *Server) handleOfflineQuota(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOfflineAdd 批量添加离线下载链接。
-// save_path 为云端目录路径，留空默认使用 strm_path，"/" 表示网盘根目录。
+// save_path 留空默认 strm_path，"/" 表示根目录。
 func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Urls     string `json:"urls"`
@@ -77,7 +74,8 @@ func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "results": results})
 }
 
-// handleOfflineTorrent 上传种子文件并添加 BT 离线任务（multipart/form-data）。
+// handleOfflineTorrent 上传种子并添加 BT 任务（multipart/form-data）。
+// save_path 空→strm_path→"/"；种子临时目录取 torrent_path→temp_path→"/"。
 func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(_torrentMaxSize); err != nil {
 		writeErr(w, http.StatusBadRequest, "解析上传数据失败: %v", err)
@@ -98,19 +96,15 @@ func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 
 	cfg := s.Cfg.Snapshot()
 
-	// 离线下载保存路径：115 的 save_path 必填非空，取相对根目录的路径串。
-	// 前端留空 → 回退 STRM 目录（strm_path）→ 再空回退 "/"（根目录）。
 	savePath := strings.TrimSpace(r.FormValue("save_path"))
 	if savePath == "" {
 		savePath = strings.TrimSpace(cfg.StrmPath)
 	}
-	savePath = strings.Trim(savePath, "/") // 文档格式为相对路径 "A/B"
+	savePath = strings.Trim(savePath, "/")
 	if savePath == "" {
 		savePath = "/"
 	}
 
-	// 种子文件上传到临时目录：优先 torrent_path，未配置则回退 temp_path（临时目录），
-	// 再空才用根目录 "/"（避免回退到 strm_path）。
 	torrentPath := strings.TrimSpace(cfg.TorrentPath)
 	if torrentPath == "" {
 		torrentPath = strings.TrimSpace(cfg.TempPath)
@@ -130,12 +124,8 @@ func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("[离线下载] 添加种子任务",
-		"文件名", hdr.Filename,
-		"大小", len(data),
-		"info_hash", result.InfoHash,
-		"保存路径", savePath,
-		"成功", result.State,
-	)
+		"文件名", hdr.Filename, "大小", len(data),
+		"info_hash", result.InfoHash, "保存路径", savePath, "成功", result.State)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"added":   boolToInt(result.State),
 		"results": []drive.OfflineAddResult{*result},
@@ -149,7 +139,7 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// resolveCloudDir 把云端路径解析为目录 ID；空路径回退到 strm_path，"/" 即根目录("0")。
+// resolveCloudDir 把云端路径解析为目录 ID；空→strm_path，"/"→根目录("0")。
 func (s *Server) resolveCloudDir(r *http.Request, path string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -165,7 +155,6 @@ func (s *Server) resolveCloudDir(r *http.Request, path string) (string, error) {
 	return info.Fid, nil
 }
 
-// handleOfflineDelete 删除单个任务，可选同时删除已下载文件。
 func (s *Server) handleOfflineDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		InfoHash    string `json:"info_hash"`
@@ -187,8 +176,7 @@ func (s *Server) handleOfflineDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// handleOfflineClear 批量清除任务。
-// flag：0 已完成，1 全部，2 失败，3 进行中，4 已完成且删源文件，5 全部且删源文件。
+// handleOfflineClear 批量清除：0已完成 1全部 2失败 3进行中 4已完成且删文件 5全部且删文件。
 func (s *Server) handleOfflineClear(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Flag int `json:"flag"`
