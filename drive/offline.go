@@ -24,17 +24,13 @@ type OfflineAddResult struct {
 // AddOfflineTasks 批量添加离线下载链接（http/https/magnet/ed2k），
 // 保存到 saveDirID 对应的云端目录（"0" 表示根目录）。
 func (d *Open115) AddOfflineTasks(ctx context.Context, urls []string, saveDirID string) ([]OfflineAddResult, error) {
-	if err := checkCtx(ctx); err != nil {
-		return nil, err
-	}
-	var res apiResponse[[]OfflineAddResult]
-	req := d.Client.R().SetContext(ctx)
-	req.SetFormData(map[string]string{
-		"urls":       strings.Join(urls, "\n"),
-		"wp_path_id": saveDirID,
-	})
-	req.SetResult(&res)
-	if _, err := req.Post("/open/offline/add_task_urls"); err != nil {
+	res, err := doAPI[[]OfflineAddResult](ctx, d, "POST", "/open/offline/add_task_urls",
+		withForm(map[string]string{
+			"urls":       strings.Join(urls, "\n"),
+			"wp_path_id": saveDirID,
+		}),
+	)
+	if err != nil {
 		return nil, err
 	}
 	return res.Data, nil
@@ -66,14 +62,10 @@ type OfflineTaskPage struct {
 
 // OfflineTaskList 获取云下载任务列表（page 从 1 开始）。
 func (d *Open115) OfflineTaskList(ctx context.Context, page int) (*OfflineTaskPage, error) {
-	if err := checkCtx(ctx); err != nil {
-		return nil, err
-	}
-	var res apiResponse[OfflineTaskPage]
-	req := d.Client.R().SetContext(ctx)
-	req.SetQueryParam("page", strconv.Itoa(max(page, 1)))
-	req.SetResult(&res)
-	if _, err := req.Get("/open/offline/get_task_list"); err != nil {
+	res, err := doAPI[OfflineTaskPage](ctx, d, "GET", "/open/offline/get_task_list",
+		withQuery(map[string]string{"page": strconv.Itoa(max(page, 1))}),
+	)
+	if err != nil {
 		return nil, err
 	}
 	return &res.Data, nil
@@ -81,9 +73,6 @@ func (d *Open115) OfflineTaskList(ctx context.Context, page int) (*OfflineTaskPa
 
 // DeleteOfflineTask 删除单个云下载任务；deleteFiles 为 true 时同时删除已下载的源文件。
 func (d *Open115) DeleteOfflineTask(ctx context.Context, infoHash string, deleteFiles bool) error {
-	if err := checkCtx(ctx); err != nil {
-		return err
-	}
 	form := map[string]string{
 		"info_hash":       infoHash,
 		"del_source_file": "0",
@@ -91,21 +80,18 @@ func (d *Open115) DeleteOfflineTask(ctx context.Context, infoHash string, delete
 	if deleteFiles {
 		form["del_source_file"] = "1"
 	}
-	req := d.Client.R().SetContext(ctx)
-	req.SetFormData(form)
-	_, err := req.Post("/open/offline/del_task")
+	_, err := doAPI[any](ctx, d, "POST", "/open/offline/del_task",
+		withForm(form),
+	)
 	return err
 }
 
 // ClearOfflineTasks 批量清除任务。
 // flag：0 已完成，1 全部，2 失败，3 进行中，4 已完成且删源文件，5 全部且删源文件。
 func (d *Open115) ClearOfflineTasks(ctx context.Context, flag int) error {
-	if err := checkCtx(ctx); err != nil {
-		return err
-	}
-	req := d.Client.R().SetContext(ctx)
-	req.SetFormData(map[string]string{"flag": strconv.Itoa(flag)})
-	_, err := req.Post("/open/offline/clear_task")
+	_, err := doAPI[any](ctx, d, "POST", "/open/offline/clear_task",
+		withForm(map[string]string{"flag": strconv.Itoa(flag)}),
+	)
 	return err
 }
 
@@ -118,13 +104,8 @@ type OfflineQuota struct {
 
 // OfflineQuotaInfo 获取云下载配额信息。
 func (d *Open115) OfflineQuotaInfo(ctx context.Context) (*OfflineQuota, error) {
-	if err := checkCtx(ctx); err != nil {
-		return nil, err
-	}
-	var res apiResponse[OfflineQuota]
-	req := d.Client.R().SetContext(ctx)
-	req.SetResult(&res)
-	if _, err := req.Get("/open/offline/get_quota_info"); err != nil {
+	res, err := doAPI[OfflineQuota](ctx, d, "GET", "/open/offline/get_quota_info")
+	if err != nil {
 		return nil, err
 	}
 	return &res.Data, nil
@@ -153,19 +134,15 @@ func (d *Open115) ParseTorrent(ctx context.Context, torrentSha1, pickCode string
 	if err := checkCtx(ctx); err != nil {
 		return nil, err
 	}
-	req := d.Client.R().SetContext(ctx)
-	req.SetFormData(map[string]string{
-		"torrent_sha1": torrentSha1,
-		"pick_code":    pickCode,
-	})
-	resp, err := req.Post("/open/offline/torrent")
+	// 响应为 {state, code, data:{...}} 包装，data 内才是种子详情
+	res, err := doAPI[json.RawMessage](ctx, d, "POST", "/open/offline/torrent",
+		withForm(map[string]string{
+			"torrent_sha1": torrentSha1,
+			"pick_code":    pickCode,
+		}),
+	)
 	if err != nil {
 		return nil, err
-	}
-	// 响应为 {state, code, data:{...}} 包装，data 内才是种子详情
-	var res apiResponse[json.RawMessage]
-	if err := json.Unmarshal(resp.Body(), &res); err != nil {
-		return nil, fmt.Errorf("解析种子响应失败: %w", err)
 	}
 	if res.Data == nil {
 		return nil, fmt.Errorf("种子解析响应缺少 data 字段")
@@ -232,11 +209,10 @@ func (d *Open115) AddOfflineTaskBT(ctx context.Context, infoHash, wanted, torren
 		"pick_code", pickCode,
 	)
 	// 成功时 data 可能为空/非数组，用 RawMessage 兼容解析
-	var res apiResponse[json.RawMessage]
-	req := d.Client.R().SetContext(ctx)
-	req.SetFormData(form)
-	req.SetResult(&res)
-	if _, err := req.Post("/open/offline/add_task_bt"); err != nil {
+	res, err := doAPI[json.RawMessage](ctx, d, "POST", "/open/offline/add_task_bt",
+		withForm(form),
+	)
+	if err != nil {
 		return nil, err
 	}
 	// 走到这里说明 state=true（失败已被 OnAfterResponse 中间件拦截报错）。

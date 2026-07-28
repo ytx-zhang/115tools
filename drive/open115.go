@@ -77,10 +77,10 @@ func New115Drive(cfg *config.Config) *Open115 {
 			}
 			var base apiResponse[any]
 			if err := json.Unmarshal(r.Body(), &base); err != nil {
-				return fmt.Errorf("JSON 解析失败: %w", err)
+				return fmt.Errorf("JSON 解析失败(HTTP %d): %w, 响应体: %s", r.StatusCode(), err, truncateBody(r.Body()))
 			}
 			if !base.State {
-				return fmt.Errorf("[115报错]: %s code: %d", base.Message, base.Code)
+				return fmt.Errorf("[115报错] %s (code: %d, HTTP %d)", base.Message, base.Code, r.StatusCode())
 			}
 			return nil
 		}).

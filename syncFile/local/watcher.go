@@ -19,7 +19,7 @@ import (
 // 每个待处理目录跑 syncDir。每个目录只处理自身直接子项（syncDir 非递归），
 // 子目录交给它们各自的事件，避免同一棵子树被多层目录事件重复扫描。
 //
-// 若某目录在云端/数据库均无记录（fid==""），先用 EnsureCloudDir 从云端根逐级确认、
+// 若某目录在云端/数据库均无记录（fid==""），先用 AddCloudFolder 从云端根逐级确认、
 // 自动创建（含缺失的祖先目录）并写回 FID，再同步——即便只监控到最深层目录、其祖先
 // 未被事件触发，也不会漏传。
 //
@@ -98,10 +98,10 @@ func (l *Local) watchPump(ctx context.Context) {
 			fid := l.env.DB.GetFid(f)
 			if fid == "" {
 				// 父目录在云端/数据库均无记录：自动创建（含缺失的祖先目录）后再同步。
-				// EnsureCloudDir 从云端根逐级确认、已存在则复用 FID，
+				// AddCloudFolder 从云端根逐级确认、已存在则复用 FID，
 				// 即使只监控到最深层目录、祖先未被事件触发，也不会漏传。
 				var err error
-				fid, err = l.env.API.EnsureCloudDir(ctx, f)
+				fid, err = AddCloudFolder(ctx, l.env, "", f)
 				if err != nil {
 					slog.Error("自动创建云端目录失败，跳过", "路径", f, "错误", err)
 					continue
@@ -138,7 +138,7 @@ func (l *Local) watchPump(ctx context.Context) {
 // convergeFolders 对本轮待处理目录排序。监控块已改为「每目录只处理自身直接子项」
 // （syncDir 非递归），因此不再丢弃子孙目录——每个目录都独立、由各自事件触发。
 //
-// 仅按路径升序排序，保证父目录先于子目录处理，使子目录的 addCloudFolder 能拿到
+// 仅按路径升序排序，保证父目录先于子目录处理，使子目录的 AddCloudFolder 能拿到
 // 已经建好的父 FID。原「丢弃祖先在列表中的子孙」逻辑已不适用（非递归后子孙须独立处理），
 // 故此处只排序、保留全部目录。
 func convergeFolders(folders []string) []string {

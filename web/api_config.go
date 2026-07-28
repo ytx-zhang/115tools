@@ -21,7 +21,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // 注意：请求不携带 token 字段，Update 内部只覆盖可编辑字段，认证与 token 不丢失。
 func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	var req config.Editable
-	if err := readJSON(r, &req); err != nil {
+	if err := readJSON(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求格式错误: %v", err)
 		return
 	}
@@ -45,9 +45,8 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 
 	// 视频扩展名白名单改动即时生效：运行期分类直接读 core.VideoExts，
 	// 这里在 Update 落盘后刷新（即使未触发同步器热重载也要生效）。
-	if len(s.Cfg.VideoExts) > 0 {
-		core.VideoExts = s.Cfg.VideoExts
-	}
+	// VideoExts 经 normalizeVideoExts 回退默认，不会为空，无需 len>0 守卫。
+	core.VideoExts = s.Cfg.VideoExts
 
 	// 上传排除名单改动即时生效：readLocalDir 实时读 core.IsUploadExcluded，
 	// 这里在 Update 落盘后刷新；之后触发一次全量扫描，把云端已误传的临时文件

@@ -3,6 +3,7 @@ package syncFile
 import (
 	"115tools/db"
 	"115tools/syncFile/core"
+	"115tools/syncFile/local"
 	"context"
 	"fmt"
 	"log/slog"
@@ -144,7 +145,7 @@ func (s *SyncFile) initTemp(ctx context.Context) error {
 
 // ensureDirs 在初始化编排之前，把配置里写好的目录选项都建好：
 //   - 本地镜像目录（sync_path / strm_path）用 os.MkdirAll 建本地目录；
-//   - 云端目录（sync_path / strm_path / temp_path）用 AddFolder 逐层建（见 drive.EnsureCloudDir）。
+//   - 云端目录（sync_path / strm_path / temp_path）用 AddCloudFolder 逐层建（见 syncFile/local 包）。
 //
 // 这样用户只需在面板填好路径、无需手动去 115 建目录，同步即可启动。
 //
@@ -155,7 +156,9 @@ func (s *SyncFile) initTemp(ctx context.Context) error {
 //   - temp_path 是纯云端回收目录（只作为云端 FID 移动目标，无本地落盘含义），
 //     故只为它建云端目录、不建本地目录。
 //
-// 任一目录为空（未配置）则跳过；全部幂等，已存在不会重复创建。
+// 任一目录为空（未配置）则跳过。本地 MkdirAll 天然幂等；云端 AddCloudFolder 依赖
+// GetDirInfo 判定「已存在」，GetDirInfo 瞬时失败会误建同名目录，严格意义上非幂等
+// （初始化阶段目录一般已存在或仅新建一次，风险极低）。
 func (s *SyncFile) ensureDirs(ctx context.Context) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
@@ -179,8 +182,8 @@ func (s *SyncFile) ensureDirs(ctx context.Context) error {
 				return fmt.Errorf("[初始化] 创建本地目录失败 %s: %w", d.path, err)
 			}
 		}
-		// 云端目录：逐层确保存在（含缺失的祖先目录），返回最终 FID 供后续使用。
-		if _, err := s.env.API.EnsureCloudDir(ctx, d.path); err != nil {
+		// 云端目录：逐级确保存在（含缺失的祖先目录），FID 由 initRoot/initTemp 经云端核对回填。
+		if _, err := local.AddCloudFolder(ctx, s.env, "", d.path); err != nil {
 			return fmt.Errorf("[初始化] 创建云端目录失败 %s: %w", d.path, err)
 		}
 	}

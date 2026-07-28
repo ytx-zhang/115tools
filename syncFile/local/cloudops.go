@@ -2,6 +2,7 @@ package local
 
 import (
 	"115tools/db"
+	"115tools/syncFile/core"
 	"context"
 	"fmt"
 	"log/slog"
@@ -17,17 +18,51 @@ const moveChunk = 500
 // 本文件是本地同步模块专用的两个云端写操作：建目录、批量清理。
 // 它们只服务于「本地 → 云端」方向的业务，因此放在本模块内而非 core。
 
-// addCloudFolder 在云端目录 currentCID 下创建子目录 fileName，
-// 并把 本地路径 → 新目录 FID 记入数据库（后续其子文件上传时要用父目录 FID）。
-func (l *Local) addCloudFolder(ctx context.Context, currentCID, fileName, fullPath string) (string, error) {
-	start := time.Now()
-	fid, err := l.env.API.AddFolder(ctx, currentCID, fileName)
-	if err != nil {
-		return "", fmt.Errorf("[%s]: 创建云端文件夹失败: %w", fullPath, err)
+// AddCloudFolder 确保云端目录存在并返回其 FID，是「本地 → 云端」唯一的建目录入口。
+// 纯云端操作，不写数据库——FID 准确性由各调用方 / 初始化阶段负责：
+//
+//   - 扫描 / 监控发现的新目录由调用方 SaveRecord 落库；
+//
+//   - 初始化阶段 sync_path/strm_path/temp_path 的 FID 由 initRoot/initTemp
+//     经 GetDirInfo 实时核对回填（SyncFid 落库、TempFid 仅内存），无需在此写库。
+//
+//   - currentCID 非空：已知父目录 FID，直接在其下创建 path 的末级目录（扫描热路径用，
+//     单步、不逐级 GetDirInfo，保持全量扫描 O(N)）；
+//
+//   - currentCID 为空("")：仅知道根相对路径，从根 "0" 逐级 GetDirInfo 确认、缺失再建
+//     （初始化 / watcher 补建祖先目录用）。注意：是否「已存在」完全依赖该层 GetDirInfo
+//     成功判定；若某层 GetDirInfo 因网络/权限瞬时失败会被误判为不存在而 AddFolder 出同名
+//     目录，故严格意义上非幂等。初始化阶段目录一般已存在或仅新建一次，风险极低。
+func AddCloudFolder(ctx context.Context, env *core.Env, currentCID, path string) (string, error) {
+	if currentCID != "" {
+		fid, err := env.API.AddFolder(ctx, currentCID, filepath.Base(path))
+		if err != nil {
+			return "", fmt.Errorf("[%s]: 创建云端文件夹失败: %w", path, err)
+		}
+		slog.Info("创建云端目录", "路径", path, "云端FID", fid)
+		return fid, nil
 	}
-	l.env.DB.SaveRecord(fullPath, fid, db.SizeDir)
-	slog.Info("创建云端目录", "路径", fullPath, "云端FID", fid, "耗时", time.Since(start))
-	return fid, nil
+
+	// 起点：115 根目录 FID 恒为 "0"，无需经 get_info 反推（根目录 get_info 返回子项数组）。
+	parentFid := "0"
+	cur := ""
+	for seg := range strings.SplitSeq(path, "/") {
+		if seg == "" {
+			continue // 前导或重复的 "/" 会产生空段，跳过
+		}
+		cur = cur + "/" + seg
+		if info, err := env.API.GetDirInfo(ctx, cur); err == nil {
+			parentFid = info.Fid // 该层已存在，继续向下
+			continue
+		}
+		fid, err := env.API.AddFolder(ctx, parentFid, seg)
+		if err != nil {
+			return "", fmt.Errorf("创建云端目录 %s 失败: %w", cur, err)
+		}
+		slog.Info("创建云端目录", "路径", cur, "云端FID", fid)
+		parentFid = fid
+	}
+	return parentFid, nil
 }
 
 // cloudCleanTask 批量清理「本地已删除」路径对应的云端项，分三类处理：

@@ -40,7 +40,7 @@ func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 		Urls     string `json:"urls"`
 		SavePath string `json:"save_path"`
 	}
-	if err := readJSON(r, &req); err != nil {
+	if err := readJSON(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
@@ -171,7 +171,11 @@ func (s *Server) handleOfflineDelete(w http.ResponseWriter, r *http.Request) {
 		InfoHash    string `json:"info_hash"`
 		DeleteFiles bool   `json:"delete_files"`
 	}
-	if err := readJSON(r, &req); err != nil || req.InfoHash == "" {
+	if err := readJSON(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求格式错误: %v", err)
+		return
+	}
+	if req.InfoHash == "" {
 		writeErr(w, http.StatusBadRequest, "缺少 info_hash")
 		return
 	}
@@ -189,7 +193,11 @@ func (s *Server) handleOfflineClear(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Flag int `json:"flag"`
 	}
-	if err := readJSON(r, &req); err != nil || req.Flag < 0 || req.Flag > 5 {
+	if err := readJSON(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求格式错误: %v", err)
+		return
+	}
+	if req.Flag < 0 || req.Flag > 5 {
 		writeErr(w, http.StatusBadRequest, "flag 取值范围 0-5")
 		return
 	}

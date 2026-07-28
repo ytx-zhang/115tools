@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -62,6 +63,7 @@ func (s *Strm) Start(parentCtx context.Context) {
 	if !s.stats.TryStart() {
 		return // 已有一轮在跑，忽略本次触发
 	}
+	slog.Info("开始生成strm文件...")
 	start := time.Now()
 	ctx, cancel := context.WithCancelCause(parentCtx)
 	s.cancel = cancel
@@ -76,7 +78,9 @@ func (s *Strm) Start(parentCtx context.Context) {
 	// 清空上一轮收集的 FID 列表（[:0] 复用底层数组、长度归零；
 	// 注意不能用 clear()——它只把元素置零、长度不变，append 会接在旧元素后面）。
 	s.moveFids = s.moveFids[:0]
-	slog.Debug("开始生成strm文件...")
+	// failed 仅本任务用：遍历是多协程的，用 atomic.Bool 避免数据竞争；
+	// 任务结束时「零失败才把原始文件移入回收目录」门控读它，不进进度统计。
+	var failed atomic.Bool
 
 	// appendMoveFid 登记「顶层目录下的项」（遍历是多协程的，append 需加锁）。
 	// 只有直接挂在 StrmPath 下的项才登记——它们生成索引后要从云端原位挪走；
@@ -95,14 +99,14 @@ func (s *Strm) Start(parentCtx context.Context) {
 		return
 	}
 
-	// 遍历云端媒体库。回调内已逐条 slog.Error 记录错误（STRM 模块单独累加失败计数，
-	// 供「零失败才移动原件」门控使用），返回值显式忽略。
+	// 遍历云端媒体库。回调内已逐条 slog.Error 记录错误（failed 标记供
+	// 「零失败才移动原件」门控使用），返回值显式忽略。
 	_ = s.env.WalkCloud(ctx, s.env.Paths.StrmPath, info.Fid, core.Visitor{
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			appendMoveFid(path, fid)
 			if err := os.MkdirAll(path, 0755); err != nil {
 				slog.Error("创建目录失败", "文件", path, "错误", err)
-				s.stats.AddFailed(1)
+				failed.Store(true)
 				return false, nil
 			}
 			return true, nil
@@ -115,7 +119,7 @@ func (s *Strm) Start(parentCtx context.Context) {
 			}
 			s.stats.AddTotal(1)
 			if err := s.env.FetchAndSave(ctx, pickCode, fid, savePath, e.IsVideo); err != nil {
-				s.stats.AddFailed(1)
+				failed.Store(true)
 				return nil
 			}
 			s.stats.AddCompleted(1)
@@ -129,7 +133,7 @@ func (s *Strm) Start(parentCtx context.Context) {
 	}
 	// 零失败才把原始文件移入回收目录：任一文件生成失败时保持云端原状，
 	// 避免「索引没生成好、原件又被挪走」的双重损失。
-	if s.stats.Failed() == 0 && len(s.moveFids) > 0 {
+	if !failed.Load() && len(s.moveFids) > 0 {
 		s.moveStrmPathFiles(ctx, s.moveFids)
 	}
 }
@@ -143,13 +147,13 @@ func (s *Strm) Stop() {
 }
 
 // moveStrmPathFiles 把收集到的顶层 FID 批量移入云端回收目录（TempPath）。
+// 此函数只在「零失败」门控通过后才调用，已无失败计数意义。
 func (s *Strm) moveStrmPathFiles(ctx context.Context, paths []string) {
 	fidsStr := strings.Join(paths, ",")
 	count := len(paths)
 	t0 := time.Now()
 	if err := s.env.API.MoveFile(ctx, fidsStr, s.env.Paths.TempFid); err != nil {
 		slog.Error("移动文件至 TempPath 失败", "错误", err)
-		s.stats.AddFailed(1)
 	} else {
 		slog.Info("移动文件至 TempPath", "文件数量", count, "耗时", time.Since(t0))
 	}

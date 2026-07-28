@@ -62,12 +62,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // sendStatus 写出当前状态快照。返回 false 表示连接已断，调用方应直接 return 关闭流。
 func (s *Server) sendStatus(sw *sseWriter) bool {
-	ready := s.Syncer() != nil
+	syncer := s.Syncer()
+	ready := syncer != nil
 	configReady := s.Cfg.IsSyncReady()
 	missing, _ := json.Marshal(s.Cfg.RequiredMissing())
 	var data string
 	if ready {
-		syncJSON, strmJSON := s.Syncer().StatusSnapshot()
+		syncJSON, strmJSON := syncer.StatusSnapshot()
 		data = fmt.Sprintf(`{"ready":true,"config_ready":%t,"missing":%s,"sync":%s,"strm":%s}`,
 			configReady, missing, syncJSON, strmJSON)
 	} else {

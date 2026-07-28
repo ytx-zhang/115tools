@@ -126,8 +126,13 @@ async function refresh() {
     document.getElementById('page-info').textContent = `${page} / ${pageCount} 页 · 共 ${data.count || 0} 个任务`;
     renderTasks(data.tasks || []);
   } catch (err) {
-    if (err.status !== 401) toast(err.message, 'err');
-    stopOffline();
+    // 401 表示会话失效需重新登录，停止轮询；其余错误（网络抖动 / 服务端临时异常）
+    // 仅提示，保留轮询，避免一次失败就彻底停掉任务列表。
+    if (err.status === 401) {
+      stopOffline();
+      return;
+    }
+    toast(err.message, 'err');
   }
 }
 

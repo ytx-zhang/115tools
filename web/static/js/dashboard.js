@@ -4,6 +4,7 @@ import { api, toast } from './api.js';
 import { initLogs, stopLogs } from './logs.js';
 
 let es = null; // 状态 SSE
+let connectSeq = 0; // 连接序号：每次 connect 自增，重连回调比对以防误关已重建的新连接
 
 export function initDashboard() {
   connect();
@@ -23,6 +24,7 @@ export function stopDashboard() {
 function connect() {
   es?.close();
   es = new EventSource('/api/status');
+  const mySeq = ++connectSeq;
   es.onmessage = e => {
     try { render(JSON.parse(e.data)); } catch { /* 忽略损坏帧 */ }
   };
@@ -31,6 +33,8 @@ function connect() {
     es?.close();
     es = null;
     setTimeout(async () => {
+      // 本连接已不是最新发起的，说明期间已重建过，放弃这次重连，避免误关新连接
+      if (mySeq !== connectSeq) return;
       if (!document.getElementById('view-dashboard').hidden) {
         try { await api('/api/me'); connect(); } catch { /* 401 已由事件处理 */ }
       }

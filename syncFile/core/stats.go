@@ -11,20 +11,16 @@ import (
 // 【并发设计】
 //   - total/completed/running 都是原子变量：遍历云端时是几十上百个协程
 //     并发累加进度，用原子操作避免加锁开销；
-//   - failed 也是原子变量，但仅 STRM 模块内部用于「零失败才移动原件」门控，
-//     不推送前端（见下方 statsSnapshot）；
 //   - notify 是缓冲为 1 的通道且发送永远非阻塞：业务协程高频更新进度时
 //     不会被通知动作拖慢；偶尔丢掉中间信号也没有影响——前端收到任意一次
 //     信号后都会重新读取完整快照，最终一定一致。
 //
-// 【为什么推送给前端的快照不含失败数】
-// 失败只写一次：各模块在出错处 slog.Error 输出，经 logstream 进入前端日志卡片，
-// 按「错误」级别过滤即可查看全部失败明细，信息不丢且只有一条链路；
-// 状态接口只关心任务进度（总数/完成/运行中），不在状态里重复记失败。
+// 【状态接口只关心任务进度】
+// 失败明细统一走 slog → logstream → 前端日志卡片（按「错误」级别过滤即可查看），
+// 状态接口不重复记失败，保持轻量。
 type TaskStats struct {
 	total     atomic.Int64  // 需要处理的条目总数
 	completed atomic.Int64  // 已完成的条目数
-	failed    atomic.Int64  // 失败的条目数（仅 STRM 模块用于「零失败」门控，不推送前端）
 	running   atomic.Bool   // 任务是否正在运行（用于防止同一任务被重复启动）
 	notify    chan struct{} // 状态变更通知通道（由 Runner 创建、跨热重载实例共享）
 }
@@ -58,12 +54,11 @@ type statsSnapshot struct {
 func (s *TaskStats) Reset() {
 	s.total.Store(0)
 	s.completed.Store(0)
-	s.failed.Store(0)
 	s.emitNotify()
 }
 
 // GetStatus 返回当前进度的 JSON 字符串，供 web 层 SSE 推送给前端。
-// 注意：刻意不含 failed——失败原因统一走日志卡片查看。
+// 只含任务进度（总数/完成/运行中）；失败明细统一走日志卡片查看。
 func (s *TaskStats) GetStatus() string {
 	data, err := json.Marshal(statsSnapshot{
 		Total:     s.total.Load(),
@@ -103,14 +98,5 @@ func (s *TaskStats) AddTotal(n int64) { s.total.Add(n); s.emitNotify() }
 // AddCompleted 累加完成数并通知前端。
 func (s *TaskStats) AddCompleted(n int64) { s.completed.Add(n); s.emitNotify() }
 
-// AddFailed 累加失败数。仅 STRM 模块在出错处调用，用于任务结束时的
-// 「零失败才把原始文件移入回收目录」门控判断；错误原因由调用方 slog.Error 一并输出。
-// 注意：该计数不推送前端（见 statsSnapshot），与状态接口解耦。
-func (s *TaskStats) AddFailed(n int64) { s.failed.Add(n); s.emitNotify() }
-
 // Total 返回当前任务总数（任务结束时打印汇总日志用）。
 func (s *TaskStats) Total() int64 { return s.total.Load() }
-
-// Failed 返回当前失败总数。
-// 典型用途：STRM 生成任务结束时判断「零失败才把原始文件移入回收目录」。
-func (s *TaskStats) Failed() int64 { return s.failed.Load() }

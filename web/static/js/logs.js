@@ -6,6 +6,7 @@
 import { api } from './api.js';
 
 let logsEs = null;     // 日志 SSE 连接
+let logsSeq = 0;       // 连接序号：每次 connectLogs 自增，重连回调比对以防误关已重建的新连接
 let logPaused = false; // 暂停自动滚动（用户上翻查看历史时勾选）
 let logFilter = 'all'; // 当前级别过滤器：all / info / warn / error
 
@@ -72,6 +73,7 @@ function connectLogs() {
     box.innerHTML = '<div class="muted empty">正在连接日志流…</div>';
   }
   logsEs = new EventSource('/api/logs');
+  const mySeq = ++logsSeq;
   logsEs.onmessage = e => {
     try { renderLog(JSON.parse(e.data)); } catch { /* 忽略损坏帧 */ }
   };
@@ -88,6 +90,8 @@ function connectLogs() {
     logsEs?.close();
     logsEs = null;
     setTimeout(async () => {
+      // 本连接已不是最新发起的，说明期间已重建过，放弃这次重连，避免误关新连接
+      if (mySeq !== logsSeq) return;
       if (!document.getElementById('view-dashboard').hidden) {
         try { await api('/api/me'); connectLogs(); } catch { /* 401 已由事件处理 */ }
       }

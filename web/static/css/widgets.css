@@ -115,19 +115,6 @@ th {
 .chk {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin: 0;
-  cursor: pointer;
-}
-
-.chk input {
-  width: auto;
-  margin: 0;
-}
-
-.card-actions .chk {
-  display: flex;
-  align-items: center;
   gap: 5px;
   margin: 0;
   font-size: 13px;
@@ -135,7 +122,7 @@ th {
   cursor: pointer;
 }
 
-.card-actions .chk input {
+.chk input {
   width: auto;
   margin: 0;
 }

@@ -3,9 +3,7 @@ package drive
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strconv"
-	"strings"
 )
 
 // 本文件是 115 文件/目录操作 API：下载直链、目录信息、文件列表、增删移改。
@@ -20,25 +18,18 @@ type DownloadUrlInfo struct {
 // GetDownloadUrl 用 pickcode 换取文件的真实下载地址。
 // ua 是 115 的强制校验项（服务端按 User-Agent 区分调用方），不能为空。
 func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*DownloadUrlInfo, error) {
-	if err := checkCtx(ctx); err != nil {
-		return nil, err
+	if ua == "" {
+		return nil, fmt.Errorf("请求ua为空")
 	}
-	var res apiResponse[map[string]struct {
+	res, err := doAPI[map[string]struct {
 		FileName string `json:"file_name"`
 		Url      struct {
 			Url string `json:"url"`
 		} `json:"url"`
-	}]
-	req := d.Client.R().SetContext(ctx)
-	if ua == "" {
-		return nil, fmt.Errorf("请求ua为空")
-	}
-	req.SetHeader("User-Agent", ua)
-	req.SetFormData(map[string]string{
-		"pick_code": pickCode,
-	})
-	req.SetResult(&res)
-	_, err := req.Post("/open/ufile/downurl")
+	}](ctx, d, "POST", "/open/ufile/downurl",
+		withHeader("User-Agent", ua),
+		withForm(map[string]string{"pick_code": pickCode}),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -55,107 +46,44 @@ func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*Dow
 
 // AddFolder 在云端目录 pid 下创建子目录 name，返回新目录的 FID。
 func (d *Open115) AddFolder(ctx context.Context, pid, name string) (fid string, err error) {
-	if err = checkCtx(ctx); err != nil {
-		return
-	}
-	var res apiResponse[struct {
+	res, err := doAPI[struct {
 		FileId string `json:"file_id"`
-	}]
-	req := d.Client.R().SetContext(ctx)
-	req.SetFormData(map[string]string{
-		"pid":       pid,
-		"file_name": name,
-	})
-	req.SetResult(&res)
-	if _, err = req.Post("/open/folder/add"); err != nil {
+	}](ctx, d, "POST", "/open/folder/add",
+		withForm(map[string]string{"pid": pid, "file_name": name}),
+	)
+	if err != nil {
 		return
 	}
 	fid = res.Data.FileId
 	return
 }
 
-// EnsureCloudDir 确保云端 path 表示的目录（及其所有缺失的祖先目录）存在，
-// 返回最终目录的 FID。path 必须是绝对路径（以 "/" 开头）。
-//
-// 用途：初始化 / 热重载时，配置里写好的云端目录（sync_path / strm_path / temp_path）
-// 若尚未在 115 创建，这里逐层下降、缺失的层用 AddFolder 建出来，避免「目录不存在」
-// 直接让同步起不来。实现从根目录出发，对每一层先 GetDirInfo 判存在、缺失再 AddFolder。
-//
-// 幂等：目录已存在时直接复用其 FID，不重复创建。
-func (d *Open115) EnsureCloudDir(ctx context.Context, path string) (string, error) {
-	if err := checkCtx(ctx); err != nil {
-		return "", err
-	}
-	// 起点：115 根目录 FID 恒为 "0"，无需经 get_info 反推（根目录 get_info 返回的是子项数组而非单对象）。
-	parentFid := "0"
-	cur := ""
-	for seg := range strings.SplitSeq(path, "/") {
-		if seg == "" {
-			continue // 前导或重复的 "/" 会产生空段，跳过
-		}
-		cur = cur + "/" + seg
-		info, err := d.GetDirInfo(ctx, cur)
-		if err == nil {
-			parentFid = info.Fid // 该层已存在，继续向下
-			continue
-		}
-		// 该层不存在 → 在 parentFid 下创建。
-		fid, err := d.AddFolder(ctx, parentFid, seg)
-		if err != nil {
-			return "", fmt.Errorf("创建云端目录 %s 失败: %w", cur, err)
-		}
-		slog.Info("[初始化] 已自动创建云端目录", "路径", cur, "云端FID", fid)
-		parentFid = fid
-	}
-	return parentFid, nil
-}
-
 // MoveFile 把云端文件/目录移动到目标目录 cid。
 // fid 支持逗号分隔的多个 ID（批量移动）。
 func (d *Open115) MoveFile(ctx context.Context, fid, cid string) error {
-	if err := checkCtx(ctx); err != nil {
-		return err
-	}
-	var res apiResponse[any]
-	req := d.Client.R().SetContext(ctx)
-	req.SetFormData(map[string]string{
-		"file_ids": fid,
-		"to_cid":   cid,
-	})
-	req.SetResult(&res)
-	_, err := req.Post("/open/ufile/move")
+	_, err := doAPI[any](ctx, d, "POST", "/open/ufile/move",
+		withForm(map[string]string{"file_ids": fid, "to_cid": cid}),
+	)
 	return err
 }
 
 // DeleteFile 删除云端文件/目录。fid 支持逗号分隔的多个 ID（批量删除）。
 func (d *Open115) DeleteFile(ctx context.Context, fid string) error {
-	if err := checkCtx(ctx); err != nil {
-		return err
-	}
-	req := d.Client.R().SetContext(ctx)
-	req.SetFormData(map[string]string{
-		"file_ids": fid,
-	})
-	_, err := req.Post("/open/ufile/delete")
+	_, err := doAPI[any](ctx, d, "POST", "/open/ufile/delete",
+		withForm(map[string]string{"file_ids": fid}),
+	)
 	return err
 }
 
 // UpdateFile 重命名云端文件/目录，返回改名后的实际文件名
 // （115 可能只改主名不动扩展名，调用方需按需二次修正）。
 func (d *Open115) UpdateFile(ctx context.Context, fid, name string) (newName string, err error) {
-	if err = checkCtx(ctx); err != nil {
-		return
-	}
-	var res apiResponse[struct {
+	res, err := doAPI[struct {
 		FileName string `json:"file_name"`
-	}]
-	req := d.Client.R().SetContext(ctx)
-	req.SetFormData(map[string]string{
-		"file_id":   fid,
-		"file_name": name,
-	})
-	req.SetResult(&res)
-	if _, err = req.Post("/open/ufile/update"); err != nil {
+	}](ctx, d, "POST", "/open/ufile/update",
+		withForm(map[string]string{"file_id": fid, "file_name": name}),
+	)
+	if err != nil {
 		return
 	}
 	newName = res.Data.FileName
@@ -171,21 +99,13 @@ type DirInfo struct {
 
 // GetDirInfo 按路径查询云端目录信息。
 func (d *Open115) GetDirInfo(ctx context.Context, path string) (*DirInfo, error) {
-	if err := checkCtx(ctx); err != nil {
+	res, err := doAPI[DirInfo](ctx, d, "GET", "/open/folder/get_info",
+		withQuery(map[string]string{"path": path}),
+	)
+	if err != nil {
 		return nil, err
 	}
-	var res apiResponse[DirInfo]
-	req := d.Client.R().SetContext(ctx)
-	req.SetQueryParam("path", path)
-	req.SetResult(&res)
-	if _, err := req.Get("/open/folder/get_info"); err != nil {
-		return nil, err
-	}
-	return &DirInfo{
-		Fid:         res.Data.Fid,
-		FileCount:   res.Data.FileCount,
-		FolderCount: res.Data.FolderCount,
-	}, nil
+	return &res.Data, nil
 }
 
 // FileInfo 文件列表中的单个子项。

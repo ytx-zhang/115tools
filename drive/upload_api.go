@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -16,7 +15,7 @@ import (
 // 本文件是 115 上传 API：普通文件上传（UploadFile）与内存字节上传（UploadBytes）。
 //
 // 【上传流程（秒传优先）】
-//  1. 计算文件全量 SHA1（fileid）与前 128 字节 SHA1（preid），提交 /open/upload/init；
+//  1. 计算文件全量 SHA1（fileid）与前 128KB SHA1（preid），提交 /open/upload/init；
 //  2. 服务端返回 status=2 → 秒传成功（云端已有同内容文件，零流量完成）；
 //  3. status=7 → 需要二次校验：按 sign_check 指定的字节区间再算一次 SHA1 重提；
 //  4. status=1 → 云端没有，走 OSS 分片上传真实文件内容（见 oss_upload.go）。
@@ -75,15 +74,13 @@ func (d *Open115) doUpload(ctx context.Context, src uploadSource, cid, signKey, 
 		formData["sign_key"] = signKey
 		formData["sign_val"] = signVal
 	}
-	resp, err := d.Client.R().SetContext(ctx).SetFormData(formData).Post("/open/upload/init")
+	initRes, err := doAPI[any](ctx, d, "POST", "/open/upload/init",
+		withForm(formData),
+	)
 	if err != nil {
 		return nil, err
 	}
-	var uploadResp map[string]any
-	if err := json.Unmarshal(resp.Body(), &uploadResp); err != nil {
-		return nil, fmt.Errorf("解析初始化响应失败: %w", err)
-	}
-	initData, ok := uploadResp["data"].(map[string]any)
+	initData, ok := initRes.Data.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("解析初始化响应失败: data 字段缺失")
 	}
@@ -112,15 +109,11 @@ func (d *Open115) doUpload(ctx context.Context, src uploadSource, cid, signKey, 
 
 	case 1:
 		// 云端无此文件：取 OSS 上传凭证，走真实内容上传
-		tokenResp, err := d.Client.R().SetContext(ctx).Get("/open/upload/get_token")
+		tokenRes, err := doAPI[any](ctx, d, "GET", "/open/upload/get_token")
 		if err != nil {
 			return nil, err
 		}
-		var tokenRoot map[string]any
-		if err := json.Unmarshal(tokenResp.Body(), &tokenRoot); err != nil {
-			return nil, fmt.Errorf("解析上传Token响应失败: %w", err)
-		}
-		tokenData, ok := tokenRoot["data"].(map[string]any)
+		tokenData, ok := tokenRes.Data.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("解析上传Token响应失败: data 字段缺失")
 		}
@@ -271,8 +264,8 @@ var bufPool = sync.Pool{
 	},
 }
 
-// fileSHA1WithPreid 单次遍历文件，同时计算全量 SHA1 与前 128 字节（0-127）的 SHA1。
-// 供上传初始化使用，避免 fileSHA1 + fileSHA1Partial 两次打开/遍历文件。
+// fileSHA1WithPreid 单次遍历文件，同时计算全量 SHA1 与前 128KB 的 SHA1（preid）。
+// 供上传初始化使用：一次遍历同时得到 fileid 与 preid，避免为全量 SHA1 再单独打开/遍历文件。
 func fileSHA1WithPreid(filePath string) (full, pre string, err error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -287,8 +280,8 @@ func fileSHA1WithPreid(filePath string) (full, pre string, err error) {
 	hFull := sha1.New()
 	hPre := sha1.New()
 
-	// 前 128 字节同时写入两个哈希
-	head := io.LimitReader(f, 128)
+	// 前 128KB 同时写入两个哈希（与 bytesSHA1WithPreid 对齐：115 协议 preid 取前 128KB）
+	head := io.LimitReader(f, 128*1024)
 	if _, err := io.CopyBuffer(io.MultiWriter(hFull, hPre), head, buf); err != nil {
 		return "", "", err
 	}

@@ -90,8 +90,8 @@ func writeErr(w http.ResponseWriter, code int, format string, a ...any) {
 }
 
 // readJSON 解析请求体 JSON，限制 1MB 防滥用。
-func readJSON(r *http.Request, v any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+func readJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	return dec.Decode(v)
 }
 

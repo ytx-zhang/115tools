@@ -35,11 +35,7 @@ func (l *Local) FullScan(ctx context.Context) {
 // 避免每一层目录被反复递归多次。
 func (l *Local) syncDir(ctx context.Context, currentPath string, currentFid string, recursive bool) {
 	// 阶段一：扫描（比对数据库与本地，找出待上传文件）
-	scanStart := time.Now()
 	uploadPaths := l.scanDir(ctx, currentPath, currentFid, recursive)
-	slog.Info("扫描本地目录", "目录", currentPath, "需要上传文件", len(uploadPaths), "耗时", time.Since(scanStart))
-
-	// 无变更无需进入同步阶段，扫描日志已说明
 	if len(uploadPaths) == 0 {
 		return
 	}
@@ -142,11 +138,12 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, rec
 		}
 		fullPath := filepath.Join(currentPath, name)
 		if entry.IsDir() {
-			fid, err := l.addCloudFolder(ctx, currentFid, name, fullPath)
+			fid, err := AddCloudFolder(ctx, l.env, currentFid, fullPath)
 			if err != nil {
 				slog.Error("创建云端目录失败", "路径", fullPath, "错误", err)
 				continue
 			}
+			l.env.DB.SaveRecord(fullPath, fid, db.SizeDir)
 			if recursive {
 				uploads = append(uploads, l.scanDir(ctx, fullPath, fid, recursive)...)
 			}
