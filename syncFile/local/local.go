@@ -57,7 +57,12 @@ func New(env *core.Env) *Local {
 //  2. 文件监听器：监视主同步目录的实时变动，经按目录静默窗口后触发 syncDir；
 //  3. 上传 worker：从 uploadJobs 消费真正的上传任务。
 func (l *Local) Start(ctx context.Context, wg *sync.WaitGroup) {
-	l.FullScan(ctx) // 启动后先全量收敛一次
-	wg.Go(func() { l.watchPump(ctx) })
+	// 必须先启动上传 worker 再跑同步：FullScan 是同步的，会把待上传文件投递进
+	// uploadJobs（缓冲仅 64）；若 worker 尚未启动，待上传数超过缓冲时第 N 个投递会
+	// 永久阻塞在 channel 发送上，而 worker 要等 FullScan 返回后才由下方 wg.Go 创建，
+	// 形成「FullScan 等 worker 消费 ↔ worker 等 FullScan 返回」的死锁（进程卡死、无日志）。
+	// 故 startUploadWorkers 必须先于 FullScan 启动，watchPump 顺序无关。
 	wg.Go(func() { l.startUploadWorkers(ctx, uploadWorkerCount) })
+	wg.Go(func() { l.watchPump(ctx) })
+	l.FullScan(ctx) // 启动后先全量收敛一次，此时 worker 已在后台消费队列
 }
