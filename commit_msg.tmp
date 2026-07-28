@@ -1,9 +1,0 @@
-fix(local): 首启 FullScan 改为后台异步，解首启长时间卡在「重建中」
-
-- 原 local.Start 在 New() 同步链内调 l.FullScan(ctx)：FullScan 同步把待上传文件
-  逐个投递进 uploadJobs（缓冲64），待上传量大时需等 worker 消费腾出缓冲才继续，
-  导致 New() 在全部文件投递完前不返回 → r.cur 长时间 nil → ready=false →
-  前端一直显示「配置热重载中，同步器正在重建」，而上传正由 worker 后台进行
-- 改为 wg.Go(l.FullScan) 后台异步（与定时全量兜底路径一致），New() 立即就绪，
-  全量收敛在后台进行；与 v0.8.5 热重载卡死是两回事（那是旧实例 wg 无限等待）
-- 更新 startLocked 注释：New() 仅因 initRoot 云端扫描可能慢，本地 FullScan 不再阻塞
