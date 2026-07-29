@@ -163,6 +163,43 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 	}
 }
 
+// ClearOldRoot 删除旧同步根 oldPrefix 下的全部记录，但保留与当前同步根 keepPrefix
+// 重叠的子树——用于「新目录是旧目录子树」时避免误删刚重建的新索引。
+// oldPrefix=="" 或 ==keepPrefix 时直接返回（无清理）。
+func (d *DB) ClearOldRoot(oldPrefix, keepPrefix string) {
+	if oldPrefix == "" || oldPrefix == keepPrefix {
+		return
+	}
+	err := d.boltDB.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(d.bucketName)
+		if b == nil {
+			return nil
+		}
+		selfBytes := []byte(oldPrefix)
+		childPrefix := append(append([]byte{}, selfBytes...), '/')
+		keepBytes := []byte(keepPrefix)
+		keepChild := append(append([]byte{}, keepBytes...), '/')
+
+		c := b.Cursor()
+		for k, _ := c.Seek(selfBytes); k != nil; k, _ = c.Next() {
+			if !bytes.Equal(k, selfBytes) && !bytes.HasPrefix(k, childPrefix) {
+				break
+			}
+			// 保留新同步根子树（新目录是旧目录子树的情况）
+			if bytes.Equal(k, keepBytes) || bytes.HasPrefix(k, keepChild) {
+				continue
+			}
+			if err := c.Delete(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Error("[数据库] 清理旧同步根失败", "旧根", oldPrefix, "错误信息", err)
+	}
+}
+
 // CountRecursive 递归统计 path 下所有子条目的总数（含文件和子目录）。
 // 通过 bbolt 前缀扫描实现，数百万条目录毫秒级完成，远比 GetFileList API 调用便宜。
 func (d *DB) CountRecursive(path string) int64 {

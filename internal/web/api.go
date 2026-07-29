@@ -161,11 +161,12 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 更新配置（只覆盖可编辑字段，不丢认证）
-	needReload, err := s.Cfg.Update(req)
+	needReload, oldSyncPath, oldStrmUrl, err := s.Cfg.Update(req)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
 		return
 	}
+	newStrmUrl := s.Cfg.StrmUrl // 主 goroutine 捕获，避免闭包内并发读 config
 
 	// ② 刷新运行期全局变量
 	core.VideoExts = s.Cfg.VideoExts
@@ -179,11 +180,18 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	case !ready: // 配置不完整，不启动
 	case s.Sync.Current() == nil:
 		slog.Info("[WEB] 配置已补齐，启动同步器")
-		s.Wg.Go(s.Sync.Reload)
+		s.Wg.Go(func() { s.Sync.Reload("") })
 		started = true
 	case needReload:
 		slog.Info("[WEB] 路径类配置变更，热重载同步器")
-		s.Wg.Go(s.Sync.Reload)
+		s.Wg.Go(func() {
+			s.Sync.Reload(oldSyncPath)
+			if oldStrmUrl != newStrmUrl {
+				if cur := s.Sync.Current(); cur != nil {
+					cur.RegenerateStrmFiles(s.Sync.TaskCtx())
+				}
+			}
+		})
 		started = true
 	}
 	// 排除名单变更但未热重载时，触发全量扫描清理云端存量

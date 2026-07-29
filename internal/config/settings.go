@@ -132,14 +132,14 @@ func (c *Config) GetAuth() (username, passwordHash string) {
 // Update 校验并应用新配置，落盘持久化。
 // 返回 needReload 表示同步相关字段（路径/URL/静默窗口）发生变化，
 // 调用方需要热重载同步器使其实时生效。
-func (c *Config) Update(e Editable) (needReload bool, err error) {
+func (c *Config) Update(e Editable) (needReload bool, oldSyncPath, oldStrmUrl string, err error) {
 	// 注意：不再强制 sync_path / strm_path / temp_path / strm_url 非空，
 	// 允许先保存不完整配置（前端会提示缺失项、同步器暂不启动）；
 	// 待用户在面板补齐后由 web 保存逻辑自动拉起同步器。
 	if e.AuthUsername != "" && e.AuthPassword == "" {
 		// 允许留空表示沿用旧密码，但旧密码也为空时必须设置
 		if _, old := c.GetAuth(); old == "" {
-			return false, fmt.Errorf("启用登录验证时必须设置密码")
+			return false, "", "", fmt.Errorf("启用登录验证时必须设置密码")
 		}
 	}
 
@@ -148,7 +148,7 @@ func (c *Config) Update(e Editable) (needReload bool, err error) {
 	if e.AuthUsername != "" && e.AuthPassword != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(e.AuthPassword), bcrypt.DefaultCost)
 		if err != nil {
-			return false, fmt.Errorf("密码哈希失败: %w", err)
+			return false, "", "", fmt.Errorf("密码哈希失败: %w", err)
 		}
 		newHash = string(hash)
 	}
@@ -156,6 +156,8 @@ func (c *Config) Update(e Editable) (needReload bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	oldSyncPath = c.SyncPath
+	oldStrmUrl = c.StrmUrl
 	needReload = e.SyncPath != c.SyncPath ||
 		e.StrmPath != c.StrmPath ||
 		e.TempPath != c.TempPath ||
@@ -194,8 +196,8 @@ func (c *Config) Update(e Editable) (needReload bool, err error) {
 	}
 
 	if err := c.persistLocked(); err != nil {
-		return needReload, fmt.Errorf("配置写盘失败: %w", err)
+		return needReload, oldSyncPath, oldStrmUrl, fmt.Errorf("配置写盘失败: %w", err)
 	}
 	slog.Info("[CONFIG] 配置已更新", "需要热重载", needReload)
-	return needReload, nil
+	return needReload, oldSyncPath, oldStrmUrl, nil
 }

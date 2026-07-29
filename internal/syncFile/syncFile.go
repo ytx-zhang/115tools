@@ -33,7 +33,7 @@ type SyncFile struct {
 
 // New 装配并初始化整个同步系统。onChange 是状态变更回调（由 Runner 注入，
 // 内部组装完整状态快照并广播，详见 core.TaskStats）；wg 挂接所有后台协程保证优雅退出。
-func New(ctx context.Context, cfg *config.Config, api *drive.Open115, boltDB *db.DB, wg *sync.WaitGroup, onChange func()) (*SyncFile, error) {
+func New(ctx context.Context, cfg *config.Config, api *drive.Open115, boltDB *db.DB, wg *sync.WaitGroup, onChange func(), oldSyncPath string) (*SyncFile, error) {
 	env := core.NewEnv(cfg, api, boltDB)
 	s := &SyncFile{env: env}
 
@@ -41,7 +41,7 @@ func New(ctx context.Context, cfg *config.Config, api *drive.Open115, boltDB *db
 		return nil, err
 	}
 	// initRoot 扫描云端建库索引，local 的扫描对比依赖这些记录
-	if err := s.initRoot(ctx); err != nil {
+	if err := s.initRoot(ctx, oldSyncPath); err != nil {
 		return nil, err
 	}
 	if err := s.initTemp(ctx); err != nil {
@@ -62,7 +62,7 @@ func New(ctx context.Context, cfg *config.Config, api *drive.Open115, boltDB *db
 // initRoot 建立主同步目录的数据库索引（以云端 FID 为准）。
 // FID 一致则复用索引；不一致或首次运行则全量扫描。
 // 扫描被中止时清理半成品索引，保证下次完整扫描。
-func (s *SyncFile) initRoot(parentCtx context.Context) error {
+func (s *SyncFile) initRoot(parentCtx context.Context, oldSyncPath string) error {
 	if err := context.Cause(parentCtx); err != nil {
 		slog.Warn("[任务中止] 初始化同步", "错误信息", err)
 		return err
@@ -97,6 +97,13 @@ func (s *SyncFile) initRoot(parentCtx context.Context) error {
 	defer func() {
 		if scanErr != nil {
 			s.env.DB.BatchClearPaths([]string{s.env.Paths.SyncPath})
+		}
+	}()
+	// 新索引构建成功后清理旧同步根：失败不删，避免丢数据；
+	// 旧目录是新目录子树时只删不重叠分支，保留刚重建的新索引。
+	defer func() {
+		if scanErr == nil {
+			s.env.DB.ClearOldRoot(oldSyncPath, s.env.Paths.SyncPath)
 		}
 	}()
 
@@ -214,6 +221,44 @@ func (s *SyncFile) StopAddStrm()                       { s.strm.Stop() }
 
 // LocalFullScan 触发一次本地全量扫描（用于保存上传排除规则后联动清理云端存量）。
 func (s *SyncFile) LocalFullScan(ctx context.Context) { s.local.FullScan(ctx) }
+
+// RegenerateStrmFiles 在 StrmUrl 变更后，用新 URL 重写本地所有 .strm 文件内容。
+// 遍历 SyncPath 与 StrmPath 两棵树下全部 .strm；解析失败/非本工具生成的跳过，不影响其它文件。
+// 纯本地 IO，不请求云端（用 ExtractPickcode 反向解析旧文件取 pickcode/fid）。
+func (s *SyncFile) RegenerateStrmFiles(ctx context.Context) {
+	roots := []string{s.env.Paths.SyncPath, s.env.Paths.StrmPath}
+	var done int
+	for _, root := range roots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if !strings.EqualFold(filepath.Ext(p), ".strm") {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			pc, fid := core.ExtractPickcode(p)
+			if pc == "" || fid == "" {
+				slog.Warn("[STRM] 跳过无法解析的 strm 文件", "文件", p)
+				return nil
+			}
+			if err := s.env.SaveStrmFile(pc, fid, p); err != nil {
+				slog.Error("[STRM] 重写 strm 失败", "文件", p, "错误", err)
+				return nil
+			}
+			done++
+			return nil
+		})
+	}
+	slog.Info("[STRM] StrmUrl 变更后重写本地 strm 完成", "数量", done)
+}
 
 // StatusView 是推送给前端的完整状态快照。
 type StatusView struct {

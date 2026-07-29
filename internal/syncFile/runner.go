@@ -78,18 +78,18 @@ func (r *Runner) Events() chan SyncEvent { return r.events.Subscribe(16) }
 func (r *Runner) Unsubscribe(ch chan SyncEvent) { r.events.Unsubscribe(ch) }
 
 // Start 首次启动同步器实例。
-func (r *Runner) Start() error { return r.startLocked() }
+func (r *Runner) Start() error { return r.startLocked("") }
 
-// startLocked 创建新实例。
+// startLocked 创建新实例。传 oldSyncPath 用于切换同步目录后清理旧 DB 索引。
 // ⚠️ New() 含云端全量扫描可达数分钟，期间必须释放 mu，
 // 否则 Current()/TaskCtx() 等接口被锁阻塞（v0.8.4 修复的死锁）。
-func (r *Runner) startLocked() error {
+func (r *Runner) startLocked(oldSyncPath string) error {
 	r.mu.Lock()
 	ctx, cancel := context.WithCancel(r.appCtx)
 	wg := &sync.WaitGroup{}
 	r.mu.Unlock()
 
-	s, err := New(ctx, r.cfg, r.api, r.db, wg, r.publishStatus)
+	s, err := New(ctx, r.cfg, r.api, r.db, wg, r.publishStatus, oldSyncPath)
 	if err != nil {
 		cancel()
 		wg.Wait()
@@ -105,9 +105,10 @@ func (r *Runner) startLocked() error {
 }
 
 // Reload 热重载：停止旧实例并用最新配置重建。
+// oldSyncPath 为切换同步目录前的旧根（未切换则为空），用于重建后清理旧 DB 索引。
 // ⚠️ 不用无限 wg.Wait() 等旧实例收尾，给 3s 超时窗口（v0.8.5 修复的卡死）。
 // 残留协程随 ctx 取消自行退出，最终收尾由 appWg.Go(wg.Wait) 兜底。
-func (r *Runner) Reload() {
+func (r *Runner) Reload(oldSyncPath string) {
 	r.reloadMu.Lock()
 	defer r.reloadMu.Unlock()
 
@@ -137,7 +138,7 @@ func (r *Runner) Reload() {
 		}
 	}
 
-	if err := r.startLocked(); err != nil {
+	if err := r.startLocked(oldSyncPath); err != nil {
 		slog.Error("[RELOAD] 同步器重建失败", "错误信息", err)
 		return
 	}
