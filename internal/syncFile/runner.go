@@ -113,13 +113,19 @@ func (r *Runner) Reload() {
 
 	r.mu.Lock()
 	oldWg := r.wg
-	if r.cancel != nil {
+	cancel := r.cancel
+	if cancel != nil {
 		slog.Info("[RELOAD] 停止旧同步器实例...")
 		r.cur = nil
-		r.publishStatus() // 通知 web：实例暂不可用（热重载中）
-		r.cancel()
 	}
 	r.mu.Unlock()
+
+	// ⚠️ 必须释放 r.mu 之后再发状态：publishStatus→Snapshot 内部会对 r.mu 取 RLock，
+	// 若仍在写锁持有期间调用会触发 RWMutex 不可重入自死锁，导致热重载永久卡在"停止旧实例"。
+	r.publishStatus() // 通知 web：实例暂不可用（热重载中）
+	if cancel != nil {
+		cancel() // 停止旧实例
+	}
 
 	if oldWg != nil {
 		done := make(chan struct{})
