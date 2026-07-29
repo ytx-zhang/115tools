@@ -9,7 +9,7 @@ RUN go mod download
 COPY . .
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-    go build -ldflags="-w -s" -trimpath -o server .
+    go build -ldflags="-w -s" -trimpath -o server ./cmd/115tools
 
 # --- 第二阶段：运行时 ---
 FROM alpine:latest

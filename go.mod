@@ -1,4 +1,4 @@
-module 115tools
+module github.com/ytx-zhang/115tools
 
 go 1.26.5
 
