@@ -1,8 +1,0 @@
-fix: 切换同步目录清理旧 DB 索引；StrmUrl 变更自动重写本地 strm
-
-- db: 新增 ClearOldRoot，删除旧同步根下的全部记录，但保留与当前同步根重叠的子树，避免「新目录是旧目录子树」时误删刚重建的新索引
-- config: Update 透出 oldSyncPath/oldStrmUrl 供热重载后清理与重写
-- syncFile/runner: Reload/startLocked 接收并透传 oldSyncPath
-- syncFile: 新索引构建成功后才清理旧根（失败不删，避免丢数据）
-- syncFile: 新增 RegenerateStrmFiles，StrmUrl 变更后遍历 SyncPath 与 StrmPath 两棵树，用新 URL 重写本地全部 .strm（纯本地 IO，不请求云端）
-- TempPath 变更按预期不处理（云端孤儿，影响小）
