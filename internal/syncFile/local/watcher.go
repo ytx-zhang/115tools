@@ -2,14 +2,15 @@ package local
 
 import (
 	"context"
+	"os"
+
+	"github.com/sgtdi/fswatcher"
 	"github.com/ytx-zhang/115tools/internal/db"
 	"log/slog"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/sgtdi/fswatcher"
 )
 
 // watchPump 是文件监听器主循环（常驻协程，ctx 取消退出）。
@@ -82,6 +83,14 @@ func (l *Local) watchPump(ctx context.Context) {
 		folders = convergeFolders(folders)
 
 		for _, f := range folders {
+			// 本地已不存在的目录不要据此重建云端：嵌套目录整体删除时，子目录的删除事件
+			// 会把每一层都登记为待处理；若此时父层清理已清掉 DB 记录并删了云端目录，
+			// 这里会误判为「新目录」而把云端文件夹「复活」。直接跳过即可，
+			// 真正的云端清理由父目录那一轮 processReady 统一完成。
+			if _, statErr := os.Stat(f); statErr != nil {
+				slog.Debug("待处理目录本地已不存在，跳过", "路径", f, "错误", statErr)
+				continue
+			}
 			fid := l.env.DB.GetFid(f)
 			if fid == "" {
 				// 父目录在云端/数据库均无记录：自动创建（含缺失的祖先目录）后再同步。

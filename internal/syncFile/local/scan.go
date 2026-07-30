@@ -67,6 +67,16 @@ func (l *Local) scanDir(ctx context.Context, currentPath, currentFid string, rec
 
 	localFiles, err := readLocalDir(currentPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// 本地目录在扫描中途被删除（并发删除/嵌套目录整体删除）：
+			// 其子树通常由上层清理逻辑（父目录那一轮）统一搬云端视频+删目录+清库，
+			// 这里兜底再清理一次，避免中途退出后残留云端孤儿；幂等。
+			slog.Debug("本地目录已不存在，兜底清理云端残留", "路径", currentPath)
+			if cerr := l.cloudCleanTask(ctx, []string{currentPath}, currentPath); cerr != nil {
+				slog.Debug("本地目录已删除，兜底清理云端时部分项已处理", "目录", currentPath, "错误", cerr)
+			}
+			return nil
+		}
 		slog.Error("读取本地目录失败", "路径", currentPath, "错误", err)
 		return nil
 	}
