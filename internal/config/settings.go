@@ -154,6 +154,7 @@ type ChangeSet struct {
 	StrmUrlChanged   bool // strm 直链变化 → 重写本地 .strm
 	SyncRulesChanged bool // 排除名单/视频扩展名变化 → 全量重扫（仅当未走 PathsChanged 时）
 	CronChanged      bool // 定时策略变化 → 热重载同步器
+	DebounceChanged  bool // 本地监听去抖窗口变化 → 热重载同步器（watcher 启动时绑定 Debounce）
 	AuthChanged      bool // 登录用户名/密码变化 → 无同步副作用
 	TokenChanged     bool // refresh_token 变化 → 无同步副作用
 }
@@ -199,6 +200,7 @@ func (c *Config) Update(e Editable) (cs *ChangeSet, oldSyncPath, oldStrmUrl stri
 		!sameStringSlice(newVideoExts, c.VideoExts)
 	cs.CronChanged = e.Cron.Enabled != c.CronEnabled() ||
 		e.Cron.IntervalHours != c.Cron.IntervalHours
+	cs.DebounceChanged = e.DebounceSeconds != c.DebounceSeconds
 	cs.AuthChanged = e.AuthUsername != c.Auth.Username || newHash != ""
 	cs.TokenChanged = e.RefreshToken != c.token.RefreshToken
 

@@ -22,6 +22,8 @@ export const cfg = window.PetiteVue.reactive({
   cron_interval_hours: 12,
   auth_username: '',
   auth_password: '',
+  has_token: false,
+  token_placeholder: '填入后保存以更新/轮换 token',
 
   async load() {
     try {
@@ -38,6 +40,11 @@ export const cfg = window.PetiteVue.reactive({
       // 密码与 refresh_token 不回显明文：仅置空并给占位提示
       cfg.auth_password = '';
       cfg.refresh_token = '';
+      // 已配置则不显示「未配置」误导文案，改为反映真实状态
+      cfg.has_token = !!c.has_refresh_token;
+      cfg.token_placeholder = cfg.has_token
+        ? '已配置（留空保存保持不变）'
+        : '填入后保存以更新/轮换 token';
       cfg.video_exts = (c.video_exts || []).join(', ');
       cfg.upload_exclude = (c.upload_exclude || []).join(', ');
 

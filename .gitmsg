@@ -1,0 +1,5 @@
+fix: 修正 refresh_token 输入框占位提示误导，配置保存落盘 refresh_token 与 debounce 热重载
+
+- 前端：refresh_token 输入框 placeholder 由写死"未配置"改为按 has_refresh_token 动态显示真实状态（已配置/未配置）
+- 配置：Update 增加 DebounceChanged 维度；api 将 debounce 变化纳入同步器热重载分支（修复改去抖窗口不重建 sync）
+- api：保存时 refresh_token 校验成功后保留原始值落盘，使 web 副本与 drive 一致

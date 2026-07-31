@@ -139,13 +139,17 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ① refresh_token
+	// ① refresh_token：校验成功后保留原始值交给 Update 落盘，使 web 持有的
+	// config 副本与 drive 引用的 config 保持一致（两者是同一指针，此处保留
+	// 即可保证 Snapshot().HasRefreshToken 反映真实状态）。空值表示保持不变。
 	if req.RefreshToken != "" {
 		if err := s.Api.VerifyAndApplyRefreshToken(r.Context(), req.RefreshToken); err != nil {
 			writeErr(w, http.StatusBadRequest, "refresh_token 校验失败: %v", err)
 			return
 		}
-		req.RefreshToken = ""
+		// 保留原始值给 Update 落盘（不再清空，让 s.Cfg 的 token 与 drive 同步）
+	} else {
+		req.RefreshToken = "" // 未填写：保持原 token 不变
 	}
 
 	// 更新配置（只覆盖可编辑字段，不丢认证），返回本次实际变更维度
@@ -169,7 +173,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		slog.Info("[WEB] 配置已补齐，启动同步器")
 		s.Wg.Go(func() { s.Sync.Reload("") })
 		triggered = true
-	case cs.PathsChanged || cs.CronChanged:
+	case cs.PathsChanged || cs.CronChanged || cs.DebounceChanged:
 		// 路径/定时策略变化：热重载同步器（重建实例天然含重扫）。
 		slog.Info("[WEB] 路径/定时配置变更，热重载同步器")
 		s.Wg.Go(func() {

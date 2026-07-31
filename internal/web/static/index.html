@@ -159,7 +159,7 @@
         <form id="config-form" @submit.prevent="cfg.save">
           <div class="card">
             <h3>115 账号凭证 <small class="muted">115的 refresh_token；保存后 115 会自动轮换</small></h3>
-            <label><span class="req">*</span> refresh_token <small class="muted">115 开放平台 refresh_token，用于换取访问令牌；首次必填，保存后由程序自动刷新轮换；留空同步不启动</small> <input name="refresh_token" type="password" placeholder="未配置" autocomplete="off" v-model="cfg.refresh_token"></label>
+            <label><span class="req">*</span> refresh_token <small class="muted">115 开放平台 refresh_token，用于换取访问令牌；首次必填，保存后由程序自动刷新轮换；留空同步不启动</small> <input name="refresh_token" type="password" :placeholder="cfg.token_placeholder" autocomplete="off" v-model="cfg.refresh_token"></label>
           </div>
           <div class="card">
             <h3>同步配置 <small class="muted">必填项未设置不启用同步</small></h3>
