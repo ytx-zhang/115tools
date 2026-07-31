@@ -1,4 +1,4 @@
-package core
+package sync
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ytx-zhang/115tools/internal/httputil"
+	"github.com/ytx-zhang/115tools/internal/drive"
 )
 
 // 本文件是「把云端内容落到本地磁盘」的存取工具集，供 cloud（云端同步）、
@@ -70,7 +70,7 @@ func (e *Env) DownloadFile(ctx context.Context, pickcode, localPath string) erro
 	req.Header.Set("User-Agent", "115tools")
 
 	// 第二步：发起下载（复用全局共享 HTTP 客户端，享受连接池）。
-	resp, err := httputil.SharedHTTPClient().Do(req)
+	resp, err := drive.HTTPClient().Do(req)
 	if err != nil {
 		return err
 	}

@@ -111,22 +111,12 @@ func New(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
-	// 定时全量同步配置已由嵌套 cron 段统一承载，不再兼容旧顶层字段。
+	// 定时全量同步配置已由嵌套 cron 段统一承载。
 	// 间隔兜底：IntervalHours <= 0 时使用默认 12 小时（避免 0 触发即时死循环）。
 	// Enabled 不在此兜底——缺省（nil）由 CronEnabled() 方法按「默认开启」处理，
 	// 只有显式 enabled: false 才真正关闭（见 CronConfig 注释）。
 	if tmp.Cron.IntervalHours <= 0 {
 		tmp.Cron.IntervalHours = 12
-	}
-
-	// 兼容旧配置：旧版用 settle_seconds，新版用 debounce_seconds。
-	// 当配置文件里没显式写 debounce_seconds 但写了 settle_seconds 时，回退使用旧值。
-	var rawSettle struct {
-		SettleSeconds int `yaml:"settle_seconds"`
-	}
-	_ = yaml.Unmarshal(data, &rawSettle)
-	if tmp.DebounceSeconds == 0 && rawSettle.SettleSeconds != 0 {
-		tmp.DebounceSeconds = rawSettle.SettleSeconds
 	}
 
 	// 视频扩展名白名单：配置文件未显式写 video_exts 时回退内置默认。
@@ -233,22 +223,11 @@ func (c *Config) IsSyncReady() bool {
 	return len(c.RequiredMissing()) == 0
 }
 
-func (c *Config) GetAccessToken() string {
+// Token 返回当前 token 快照（访问令牌 / 刷新令牌 / 到期时间）。
+func (c *Config) Token() tokenData {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.token.AccessToken
-}
-
-func (c *Config) GetRefreshToken() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.token.RefreshToken
-}
-
-func (c *Config) GetExpireAt() time.Time {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.token.ExpireAt
+	return c.token
 }
 
 func (c *Config) SaveToken(access, refresh string, expiresIn int64) {

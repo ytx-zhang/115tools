@@ -1,111 +1,100 @@
-// main.js —— 应用入口：会话检测、登录、视图路由
+// main.js —— 应用入口：登录探活、视图路由（hash 显隐）、petite-vue 挂载、菜单切换。
 import { api, toast } from './api.js';
-import { initDashboard, stopDashboard } from './dashboard.js';
-import { initOffline, stopOffline } from './offline.js';
-import { initSettings } from './settings.js';
+import { dash, initDashboard, stopDashboard } from './dashboard.js';
+import { off, initOffline, stopOffline } from './offline.js';
+import { cfg } from './settings.js';
 
-const $ = sel => document.querySelector(sel);
-
-const views = {
-  dashboard: { el: () => $('#view-dashboard'), enter: initDashboard, leave: stopDashboard },
-  offline: { el: () => $('#view-offline'), enter: initOffline, leave: stopOffline },
-  settings: { el: () => $('#view-settings'), enter: initSettings, leave: () => { } },
+const ALLOWED = ['dashboard', 'offline', 'settings'];
+const VIEWS = {
+  dashboard: { show: () => { document.getElementById('view-dashboard').hidden = false; }, hide: () => { document.getElementById('view-dashboard').hidden = true; }, init: initDashboard, stop: stopDashboard },
+  offline: { show: () => { document.getElementById('view-offline').hidden = false; }, hide: () => { document.getElementById('view-offline').hidden = true; }, init: initOffline, stop: stopOffline },
+  settings: { show: () => { document.getElementById('view-settings').hidden = false; }, hide: () => { document.getElementById('view-settings').hidden = true; }, init: () => cfg.load(), stop: () => {} },
 };
+
 let current = null;
 
-function isValidView(name) {
-  return Object.prototype.hasOwnProperty.call(views, name);
-}
-
-// 仅负责 DOM 显隐、导航高亮与视图生命周期（不读写 location.hash）
-function activate(name) {
-  if (!isValidView(name)) name = 'dashboard';
-  if (current === name) return;
-  if (current) {
-    views[current].leave();
-    views[current].el().hidden = true;
+function showView(name) {
+  if (current && VIEWS[current] && current !== name) VIEWS[current].stop();
+  for (const v in VIEWS) {
+    if (v === name) VIEWS[v].show();
+    else VIEWS[v].hide();
   }
+  // 菜单高亮
+  document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
+  if (VIEWS[name] && VIEWS[name].init) VIEWS[name].init();
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
   current = name;
-  views[name].el().hidden = false;
-  views[name].enter();
-  document.querySelectorAll('.nav-item[data-view]').forEach(b =>
-    b.classList.toggle('active', b.dataset.view === name));
 }
 
-// 唯一的“写路由”入口：写 location.hash，由 hashchange 触发 activate，避免循环
-function navigate(name) {
-  if (!isValidView(name)) name = 'dashboard';
-  const target = '#' + name;
-  if (location.hash === target) activate(name);
-  else location.hash = target;
+function handleRoute() {
+  const name = location.hash.replace('#', '') || 'dashboard';
+  if (ALLOWED.includes(name)) showView(name);
+  else showView('dashboard');
 }
 
-function hashToView() {
-  const h = location.hash.replace(/^#/, '');
-  return isValidView(h) ? h : 'dashboard';
-}
-
-function showLogin() {
-  if (current) { views[current].leave(); current = null; }
-  $('#app-view').hidden = true;
-  $('#login-view').hidden = false;
-}
-
-function showApp(authRequired) {
-  $('#login-view').hidden = true;
-  $('#app-view').hidden = false;
-  $('#logout-btn').hidden = !authRequired;
-  document.querySelectorAll('.view').forEach(v => v.hidden = true);
-  current = null;
-  activate(hashToView());
-}
-
-async function boot() {
+async function ping() {
   try {
     const me = await api('/api/me');
-    if (me.logged_in) showApp(me.auth_required);
-    else showLogin();
+    // /api/me 不接 protect 中间件，永远 200，必须读返回体判定是否真已登录。
+    return !!me?.logged_in;
   } catch {
-    showLogin();
+    return false;
   }
 }
 
-// 登录表单
-$('#login-form').addEventListener('submit', async e => {
-  e.preventDefault();
-  const fd = new FormData(e.target);
-  const btn = e.target.querySelector('button');
-  btn.disabled = true;
-  try {
-    await api('/api/login', {
-      method: 'POST',
-      body: { username: fd.get('username'), password: fd.get('password') },
-    });
-    e.target.reset();
-    showApp(true);
-  } catch (err) {
-    toast(err.message, 'err');
-  } finally {
-    btn.disabled = false;
+function logout() {
+  location.reload();
+}
+
+// 监听登录失效（API 统一抛出 401 时广播）
+window.addEventListener('auth:required', logout);
+
+async function boot() {
+  if (!await ping()) {
+    document.getElementById('login').hidden = false;
+    document.getElementById('app-view').hidden = true;
+    bindLogin();
+    return;
   }
-});
+  document.getElementById('login').hidden = true;
+  document.getElementById('app-view').hidden = false;
 
-// 退出登录
-$('#logout-btn').addEventListener('click', async () => {
-  try { await api('/api/logout', { method: 'POST' }); } catch { /* 忽略 */ }
-  showLogin();
-});
+  // 托管三视图的声明式绑定（v-scope），命令式 SSE/轮询仍由各 view 模块驱动。
+  PetiteVue.createApp({ dash, off, cfg }).mount('#app-view');
 
-// 导航切换：点击导航走 navigate（写 hash），由 hashchange 触发真正的视图切换
-$('#nav').addEventListener('click', e => {
-  const btn = e.target.closest('[data-view]');
-  if (btn) navigate(btn.dataset.view);
-});
+  // 导航按钮点击改 hash，由 hashchange 单一归口路由（不直接调 showView，避免双路径）。
+  document.querySelectorAll('[data-view]').forEach(b => {
+    b.addEventListener('click', () => { location.hash = '#' + b.dataset.view; });
+  });
+  window.addEventListener('hashchange', handleRoute);
+  handleRoute();
+}
 
-// URL hash 变化（含手动输入 #xxx、前进/后退、刷新）：同步切换视图
-window.addEventListener('hashchange', () => activate(hashToView()));
-
-// 任意接口 401 → 回到登录页
-window.addEventListener('auth:required', showLogin);
+function bindLogin() {
+  const form = document.getElementById('login-form');
+  if (!form) return;
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true;
+    try {
+      const res = await api('/api/login', {
+        method: 'POST',
+        body: { username: fd.get('username'), password: fd.get('password') },
+      });
+      if (res.ok) {
+        toast('登录成功', 'ok');
+        location.reload();
+      } else {
+        toast(res.message || '登录失败', 'err');
+        btn.disabled = false;
+      }
+    } catch (err) {
+      toast(err.message || '登录失败', 'err');
+      btn.disabled = false;
+    }
+  });
+}
 
 boot();

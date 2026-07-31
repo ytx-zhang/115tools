@@ -1,4 +1,4 @@
-package core
+package sync
 
 import (
 	"context"
@@ -24,11 +24,12 @@ type Visitor struct {
 	SkipByCount bool
 }
 
-// WalkCloud 递归遍历云端目录树。流程：计数跳过（可选）→ 获取配额拉取子项 →
+// WalkCloud 递归遍历云端目录树。流程：计数跳过（可选）→ 拉取子项 →
 // 目录交 EnterDir（递归受 dirSem 限制 64 协程）→ 文件交 VisitFile。
 // GetFileList 致命失败调 onFatal 并返回错误；文件级错误不向上传播。
+// API 并发由 drive 的 resty 限流（3/s + burst 5）兜底，不再在此持配额。
 func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor, onFatal func(error)) error {
-	dirSem := make(chan struct{}, 64) // 限制目录递归协程并发（与 Env.Sem 独立）
+	dirSem := make(chan struct{}, 64) // 限制目录递归协程并发
 
 	var walk func(path, fid string) error
 	walk = func(path, fid string) error {
@@ -51,16 +52,10 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 			}
 		}
 
-		// 第二步：拿配额 → 拉文件列表 → 立即还配额。
-		if !e.AcquireSlot(ctx) {
-			slog.Debug("[云端遍历] 获取配额失败(已取消)，退出目录", "路径", path)
-			return nil
-		}
+		// 第二步：拉文件列表。API 并发由 drive 的 resty 限流（3/s + burst 5）兜底，
+		// 不再在此持配额（避免递归死锁隐患）。
 		slog.Debug("[云端遍历] 获取文件列表", "路径", path)
 		items, err := e.API.GetFileList(ctx, fid)
-		// GetFileList 一结束立刻释放配额：配额只约束「同时在飞的 API 调用数」，
-		// 不约束目录处理与子目录递归，避免父子目录互相等锁死锁。
-		<-e.Sem
 		if err != nil {
 			if onFatal != nil {
 				onFatal(fmt.Errorf("[云端遍历] 获取列表失败[%s]: %w", path, err))

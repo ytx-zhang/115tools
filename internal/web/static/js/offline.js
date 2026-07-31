@@ -1,9 +1,9 @@
-// offline.js —— 离线下载：添加任务、任务列表轮询、删除/清空、配额
-import { api, toast, fmtSize, esc } from './api.js';
+// offline.js —— 离线下载：添加任务、任务列表轮询、删除/清空、配额。
+// 任务表格用 petite-vue v-for 声明式渲染（见 index.html v-scope="off"），自动转义文本；
+// 表单提交/删除/清空的事件绑定仍走 bindOnce（离线下载无 SSE，命令式更直接）。
+import { api, toast, fmtSize } from './api.js';
 
 let timer = null;
-let page = 1;
-let pageCount = 1;
 
 const statusMap = {
   '-1': ['失败', 'err'],
@@ -12,12 +12,52 @@ const statusMap = {
   '2': ['完成', 'ok'],
 };
 
+// off 是 petite-vue 托管的响应式状态（reactive 包裹，导出即代理，refresh 写入即刷新表格）。
+export const off = window.PetiteVue.reactive({
+  tasks: [],
+  page: 1,
+  pageCount: 1,
+  count: 0,
+  quota: '',
+  get pageInfo() { return `${off.page} / ${off.pageCount} 页 · 共 ${off.count} 个任务`; },
+
+  prev() { if (off.page > 1) { off.page--; off.refresh(); } },
+  next() { if (off.page < off.pageCount) { off.page++; off.refresh(); } },
+
+  async refresh() {
+    try {
+      const data = await api(`/api/offline/tasks?page=${off.page}`);
+      off.pageCount = Math.max(1, data.page_count || 1);
+      off.count = data.count || 0;
+      this.tasks = (data.tasks || []).map(t => {
+        const [text, cls] = statusMap[String(t.status)] || [`状态${t.status}`, ''];
+        return {
+          info_hash: t.info_hash,
+          name: t.name,
+          sizeText: fmtSize(t.size),
+          pct: +(t.percentDone || 0).toFixed(1),
+          statusText: text,
+          statusCls: cls,
+        };
+      });
+    } catch (err) {
+      // 401 表示会话失效需重新登录，停止轮询；其余错误（网络抖动 / 服务端临时异常）
+      // 仅提示，保留轮询，避免一次失败就彻底停掉任务列表。
+      if (err.status === 401) {
+        stopOffline();
+        return;
+      }
+      toast(err.message, 'err');
+    }
+  },
+});
+
 export function initOffline() {
   bindOnce();
   loadSavePathPlaceholder();
-  refresh();
+  off.refresh();
   loadQuota();
-  timer = setInterval(refresh, 5000);
+  timer = setInterval(() => off.refresh(), 5000);
 }
 
 export function stopOffline() {
@@ -31,9 +71,7 @@ function bindOnce() {
   bound = true;
 
   document.getElementById('offline-add-form').addEventListener('submit', addTasks);
-  document.getElementById('offline-refresh').onclick = () => { refresh(); loadQuota(); };
-  document.getElementById('page-prev').onclick = () => { if (page > 1) { page--; refresh(); } };
-  document.getElementById('page-next').onclick = () => { if (page < pageCount) { page++; refresh(); } };
+  document.getElementById('offline-refresh').onclick = () => { off.refresh(); loadQuota(); };
 
   document.querySelectorAll('[data-clear]').forEach(btn => {
     btn.onclick = async () => {
@@ -41,8 +79,8 @@ function bindOnce() {
       try {
         await api('/api/offline/clear', { method: 'POST', body: { flag: +btn.dataset.clear } });
         toast('已清除', 'ok');
-        page = 1;
-        refresh();
+        off.page = 1;
+        off.refresh();
       } catch (err) { toast(err.message, 'err'); }
     };
   });
@@ -59,7 +97,7 @@ function bindOnce() {
         body: { info_hash: btn.dataset.hash, delete_files: delFiles },
       });
       toast('已删除', 'ok');
-      refresh();
+      off.refresh();
     } catch (err) { toast(err.message, 'err'); }
   });
 }
@@ -81,8 +119,8 @@ async function addTasks(e) {
       const res = await api('/api/offline/torrent', { method: 'POST', body: upfd });
       toast(res.added ? '种子添加成功' : '种子添加失败', res.added ? 'ok' : 'err');
       if (res.added) form.querySelector('[name=torrent]').value = '';
-      page = 1;
-      refresh();
+      off.page = 1;
+      off.refresh();
       loadQuota();
     } catch (err) {
       toast(err.message, 'err');
@@ -109,53 +147,14 @@ async function addTasks(e) {
       failed.length ? 'err' : 'ok');
     failed.forEach(f => toast(`${f.message || '添加失败'}：${f.url.slice(0, 60)}`, 'err'));
     if (res.added) form.querySelector('[name=urls]').value = '';
-    page = 1;
-    refresh();
+    off.page = 1;
+    off.refresh();
     loadQuota();
   } catch (err) {
     toast(err.message, 'err');
   } finally {
     btn.disabled = false;
   }
-}
-
-async function refresh() {
-  try {
-    const data = await api(`/api/offline/tasks?page=${page}`);
-    pageCount = Math.max(1, data.page_count || 1);
-    document.getElementById('page-info').textContent = `${page} / ${pageCount} 页 · 共 ${data.count || 0} 个任务`;
-    renderTasks(data.tasks || []);
-  } catch (err) {
-    // 401 表示会话失效需重新登录，停止轮询；其余错误（网络抖动 / 服务端临时异常）
-    // 仅提示，保留轮询，避免一次失败就彻底停掉任务列表。
-    if (err.status === 401) {
-      stopOffline();
-      return;
-    }
-    toast(err.message, 'err');
-  }
-}
-
-function renderTasks(tasks) {
-  const tbody = document.getElementById('offline-tbody');
-  if (!tasks.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="muted center">暂无任务</td></tr>';
-    return;
-  }
-  tbody.innerHTML = tasks.map(t => {
-    const [text, cls] = statusMap[String(t.status)] || [`状态${t.status}`, ''];
-    const pct = (t.percentDone || 0).toFixed(1);
-    return `<tr>
-      <td class="name" title="${esc(t.name)}">${esc(t.name)}</td>
-      <td>${fmtSize(t.size)}</td>
-      <td><div class="progress" style="width:90px"><i style="width:${pct}%"></i></div>${pct}%</td>
-      <td><span class="badge ${cls}">${text}</span></td>
-      <td>
-        <button class="btn sm" data-hash="${esc(t.info_hash)}" data-del="0">删任务</button>
-        <button class="btn sm danger" data-hash="${esc(t.info_hash)}" data-del="1">删任务+文件</button>
-      </td>
-    </tr>`;
-  }).join('');
 }
 
 // 将保存目录输入框的占位提示设为已配置的 STRM 目录
@@ -171,7 +170,6 @@ async function loadSavePathPlaceholder() {
 async function loadQuota() {
   try {
     const q = await api('/api/offline/quota');
-    document.getElementById('quota-info').textContent =
-      `配额：剩余 ${q.surplus} / 共 ${q.count}`;
+    off.quota = `配额：剩余 ${q.surplus} / 共 ${q.count}`;
   } catch { /* 配额非关键信息，失败不打扰 */ }
 }

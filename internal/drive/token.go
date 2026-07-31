@@ -10,8 +10,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/ytx-zhang/115tools/internal/httputil"
 )
 
 // 本文件负责 115 访问令牌（AccessToken）的自动刷新。
@@ -34,13 +32,13 @@ func (d *Open115) refreshToken(ctx context.Context, overrideRT ...string) error 
 	}
 
 	// rt 默认读当前配置；传入 overrideRT（web 改 refresh_token 的校验场景）时以传入值为准
-	rt := d.cfg.GetRefreshToken()
+	rt := d.cfg.Token().RefreshToken
 	if len(overrideRT) > 0 && overrideRT[0] != "" {
 		rt = overrideRT[0]
 	}
 
 	// 无覆盖值时走正常节流：token 距过期仍 >5 分钟直接返回，避免每次请求都刷新
-	if len(overrideRT) == 0 && time.Until(d.cfg.GetExpireAt()) > 5*time.Minute {
+	if len(overrideRT) == 0 && time.Until(d.cfg.Token().ExpireAt) > 5*time.Minute {
 		return nil // token 还很新鲜，无需刷新
 	}
 
@@ -68,7 +66,7 @@ func (d *Open115) refreshToken(ctx context.Context, overrideRT ...string) error 
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := httputil.SharedHTTPClient().Do(req)
+	resp, err := HTTPClient().Do(req)
 	if err != nil {
 		return fail("[TOKEN] 网络请求失败: %w", err)
 	}
@@ -90,7 +88,7 @@ func (d *Open115) refreshToken(ctx context.Context, overrideRT ...string) error 
 	if res.State == 1 {
 		rt := res.Data.RefreshToken
 		if rt == "" {
-			rt = d.cfg.GetRefreshToken()
+			rt = d.cfg.Token().RefreshToken
 		}
 		d.cfg.SaveToken(res.Data.AccessToken, rt, res.Data.ExpiresIn)
 		// 预约下一次刷新：到期前 10 分钟

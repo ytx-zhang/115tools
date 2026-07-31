@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"github.com/ytx-zhang/115tools/internal/config"
 	"github.com/ytx-zhang/115tools/internal/drive"
-	"github.com/ytx-zhang/115tools/internal/logstream"
-	"github.com/ytx-zhang/115tools/internal/syncFile"
+	"github.com/ytx-zhang/115tools/internal/event"
+	synclib "github.com/ytx-zhang/115tools/internal/sync"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -21,15 +21,14 @@ import (
 //go:embed all:static
 var staticFS embed.FS
 
-// Deps 由 main 注入的依赖。Sync 是同步器生命周期管理器，
-// web 经它的 Current()/TaskCtx()/Reload()/Events() 访问当前实例。
+// Deps 由 main 注入的依赖。Sync 是同步器生命周期管理器，web 经它的方法访问当前实例。
 type Deps struct {
 	Cfg    *config.Config
 	Api    *drive.Open115
 	AppCtx context.Context
 	Wg     *sync.WaitGroup
-	Hub    *logstream.Hub
-	Sync   *syncFile.Runner
+	Hub    *event.Hub
+	Sync   *synclib.Syncer
 }
 
 // Server 管理面板 HTTP 服务。
@@ -117,9 +116,6 @@ func clientIP(r *http.Request) string {
 	}
 	if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
 		return xrip
-	}
-	if xcip := strings.TrimSpace(r.Header.Get("X-Client-IP")); xcip != "" {
-		return xcip
 	}
 	addr := r.RemoteAddr
 	if i := strings.LastIndexByte(addr, ':'); i >= 0 {

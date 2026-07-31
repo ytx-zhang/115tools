@@ -40,13 +40,6 @@ type Open115 struct {
 	refreshMu sync.Mutex     // token 刷新互斥锁：并发请求同时发现过期时只刷一次
 }
 
-// checkCtx 返回 ctx 的取消原因（context.Cause；未取消时返回 nil）。
-// 各 API 方法开头用它快速失败，避免向已取消的任务（如热重载中停掉的同步）
-// 继续发起网络请求。
-func checkCtx(ctx context.Context) error {
-	return context.Cause(ctx)
-}
-
 // New115Drive 创建 115 API 客户端，并立即刷新一次 token 确保可用。
 func New115Drive(cfg *config.Config) *Open115 {
 	d := &Open115{
@@ -67,7 +60,7 @@ func New115Drive(cfg *config.Config) *Open115 {
 			if err := d.refreshToken(r.Context()); err != nil {
 				return err
 			}
-			r.SetHeader("Authorization", "Bearer "+d.cfg.GetAccessToken())
+			r.SetHeader("Authorization", "Bearer "+d.cfg.Token().AccessToken)
 			return nil
 		}).
 		OnAfterResponse(func(c *resty.Client, r *resty.Response) error {
@@ -122,7 +115,7 @@ func withHeader(key, val string) reqOption {
 // State 校验由 OnAfterResponse 中间件统一完成（错误已带原始响应体片段）。
 // 调用方从返回的 res.Data 取业务字段即可，无需重复样板。
 func doAPI[T any](ctx context.Context, d *Open115, method, path string, opts ...reqOption) (res apiResponse[T], err error) {
-	if err = checkCtx(ctx); err != nil {
+	if err = context.Cause(ctx); err != nil {
 		return
 	}
 	req := d.Client.R().SetContext(ctx)
@@ -132,6 +125,23 @@ func doAPI[T any](ctx context.Context, d *Open115, method, path string, opts ...
 	req.SetResult(&res)
 	_, err = req.Execute(method, path)
 	return
+}
+
+// doRawAPI 与 doAPI 同骨架，但返回原始响应体，供调用方用 gjson 按路径取值
+// （适用于 115 响应字段多而只需少数字段的场景，如 upload/init、get_token）。
+func doRawAPI(ctx context.Context, d *Open115, method, path string, opts ...reqOption) ([]byte, error) {
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
+	req := d.Client.R().SetContext(ctx)
+	for _, opt := range opts {
+		opt(req)
+	}
+	resp, err := req.Execute(method, path)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body(), nil
 }
 
 // truncateBody 截断响应体用于错误提示，避免超长 HTML/二进制刷屏。

@@ -30,31 +30,15 @@ cmd/115tools/main.go        # 纯装配：日志管道、HTTP 服务、DB、Runn
 internal/
 ├── config/                 # 配置文件读写（缺失自动生成模板、必填项校验、就绪判定）
 ├── db/                     # bbolt 本地索引（路径→云端FID+大小）与批量写入器
-├── drive/                  # 115 API 客户端
-│  ├── open115.go           #   客户端装配（限流/鉴权/统一错误处理）
-│  ├── token.go             #   AccessToken 自动刷新
-│  ├── file_api.go          #   文件/目录操作（下载直链/列表/增删移改）
-│  ├── upload_api.go        #   上传（秒传优先）与 SHA1 工具
-│  └── offline.go · oss_upload.go · httpclient.go
-├── event/                  # 泛型事件流（日志/进度推送基础）
-├── httputil/               # 共享 HTTP 客户端
-├── logstream/              # 统一日志管道：slog 捕获进内存缓冲，供面板 SSE 推送
-├── strmServer/             # /download 302 直链服务（Emby 播放用，免鉴权）
-├── syncFile/               # 同步系统根包（门面/装配，不含具体业务）
-│  ├── syncFile.go          #   New() 装配三模块 + 对 web 的门面方法
-│  ├── bootstrap.go         #   启动初始化编排（建库扫描/回收目录）
-│  ├── cron.go              #   每 12 小时定时全量同步
-│  ├── runner.go            #   热重载生命周期管理
-│  ├── core/                # 三模块共享层（运行环境/云端遍历器/进度统计/文件存取）
-│  ├── local/               # 本地同步模块：监听本地变化 → 上传/清理云端（本地→云端）
-│  ├── cloud/               # 云端同步模块：全量遍历云端 → 下载/生成 strm（云端→本地）
-│  └── strm/                # STRM 生成模块：为云端媒体库批量生成 .strm 索引
+├── drive/                  # 115 API 客户端（open115/token/file_api/upload_api/offline/oss_upload/download）
+├── event/                  # 泛型事件流原语 + 日志广播特化层（slog 捕获进内存缓冲供面板 SSE）
+├── sync/                   # 同步系统根包（Syncer 门面 + 单次运行态 + 本地/云端/strm 三模块合一）
 └── web/                    # 管理面板 HTTP 层（鉴权/配置/任务触发/SSE 推送/静态资源）
 ```
 
 本地构建：`go build ./cmd/115tools`（产物可 `-o server`，与 Dockerfile 一致）。
 
-依赖方向单向：`local`/`cloud`/`strm` → `core`；根包 → 三模块 + `core`；`web` → `syncFile`/`logstream`。
+依赖方向单向：`web` → `sync`/`drive`/`config`；`sync` → `drive`/`config`/`db`/`event`；`drive` 不反向依赖 sync；`config` 不可 import sync（否则成环）。
 
 ## 目录命名规则（重要）
 

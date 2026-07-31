@@ -8,6 +8,7 @@ import (
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -24,44 +25,41 @@ type ossTarget struct {
 	cbVarBase64 string
 }
 
-// newOSSTarget 构造 OSS 客户端与上传目标参数（bucket/object/回调）。
-func newOSSTarget(token, init map[string]any) *ossTarget {
-	ak, _ := token["AccessKeyId"].(string)
-	sk, _ := token["AccessKeySecret"].(string)
-	st, _ := token["SecurityToken"].(string)
-	endpoint, _ := token["endpoint"].(string)
+// newOSSTarget 从 115 get_token / upload/init 的原始响应体提取凭证与上传目标
+// （bucket/object/回调），构造 OSS 客户端。
+func newOSSTarget(tokenBody, initBody []byte) *ossTarget {
+	token := gjson.ParseBytes(tokenBody)
+	init := gjson.ParseBytes(initBody)
 
 	cfg := oss.LoadDefaultConfig().
-		WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, st)).
+		WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			token.Get("data.AccessKeyId").String(),
+			token.Get("data.AccessKeySecret").String(),
+			token.Get("data.SecurityToken").String())).
 		WithRegion("cn-shenzhen").
-		WithEndpoint(endpoint)
-
-	cb, _ := init["callback"].(map[string]any)
-	cbStr, _ := cb["callback"].(string)
-	cbVarStr, _ := cb["callback_var"].(string)
-	bucket, _ := init["bucket"].(string)
-	object, _ := init["object"].(string)
+		WithEndpoint(token.Get("data.endpoint").String())
 
 	return &ossTarget{
 		client:      oss.NewClient(cfg),
-		bucket:      bucket,
-		object:      object,
-		cbBase64:    base64.StdEncoding.EncodeToString([]byte(cbStr)),
-		cbVarBase64: base64.StdEncoding.EncodeToString([]byte(cbVarStr)),
+		bucket:      init.Get("data.bucket").String(),
+		object:      init.Get("data.object").String(),
+		cbBase64:    base64.StdEncoding.EncodeToString([]byte(init.Get("data.callback.callback").String())),
+		cbVarBase64: base64.StdEncoding.EncodeToString([]byte(init.Get("data.callback.callback_var").String())),
 	}
 }
 
 // ossUpload 统一 OSS 真实内容上传（status=1 分支），供磁盘文件与内存字节共用。
-// readerAt 提供内容（*os.File 或 bytes.Reader 均实现 io.ReaderAt，单传/分片通用）；
-// size 为内容总字节数。小于等于阈值走单次 PUT，超过则走分片上传。
-func (d *Open115) ossUpload(ctx context.Context, token, init map[string]any, size int64, readerAt io.ReaderAt) (map[string]any, error) {
-	if err := checkCtx(ctx); err != nil {
+// tokenBody/initBody 为 115 响应原始体；readerAt 提供内容（*os.File 或 bytes.Reader
+// 均实现 io.ReaderAt，单传/分片通用）；size 为内容总字节数。小于等于阈值走单次 PUT，
+// 超过则走分片上传。
+func (d *Open115) ossUpload(ctx context.Context, tokenBody, initBody []byte, size int64, readerAt io.ReaderAt) (map[string]any, error) {
+	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
 	if size > ossMultipartThreshold {
-		return d.ossUploadMultipart(ctx, token, init, size, readerAt)
+		return d.ossUploadMultipart(ctx, tokenBody, initBody, size, readerAt)
 	}
-	t := newOSSTarget(token, init)
+	t := newOSSTarget(tokenBody, initBody)
 	result, err := t.client.PutObject(ctx, &oss.PutObjectRequest{
 		Bucket:      &t.bucket,
 		Key:         &t.object,
@@ -77,8 +75,12 @@ func (d *Open115) ossUpload(ctx context.Context, token, init map[string]any, siz
 
 // ossUploadMultipart 分片上传大文件（对齐 OpenList multpartUpload 实现）。
 // 仅 ossUpload 在 size 超过阈值时调用；readerAt 须支持按偏移随机读取（io.ReaderAt）。
-func (d *Open115) ossUploadMultipart(ctx context.Context, token, init map[string]any, fileSize int64, readerAt io.ReaderAt) (map[string]any, error) {
-	t := newOSSTarget(token, init)
+//
+// ⚠️ 不要换成 SDK 自带的 oss.Uploader：其 UploadResult 不暴露 CallbackResult
+// （uploader.go 两条路径都丢弃回调体），而回调体是 115 返回 data.file_id /
+// data.pick_code 的唯一通道，拿不到 FID 上传链路就断了（2026-07 评估后保留手写）。
+func (d *Open115) ossUploadMultipart(ctx context.Context, tokenBody, initBody []byte, fileSize int64, readerAt io.ReaderAt) (map[string]any, error) {
+	t := newOSSTarget(tokenBody, initBody)
 
 	// Step 1: 初始化分片上传，加 sequential 参数使 OSS 返回不带 -N 后缀的 ETag
 	initResult, err := t.client.InitiateMultipartUpload(ctx, &oss.InitiateMultipartUploadRequest{

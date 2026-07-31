@@ -1,91 +1,94 @@
-// settings.js —— 配置查看与修改（保存后实时生效）
+// settings.js —— 配置查看与修改（保存后实时生效）。
+// 表单字段用 petite-vue v-model 双向绑定（见 index.html v-scope="cfg"），提交前做 trim/类型转换。
 import { api, toast } from './api.js';
 
 const FIELDS = ['sync_path', 'strm_path', 'temp_path', 'strm_url', 'torrent_path', 'debounce_seconds', 'auth_username'];
 
-export function initSettings() {
-  bindOnce();
-  load();
-}
+// cfg 是 petite-vue 托管的响应式状态（reactive 包裹，导出即代理，v-model 双向绑定生效）。
+export const cfg = window.PetiteVue.reactive({
+  configReady: true,
+  bannerText: '',
+  // 表单字段（v-model 绑定；布尔/数字需显式类型）
+  refresh_token: '',
+  sync_path: '',
+  strm_path: '',
+  temp_path: '',
+  strm_url: '',
+  torrent_path: '',
+  debounce_seconds: 0,
+  video_exts: '',
+  upload_exclude: '',
+  cron_enabled: true,
+  cron_interval_hours: 12,
+  auth_username: '',
+  auth_password: '',
 
-let bound = false;
-function bindOnce() {
-  if (bound) return;
-  bound = true;
-  document.getElementById('config-form').addEventListener('submit', save);
-}
+  async load() {
+    try {
+      const c = await api('/api/config');
+      cfg.sync_path = c.sync_path ?? '';
+      cfg.strm_path = c.strm_path ?? '';
+      this.temp_path = c.temp_path ?? '';
+      this.strm_url = c.strm_url ?? '';
+      this.torrent_path = c.torrent_path ?? '';
+      this.debounce_seconds = c.debounce_seconds ?? 0;
+      this.cron_enabled = c.cron?.enabled !== false;
+      this.cron_interval_hours = c.cron?.interval_hours || 12;
+      this.auth_username = c.auth_username ?? '';
+      // 密码与 refresh_token 不回显明文：仅置空并给占位提示
+      cfg.auth_password = '';
+      cfg.refresh_token = '';
+      cfg.video_exts = (c.video_exts || []).join(', ');
+      cfg.upload_exclude = (c.upload_exclude || []).join(', ');
 
-async function load() {
-  try {
-    const cfg = await api('/api/config');
-    const form = document.getElementById('config-form');
-    for (const f of FIELDS) form.elements[f].value = cfg[f] ?? '';
-    // 定时全量同步：嵌套 cron 段。开关默认开启、间隔默认 12 小时。
-    form.elements['cron_enabled'].checked = cfg.cron?.enabled !== false;
-    form.elements['cron_interval_hours'].value = cfg.cron?.interval_hours || 12;
-    // 密码与 refresh_token 不回显明文：仅清空并给占位提示
-    form.elements['auth_password'].value = '';
-    form.elements['auth_password'].placeholder =
-      cfg.has_password ? '已设置，留空则保持不变' : '未设置';
-    form.elements['refresh_token'].value = '';
-    form.elements['refresh_token'].placeholder =
-      cfg.has_refresh_token ? '已配置，留空则保持不变' : '未配置';
-    // 视频扩展名：以逗号分隔回显当前生效值。
-    form.elements['video_exts'].value = (cfg.video_exts || []).join(', ');
-    // 上传排除名单：以逗号分隔回显当前生效值。
-    form.elements['upload_exclude'].value = (cfg.upload_exclude || []).join(', ');
-
-    // 配置不完整时，在设置页顶部给出提示与缺失项。
-    const sb = document.getElementById('settings-banner');
-    if (cfg.config_ready) {
-      sb.hidden = true;
-    } else {
-      sb.hidden = false;
-      sb.textContent = `⚠️ 配置不完整，同步未启动。待补齐：${(cfg.missing_fields || []).join('、')}`;
+      if (c.config_ready) {
+        cfg.configReady = true;
+      } else {
+        cfg.configReady = false;
+        cfg.bannerText = `⚠️ 配置不完整，同步未启动。待补齐：${(c.missing_fields || []).join('、')}`;
+      }
+    } catch (err) {
+      toast(err.message, 'err');
     }
-  } catch (err) {
-    toast(err.message, 'err');
-  }
-}
+  },
 
-async function save(e) {
-  e.preventDefault();
-  const form = e.target;
-  const btn = form.querySelector('[type=submit]');
-  const body = {
-    sync_path: form.elements['sync_path'].value.trim(),
-    strm_path: form.elements['strm_path'].value.trim(),
-    temp_path: form.elements['temp_path'].value.trim(),
-    strm_url: form.elements['strm_url'].value.trim(),
-    torrent_path: form.elements['torrent_path'].value.trim(),
-    debounce_seconds: +form.elements['debounce_seconds'].value || 0,
-    cron: {
-      enabled: form.elements['cron_enabled'].checked,
-      interval_hours: +form.elements['cron_interval_hours'].value || 12,
-    },
-    video_exts: form.elements['video_exts'].value.split(',').map(s => s.trim()).filter(Boolean),
-    upload_exclude: form.elements['upload_exclude'].value.split(',').map(s => s.trim()).filter(Boolean),
-    auth_username: form.elements['auth_username'].value.trim(),
-    auth_password: form.elements['auth_password'].value,
-    // 有输入才提交；留空表示保持不变（后端跳过校验，不改动 token）
-    refresh_token: form.elements['refresh_token'].value.trim(),
-  };
-
-  btn.disabled = true;
-  try {
-    const res = await api('/api/config', { method: 'PUT', body });
-    if (res.started) {
-      toast('已保存，同步器已启动', 'ok');
-    } else if (res.ready) {
-      toast(res.reloading ? '已保存，同步器热重载中…' : '已保存，实时生效', 'ok');
-    } else {
-      const miss = (res.missing || []).join('、');
-      toast(`已保存（配置仍不完整，未启动同步）待补齐：${miss}`, 'err');
+  async save(e) {
+    e?.preventDefault();
+    const btn = document.querySelector('#config-form [type=submit]');
+    if (btn) btn.disabled = true;
+    const body = {
+      sync_path: cfg.sync_path.trim(),
+      strm_path: cfg.strm_path.trim(),
+      temp_path: cfg.temp_path.trim(),
+      strm_url: cfg.strm_url.trim(),
+      torrent_path: cfg.torrent_path.trim(),
+      debounce_seconds: +cfg.debounce_seconds || 0,
+      cron: {
+        enabled: cfg.cron_enabled,
+        interval_hours: +cfg.cron_interval_hours || 12,
+      },
+      video_exts: cfg.video_exts.split(',').map(s => s.trim()).filter(Boolean),
+      upload_exclude: cfg.upload_exclude.split(',').map(s => s.trim()).filter(Boolean),
+      auth_username: cfg.auth_username.trim(),
+      auth_password: cfg.auth_password,
+      // 有输入才提交；留空表示保持不变（后端跳过校验，不改动 token）
+      refresh_token: cfg.refresh_token.trim(),
+    };
+    try {
+      const res = await api('/api/config', { method: 'PUT', body });
+      if (res.started) {
+        toast('已保存，同步器已启动', 'ok');
+      } else if (res.ready) {
+        toast(res.reloading ? '已保存，同步器热重载中…' : '已保存，实时生效', 'ok');
+      } else {
+        const miss = (res.missing || []).join('、');
+        toast(`已保存（配置仍不完整，未启动同步）待补齐：${miss}`, 'err');
+      }
+      await cfg.load(); // 重新拉取（清空密码框、刷新占位提示与横幅）
+    } catch (err) {
+      toast(err.message, 'err');
+    } finally {
+      if (btn) btn.disabled = false;
     }
-    load(); // 重新拉取（清空密码框、刷新占位提示与横幅）
-  } catch (err) {
-    toast(err.message, 'err');
-  } finally {
-    btn.disabled = false;
-  }
-}
+  },
+});

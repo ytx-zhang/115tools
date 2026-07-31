@@ -2,6 +2,7 @@ package drive
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -131,7 +132,7 @@ type TorrentInfo struct {
 
 // ParseTorrent 用已有的 torrent_sha1 + pick_code 解析种子。
 func (d *Open115) ParseTorrent(ctx context.Context, torrentSha1, pickCode string) (*TorrentInfo, error) {
-	if err := checkCtx(ctx); err != nil {
+	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
 	// 响应为 {state, code, data:{...}} 包装，data 内才是种子详情
@@ -159,32 +160,15 @@ func (d *Open115) ParseTorrent(ctx context.Context, torrentSha1, pickCode string
 		"名称", info.Name,
 		"file_count", info.FileCount,
 		"文件列表长度", len(info.Files),
-		"首个文件", fileDebug(info.Files),
 	)
 	return &info, nil
-}
-
-// fileDebug 仅用于调试日志，返回前几个文件的 路径/大小/选中标志。
-func fileDebug(files []TorrentFile) string {
-	var sb strings.Builder
-	for i, f := range files {
-		if i >= 5 {
-			sb.WriteString(" ...")
-			break
-		}
-		if i > 0 {
-			sb.WriteString(" | ")
-		}
-		fmt.Fprintf(&sb, "#%d %s size=%d wanted=%d", i+1, f.Path, f.Size, f.Wanted)
-	}
-	return sb.String()
 }
 
 // AddOfflineTaskBT 添加一个 BT 离线下载任务。wanted 为要下载的文件下标列表
 // （0 基、逗号分隔），空字符串表示下载全部文件；savePath 为相对根目录的保存
 // 路径串（必填非空，空串报 990002）；wpPathID 选填，传了则 savePath 相对该目录。
 func (d *Open115) AddOfflineTaskBT(ctx context.Context, infoHash, wanted, torrentSha1, pickCode, wpPathID, savePath string) (*OfflineAddResult, error) {
-	if err := checkCtx(ctx); err != nil {
+	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
 	form := map[string]string{
@@ -228,11 +212,11 @@ func (d *Open115) AddOfflineTaskBT(ctx context.Context, infoHash, wanted, torren
 // cid 为种子文件上传到的目录（云端临时存放，需目录 ID）；savePath 为离线下载
 // 保存路径（相对根目录的路径串，如 "STRM/电影"，必填非空）。
 func (d *Open115) AddTorrentTask(ctx context.Context, torrentData []byte, torrentName, cid, savePath string) (*OfflineAddResult, error) {
-	if err := checkCtx(ctx); err != nil {
+	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
 	// 0. 计算种子文件 SHA1（115 要求大写；ParseTorrent / AddOfflineTaskBT 均用此值，而非云端 file_id）
-	torrentSha1, _ := bytesSHA1WithPreid(torrentData)
+	torrentSha1 := fmt.Sprintf("%X", sha1.Sum(torrentData))
 
 	// 1. 上传种子文件
 	ufi, err := d.UploadBytes(ctx, torrentName, torrentData, cid, "", "")

@@ -121,7 +121,7 @@ type FileInfo struct {
 // GetFileList 拉取云端目录 cid 下的全部子项（自动处理分页，每页 1150 条）。
 // 注意：仅返回 Aid == "1" 的条目（过滤掉非常规挂载项）。
 func (d *Open115) GetFileList(ctx context.Context, cid string) ([]FileInfo, error) {
-	if err := checkCtx(ctx); err != nil {
+	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
 	type fileListResponse struct {
@@ -182,7 +182,7 @@ func (d *Open115) GetFileList(ctx context.Context, cid string) ([]FileInfo, erro
 		if int64(offset) >= res.Count {
 			break
 		}
-		if err := checkCtx(ctx); err != nil {
+		if err := context.Cause(ctx); err != nil {
 			return nil, err
 		}
 	}

@@ -74,9 +74,10 @@ func (c *Config) Snapshot() Editable {
 	}
 }
 
-// normalizeVideoExts 清洗用户输入的扩展名白名单：去空格、统一小写、补前导点、
+// NormalizeVideoExts 清洗扩展名白名单：去空格、统一小写、补前导点、
 // 去空、去重；全空时回退内置默认（保证运行期不会因空白名单把一切判为非视频）。
-func normalizeVideoExts(in []string) []string {
+// 导出供 sync 包在热重载时复用同一份清洗逻辑（避免与 core 重复）。
+func NormalizeVideoExts(in []string) []string {
 	seen := make(map[string]struct{})
 	var out []string
 	for _, e := range in {
@@ -99,12 +100,10 @@ func normalizeVideoExts(in []string) []string {
 	return out
 }
 
-// normalizeUploadExclude 清洗用户输入的上传排除名单：去空格、小写、去空、去重；
-// 空输入即返回空名单（运行期空名单 = 不排除任何文件）。
-// 与 syncFile/core.normalizeUploadExclude 逻辑一致（config 不能 import core，故刻意重复）。
-// 注意：不强制补前导点（如 .DS_Store 已是带点的整名）。匹配时文件名会先 ToLower 再比，
-// 与已小写化的名单比较，大小写无关，无需原样保留大小写。
-func normalizeUploadExclude(in []string) []string {
+// NormalizeUploadExclude 清洗上传排除名单：去空格、小写、去空、去重；
+// 空输入即返回空名单（运行期空名单 = 不排除任何文件）。导出供 sync 包复用。
+// 不强制补前导点（如 .DS_Store 已是带点的整名）；匹配时文件名先 ToLower 再比。
+func NormalizeUploadExclude(in []string) []string {
 	seen := make(map[string]struct{})
 	var out []string
 	for _, e := range in {
@@ -171,8 +170,8 @@ func (c *Config) Update(e Editable) (needReload bool, oldSyncPath, oldStrmUrl st
 	c.TempPath = e.TempPath
 	c.StrmUrl = e.StrmUrl
 	c.TorrentPath = e.TorrentPath
-	c.VideoExts = normalizeVideoExts(e.VideoExts)
-	c.UploadExclude = normalizeUploadExclude(e.UploadExclude)
+	c.VideoExts = NormalizeVideoExts(e.VideoExts)
+	c.UploadExclude = NormalizeUploadExclude(e.UploadExclude)
 	c.DebounceSeconds = e.DebounceSeconds
 	// 定时全量同步：用堆分配的 *bool 承载（避免局部变量取地址导致悬空指针）。
 	// 前端始终提交明确 true/false，故此处直接按用户意图落盘；

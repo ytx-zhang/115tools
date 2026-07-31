@@ -7,9 +7,8 @@ import (
 	"github.com/ytx-zhang/115tools/internal/config"
 	"github.com/ytx-zhang/115tools/internal/db"
 	"github.com/ytx-zhang/115tools/internal/drive"
-	"github.com/ytx-zhang/115tools/internal/logstream"
-	"github.com/ytx-zhang/115tools/internal/strmServer"
-	"github.com/ytx-zhang/115tools/internal/syncFile"
+	"github.com/ytx-zhang/115tools/internal/event"
+	synclib "github.com/ytx-zhang/115tools/internal/sync"
 	"github.com/ytx-zhang/115tools/internal/web"
 	"log/slog"
 	"net/http"
@@ -22,8 +21,8 @@ import (
 )
 
 func main() {
-	hub := logstream.NewHub()
-	logstream.Setup(hub)
+	hub := event.NewHub()
+	event.Setup(hub)
 
 	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -40,7 +39,7 @@ func main() {
 
 	// 2. /download 直链先注册并立即监听（Emby 依赖，免鉴权）
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /download", strmServer.New(apiClient).RedirectToRealURL)
+	mux.HandleFunc("GET /download", drive.NewRedirector(apiClient).RedirectToRealURL)
 	server := &http.Server{Addr: ":8080", Handler: mux}
 	wg.Go(func() {
 		slog.Info("HTTP服务启动在 :8080")
@@ -61,15 +60,15 @@ func main() {
 		slog.Warn("数据库压缩失败", "错误信息", err)
 	}
 
-	// 4. 创建 Runner + 注册管理面板（配置不完整面板也可用）
-	runner := syncFile.NewRunner(appCtx, cfg, apiClient, boltDB, &wg)
+	// 4. 创建 Syncer + 注册管理面板（配置不完整面板也可用）
+	syncer := synclib.NewSyncer(appCtx, cfg, apiClient, boltDB, &wg)
 	web.Register(mux, web.Deps{
-		Cfg: cfg, Api: apiClient, AppCtx: appCtx, Wg: &wg, Hub: hub, Sync: runner,
+		Cfg: cfg, Api: apiClient, AppCtx: appCtx, Wg: &wg, Hub: hub, Sync: syncer,
 	})
 
 	// 5. 配置完整才启动同步器，否则仅 Warn（面板补齐后由 web 保存逻辑拉起）
 	if cfg.IsSyncReady() {
-		if err := runner.Start(); err != nil {
+		if err := syncer.Start(); err != nil {
 			slog.Error("[初始化] 同步器启动失败", "错误信息", err)
 		}
 	} else {

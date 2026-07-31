@@ -126,34 +126,48 @@ func (d *DB) SaveRecord(localPath string, fid string, size int64) {
 	})
 }
 
+// deleteTree 在单个写事务内删除前缀为 prefix 的全部记录（含 prefix 自身与所有后代）。
+// keepPrefix 非空时，其自身及其子树（keepPrefix + '/'）被跳过——用于「新根在旧根子树内」
+// 时避免误删刚重建的新索引。
+func (d *DB) deleteTree(tx *bbolt.Tx, prefix, keepPrefix string) error {
+	b := tx.Bucket(d.bucketName)
+	if b == nil {
+		return nil
+	}
+	selfBytes := []byte(prefix)
+	childPrefix := append(append([]byte{}, selfBytes...), '/')
+	var keepBytes, keepChild []byte
+	if keepPrefix != "" {
+		keepBytes = []byte(keepPrefix)
+		keepChild = append(append([]byte{}, keepBytes...), '/')
+	}
+
+	c := b.Cursor()
+	for k, _ := c.Seek(selfBytes); k != nil; k, _ = c.Next() {
+		if !bytes.Equal(k, selfBytes) && !bytes.HasPrefix(k, childPrefix) {
+			break
+		}
+		if keepBytes != nil && (bytes.Equal(k, keepBytes) || bytes.HasPrefix(k, keepChild)) {
+			continue
+		}
+		if err := c.Delete(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // BatchClearPaths 删除传入路径（含目录的全部子条目）。
-// 一次性在单个写事务内用游标遍历并删除，不另做「收集+分块」——
-// bbolt 自身对短时并发写入/删除已优化良好，且写事务对读事务（MVCC 快照）无阻塞，
-// 旧的分块逻辑只是多余复杂度。
+// 一次性在单个写事务内用游标遍历并删除——bbolt 自身对删除已优化良好，
+// 写事务对读事务（MVCC 快照）无阻塞，旧的分块逻辑只是多余复杂度。
 func (d *DB) BatchClearPaths(fPaths []string) {
 	if len(fPaths) == 0 {
 		return
 	}
-
 	err := d.boltDB.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(d.bucketName)
-		if b == nil {
-			return nil
-		}
 		for _, fPath := range fPaths {
-			selfBytes := []byte(fPath)
-			childPrefix := make([]byte, len(selfBytes)+1)
-			copy(childPrefix, selfBytes)
-			childPrefix[len(selfBytes)] = '/'
-
-			c := b.Cursor()
-			for k, _ := c.Seek(selfBytes); k != nil; k, _ = c.Next() {
-				if !bytes.Equal(k, selfBytes) && !bytes.HasPrefix(k, childPrefix) {
-					break
-				}
-				if err := c.Delete(); err != nil {
-					return err
-				}
+			if e := d.deleteTree(tx, fPath, ""); e != nil {
+				return e
 			}
 		}
 		return nil
@@ -171,29 +185,7 @@ func (d *DB) ClearOldRoot(oldPrefix, keepPrefix string) {
 		return
 	}
 	err := d.boltDB.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(d.bucketName)
-		if b == nil {
-			return nil
-		}
-		selfBytes := []byte(oldPrefix)
-		childPrefix := append(append([]byte{}, selfBytes...), '/')
-		keepBytes := []byte(keepPrefix)
-		keepChild := append(append([]byte{}, keepBytes...), '/')
-
-		c := b.Cursor()
-		for k, _ := c.Seek(selfBytes); k != nil; k, _ = c.Next() {
-			if !bytes.Equal(k, selfBytes) && !bytes.HasPrefix(k, childPrefix) {
-				break
-			}
-			// 保留新同步根子树（新目录是旧目录子树的情况）
-			if bytes.Equal(k, keepBytes) || bytes.HasPrefix(k, keepChild) {
-				continue
-			}
-			if err := c.Delete(); err != nil {
-				return err
-			}
-		}
-		return nil
+		return d.deleteTree(tx, oldPrefix, keepPrefix)
 	})
 	if err != nil {
 		slog.Error("[数据库] 清理旧同步根失败", "旧根", oldPrefix, "错误信息", err)
@@ -337,24 +329,24 @@ func (d *DB) Compact() error {
 
 	dst, err := bbolt.Open(tmpPath, 0600, nil)
 	if err != nil {
-		d.boltDB, _ = reopen(d.path)
+		d.boltDB, _ = bbolt.Open(d.path, 0600, nil)
 		return fmt.Errorf("[数据库] 创建压缩目标文件失败: %w", err)
 	}
 
 	if err := bbolt.Compact(dst, src, 0); err != nil {
 		dst.Close()
 		os.Remove(tmpPath)
-		d.boltDB, _ = reopen(d.path)
+		d.boltDB, _ = bbolt.Open(d.path, 0600, nil)
 		return fmt.Errorf("[数据库] 压缩写入失败: %w", err)
 	}
 	dst.Close()
 
 	if err := os.Rename(tmpPath, d.path); err != nil {
-		d.boltDB, _ = reopen(d.path)
+		d.boltDB, _ = bbolt.Open(d.path, 0600, nil)
 		return fmt.Errorf("[数据库] 压缩后替换文件失败，已恢复原 DB: %w", err)
 	}
 
-	d.boltDB, err = reopen(d.path)
+	d.boltDB, err = bbolt.Open(d.path, 0600, nil)
 	if err != nil {
 		return fmt.Errorf("[数据库] 压缩后重新打开失败: %w", err)
 	}
@@ -367,15 +359,7 @@ func (d *DB) Compact() error {
 	return nil
 }
 
-// reopen 打开数据库文件并设置默认配置。
-func reopen(path string) (*bbolt.DB, error) {
-	db, err := bbolt.Open(path, 0600, nil)
-	if err != nil {
-		return nil, err
-	}
-	return db, nil
-}
-
+// fileSize 读取文件字节大小（Compact 日志用）。
 func fileSize(path string) int64 {
 	info, err := os.Stat(path)
 	if err != nil {
