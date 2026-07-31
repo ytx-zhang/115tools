@@ -120,6 +120,24 @@ func NormalizeUploadExclude(in []string) []string {
 	return out
 }
 
+// sameStringSlice 无序比较两个字符串切片是否含相同元素（忽略顺序与重复）。
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, v := range a {
+		seen[v]++
+	}
+	for _, v := range b {
+		if seen[v] == 0 {
+			return false
+		}
+		seen[v]--
+	}
+	return true
+}
+
 // GetAuth 返回登录凭据；username 为空表示未启用登录验证。
 // 返回的 password 字段为 bcrypt 哈希，而非明文。
 func (c *Config) GetAuth() (username, passwordHash string) {
@@ -128,17 +146,29 @@ func (c *Config) GetAuth() (username, passwordHash string) {
 	return c.Auth.Username, c.Auth.PasswordHash
 }
 
-// Update 校验并应用新配置，落盘持久化。
-// 返回 needReload 表示同步相关字段（路径/URL/静默窗口）发生变化，
-// 调用方需要热重载同步器使其实时生效。
-func (c *Config) Update(e Editable) (needReload bool, oldSyncPath, oldStrmUrl string, err error) {
+// ChangeSet 描述一次配置保存实际改变了哪些维度。
+// 各字段语义独立，web 层据其精确触发对应副作用，不再用 bool 在控制流里拼装，
+// 因此不会产生「改密码误触发全量扫描」这类兜底分支误判。
+type ChangeSet struct {
+	PathsChanged     bool // 同步根/strm/temp 路径变化 → 热重载同步器
+	StrmUrlChanged   bool // strm 直链变化 → 重写本地 .strm
+	SyncRulesChanged bool // 排除名单/视频扩展名变化 → 全量重扫（仅当未走 PathsChanged 时）
+	CronChanged      bool // 定时策略变化 → 热重载同步器
+	AuthChanged      bool // 登录用户名/密码变化 → 无同步副作用
+	TokenChanged     bool // refresh_token 变化 → 无同步副作用
+}
+
+// Update 校验并应用新配置，落盘持久化，返回本次实际改变的维度集合 ChangeSet
+// （调用方据其触发对应副作用）以及旧路径（供 Reload 清理旧根索引）。
+func (c *Config) Update(e Editable) (cs *ChangeSet, oldSyncPath, oldStrmUrl string, err error) {
+	cs = &ChangeSet{}
 	// 注意：不再强制 sync_path / strm_path / temp_path / strm_url 非空，
 	// 允许先保存不完整配置（前端会提示缺失项、同步器暂不启动）；
 	// 待用户在面板补齐后由 web 保存逻辑自动拉起同步器。
 	if e.AuthUsername != "" && e.AuthPassword == "" {
 		// 允许留空表示沿用旧密码，但旧密码也为空时必须设置
 		if _, old := c.GetAuth(); old == "" {
-			return false, "", "", fmt.Errorf("启用登录验证时必须设置密码")
+			return nil, "", "", fmt.Errorf("启用登录验证时必须设置密码")
 		}
 	}
 
@@ -147,7 +177,7 @@ func (c *Config) Update(e Editable) (needReload bool, oldSyncPath, oldStrmUrl st
 	if e.AuthUsername != "" && e.AuthPassword != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(e.AuthPassword), bcrypt.DefaultCost)
 		if err != nil {
-			return false, "", "", fmt.Errorf("密码哈希失败: %w", err)
+			return nil, "", "", fmt.Errorf("密码哈希失败: %w", err)
 		}
 		newHash = string(hash)
 	}
@@ -157,21 +187,28 @@ func (c *Config) Update(e Editable) (needReload bool, oldSyncPath, oldStrmUrl st
 
 	oldSyncPath = c.SyncPath
 	oldStrmUrl = c.StrmUrl
-	needReload = e.SyncPath != c.SyncPath ||
+
+	newVideoExts := NormalizeVideoExts(e.VideoExts)
+	newExclude := NormalizeUploadExclude(e.UploadExclude)
+
+	cs.PathsChanged = e.SyncPath != c.SyncPath ||
 		e.StrmPath != c.StrmPath ||
-		e.TempPath != c.TempPath ||
-		e.StrmUrl != c.StrmUrl ||
-		e.DebounceSeconds != c.DebounceSeconds ||
-		e.Cron.Enabled != c.CronEnabled() ||
+		e.TempPath != c.TempPath
+	cs.StrmUrlChanged = e.StrmUrl != c.StrmUrl
+	cs.SyncRulesChanged = !sameStringSlice(newExclude, c.UploadExclude) ||
+		!sameStringSlice(newVideoExts, c.VideoExts)
+	cs.CronChanged = e.Cron.Enabled != c.CronEnabled() ||
 		e.Cron.IntervalHours != c.Cron.IntervalHours
+	cs.AuthChanged = e.AuthUsername != c.Auth.Username || newHash != ""
+	cs.TokenChanged = e.RefreshToken != c.token.RefreshToken
 
 	c.SyncPath = e.SyncPath
 	c.StrmPath = e.StrmPath
 	c.TempPath = e.TempPath
 	c.StrmUrl = e.StrmUrl
 	c.TorrentPath = e.TorrentPath
-	c.VideoExts = NormalizeVideoExts(e.VideoExts)
-	c.UploadExclude = NormalizeUploadExclude(e.UploadExclude)
+	c.VideoExts = newVideoExts
+	c.UploadExclude = newExclude
 	c.DebounceSeconds = e.DebounceSeconds
 	// 定时全量同步：用堆分配的 *bool 承载（避免局部变量取地址导致悬空指针）。
 	// 前端始终提交明确 true/false，故此处直接按用户意图落盘；
@@ -193,10 +230,13 @@ func (c *Config) Update(e Editable) (needReload bool, oldSyncPath, oldStrmUrl st
 	default:
 		c.Auth.Username = e.AuthUsername // 密码留空沿用旧哈希
 	}
+	if e.RefreshToken != "" {
+		c.token.RefreshToken = e.RefreshToken
+	}
 
 	if err := c.persistLocked(); err != nil {
-		return needReload, oldSyncPath, oldStrmUrl, fmt.Errorf("配置写盘失败: %w", err)
+		return nil, oldSyncPath, oldStrmUrl, fmt.Errorf("配置写盘失败: %w", err)
 	}
-	slog.Info("[CONFIG] 配置已更新", "需要热重载", needReload)
-	return needReload, oldSyncPath, oldStrmUrl, nil
+	slog.Info("[CONFIG] 配置已更新", "变更", cs)
+	return cs, oldSyncPath, oldStrmUrl, nil
 }

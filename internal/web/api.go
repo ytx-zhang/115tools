@@ -148,49 +148,53 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		req.RefreshToken = ""
 	}
 
-	// 更新配置（只覆盖可编辑字段，不丢认证）
-	needReload, oldSyncPath, oldStrmUrl, err := s.Cfg.Update(req)
+	// 更新配置（只覆盖可编辑字段，不丢认证），返回本次实际变更维度
+	cs, oldSyncPath, _, err := s.Cfg.Update(req)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
 		return
 	}
-	newStrmUrl := s.Cfg.StrmUrl // 主 goroutine 捕获，避免闭包内并发读 config
-
 	// ② 刷新运行期全局变量（atomic 更新，避免与扫描协程竞争）
 	synclib.SetVideoExts(s.Cfg.VideoExts)
 	synclib.SetUploadExclude(s.Cfg.UploadExclude)
 
-	// ③ 同步器推进
+	// ③ 同步器推进：据 ChangeSet 精确触发副作用，无兜底分支。
 	missing := s.Cfg.RequiredMissing()
 	ready := len(missing) == 0
-	started := false
+	triggered := false // 本次是否刚拉起/重载了同步器（供前端提示）
 	switch {
-	case !ready: // 配置不完整，不启动
+	case !ready: // 配置不完整，不启动、不重载
 	case !s.Sync.Snapshot().Ready:
+		// 首次补齐缺失项：拉起同步器
 		slog.Info("[WEB] 配置已补齐，启动同步器")
 		s.Wg.Go(func() { s.Sync.Reload("") })
-		started = true
-	case needReload:
-		slog.Info("[WEB] 路径类配置变更，热重载同步器")
+		triggered = true
+	case cs.PathsChanged || cs.CronChanged:
+		// 路径/定时策略变化：热重载同步器（重建实例天然含重扫）。
+		slog.Info("[WEB] 路径/定时配置变更，热重载同步器")
 		s.Wg.Go(func() {
 			s.Sync.Reload(oldSyncPath)
-			if oldStrmUrl != newStrmUrl {
+			// 路径重载已重建实例；仅当 strm 直链单独变化（路径未变）才需补一次重写。
+			if cs.StrmUrlChanged && !cs.PathsChanged {
 				s.Sync.RegenerateStrm(s.Sync.TaskCtx())
 			}
 		})
-		started = true
-	}
-	// 排除名单变更但未热重载时，触发全量扫描清理云端存量
-	if ready && !started {
-		slog.Info("[WEB] 上传排除名单已更新，触发全量扫描清理")
+		triggered = true
+	case cs.StrmUrlChanged:
+		// 仅 strm 直链变化：纯本地重写 .strm 内容
+		slog.Info("[WEB] strm 直链变更，重写本地 .strm")
+		s.Wg.Go(func() { s.Sync.RegenerateStrm(s.Sync.TaskCtx()) })
+	case cs.SyncRulesChanged:
+		// 排除名单/视频扩展名变化：触发一次全量重扫（清理云端存量 / 重判视频）。
+		slog.Info("[WEB] 上传规则已更新，触发全量扫描清理")
 		s.Wg.Go(func() { s.Sync.RescanRoot(s.Sync.TaskCtx()) })
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":        true,
-		"reloading": needReload,
+		"reloading": triggered,
 		"ready":     ready,
-		"started":   started,
+		"started":   triggered,
 		"missing":   missing,
 	})
 }

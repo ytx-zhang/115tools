@@ -36,21 +36,28 @@ async function ping() {
   try {
     const me = await api('/api/me');
     // /api/me 不接 protect 中间件，永远 200，必须读返回体判定是否真已登录。
-    return !!me?.logged_in;
+    return { ok: !!me?.logged_in, authRequired: !!me?.auth_required };
   } catch {
-    return false;
+    return { ok: false, authRequired: false };
   }
 }
 
 function logout() {
-  location.reload();
+  // 先清服务端 session（失败不阻塞，reload 后仍需登录）。
+  fetch('/api/logout', {method: 'POST', credentials: 'same-origin'}).catch(() => {}).finally(() => {
+    location.reload();
+  });
 }
 
 // 监听登录失效（API 统一抛出 401 时广播）
 window.addEventListener('auth:required', logout);
+// 退出登录按钮
+const lb = document.getElementById('logout-btn');
+if (lb) lb.addEventListener('click', logout);
 
 async function boot() {
-  if (!await ping()) {
+  const res = await ping();
+  if (!res.ok) {
     document.getElementById('login').hidden = false;
     document.getElementById('app-view').hidden = true;
     bindLogin();
@@ -58,6 +65,9 @@ async function boot() {
   }
   document.getElementById('login').hidden = true;
   document.getElementById('app-view').hidden = false;
+  // 仅启用登录验证时显示「退出登录」按钮（auth_required 为 true）。
+  const lb = document.getElementById('logout-btn');
+  if (lb) lb.hidden = !res.authRequired;
 
   // 托管三视图的声明式绑定（v-scope），命令式 SSE/轮询仍由各 view 模块驱动。
   PetiteVue.createApp({ dash, off, cfg }).mount('#app-view');

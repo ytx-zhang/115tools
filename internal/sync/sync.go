@@ -214,9 +214,7 @@ type StatusView struct {
 
 // Snapshot 返回当前完整状态快照（含 Ready/ConfigReady/Missing/Sync/Strm）。
 func (s *Syncer) Snapshot() *StatusView {
-	s.mu.Lock()
-	cur := s.cur
-	s.mu.Unlock()
+	cur := s.current()
 	view := &StatusView{
 		Ready:       cur != nil,
 		ConfigReady: s.cfg.IsSyncReady(),
