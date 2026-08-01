@@ -2,6 +2,7 @@ package drive
 
 import (
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -13,9 +14,15 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// Redirector 把 115 网盘的 pickcode 转成可直接播放的真实直链并重定向给 Emby。
-// 直链有有效期，这里按 URL 里的 t 参数动态计算缓存时长，并对同一 pickcode+UA
-// 并发请求做单飞合并（singleflight），避免重复打 115 接口。
+// passthroughUA 透传模式取链 & 回源 CDN 统一使用的 UA。
+// ⚠️ 115 直链绑定取链 UA，回源必须与取链一致，故此值取链和回源两处共用，勿分叉。
+const passthroughUA = "Fuck115"
+
+// Redirector 把 115 网盘的 pickcode 转成真实直链。按请求 UA 分流：
+//   - UA 为空或以 "Lavf" 开头 → 透传模式：后端回源 115 CDN 流式回传（供前置 nginx 切片缓存）；
+//   - 其余 UA → 302 模式：直接重定向到 CDN 直链，由客户端自行跳转。
+//
+// 直链有时效，按 URL 的 t 参数动态计算缓存时长，并对同一 key 的并发做 singleflight 合并。
 type Redirector struct {
 	api   *Open115
 	cache sync.Map
@@ -24,6 +31,18 @@ type Redirector struct {
 
 // errEmptyURL 表示 115 接口成功返回但直链为空。
 var errEmptyURL = errors.New("115接口返回空直链")
+
+// proxyClient 透传专用客户端：body 不限时（大文件流式），仅限响应头等待。
+var proxyClient = &http.Client{
+	Timeout: 0,
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
 
 // NewRedirector 创建直链重定向器。
 func NewRedirector(api *Open115) *Redirector {
@@ -60,27 +79,19 @@ func (s *Redirector) storeCache(key, url, name string, expiration time.Duration)
 	})
 }
 
-// RedirectToRealURL 处理 /download?pickcode=xxx：缓存命中直接重定向，否则取直链后缓存并跳转。
-func (s *Redirector) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
-	pickCode := r.URL.Query().Get("pickcode")
-	if pickCode == "" {
-		slog.Warn("[strm后端] 未找到pickcode")
-		http.Error(w, "未找到pickcode", http.StatusBadRequest)
-		return
-	}
-
-	clientUA := strings.TrimSpace(r.Header.Get("User-Agent"))
-	cacheKey := pickCode + "_" + clientUA
+// resolveURL 查缓存 → singleflight 取链 → 存缓存，返回可用直链。
+// ua 决定 115 直链绑定关系，同时作为缓存 key 的一部分（透传/302 各自分桶）。
+func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheItem, error) {
+	cacheKey := pickCode + "|" + ua
 
 	if item, ok := s.loadCache(cacheKey); ok && !time.Now().After(item.expireAt) {
-		slog.Debug("[strm后端] 缓存命中", "媒体名称", item.name, "UA", clientUA)
-		http.Redirect(w, r, item.url, http.StatusFound)
-		return
+		slog.Debug("[strm后端] 缓存命中", "媒体名称", item.name, "UA", ua)
+		return item, nil
 	}
 
 	// 单飞：同一 key 的并发请求合并为一次 115 调用，所有等待者共享同一份结果。
 	ch := s.sf.DoChan(cacheKey, func() (any, error) {
-		info, err := s.api.GetDownloadUrl(r.Context(), pickCode, clientUA)
+		info, err := s.api.GetDownloadUrl(r.Context(), pickCode, ua)
 		if err != nil {
 			slog.Error("[strm后端] 115接口报错", "err", err)
 			return nil, err
@@ -102,17 +113,102 @@ func (s *Redirector) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.storeCache(cacheKey, info.Url, info.Name, expiration)
-		slog.Info("[strm后端] 获取新地址", "名称", info.Name, "UA", clientUA, "缓存时长", expiration.Round(time.Second).String())
-		return info, nil
+		slog.Info("[strm后端] 获取新地址", "名称", info.Name, "UA", ua, "缓存时长", expiration.Round(time.Second).String())
+		return &cacheItem{url: info.Url, name: info.Name}, nil
 	})
 	select {
-	case <-r.Context().Done(): // 客户端断开即静默退出（请求已无所谓响应）
-		return
+	case <-r.Context().Done(): // 客户端断开
+		return nil, r.Context().Err()
 	case res := <-ch:
 		if res.Err != nil {
-			http.NotFound(w, r)
+			return nil, res.Err
+		}
+		return res.Val.(*cacheItem), nil
+	}
+}
+
+// isPassthrough 判断是否走透传：UA 为空或以 "Lavf" 开头（FFmpeg/libavformat）。
+func isPassthrough(ua string) bool {
+	ua = strings.TrimSpace(ua)
+	return ua == "" || strings.HasPrefix(ua, "Lavf")
+}
+
+// RedirectToRealURL 处理 /download?pickcode=xxx：按 UA 分流透传 / 302。
+func (s *Redirector) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
+	pickCode := r.URL.Query().Get("pickcode")
+	if pickCode == "" {
+		slog.Warn("[strm后端] 未找到pickcode")
+		http.Error(w, "未找到pickcode", http.StatusBadRequest)
+		return
+	}
+
+	if isPassthrough(r.Header.Get("User-Agent")) {
+		s.serveProxy(w, r, pickCode)
+		return
+	}
+	s.serveRedirect(w, r, pickCode)
+}
+
+// serveRedirect 302 模式：用客户端真实 UA 取链并重定向（客户端自行访问 CDN）。
+func (s *Redirector) serveRedirect(w http.ResponseWriter, r *http.Request, pickCode string) {
+	item, err := s.resolveURL(r, pickCode, strings.TrimSpace(r.Header.Get("User-Agent")))
+	if err != nil {
+		if r.Context().Err() != nil {
+			return // 客户端断开，无需响应
+		}
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, item.url, http.StatusFound)
+}
+
+// serveProxy 透传模式：用 passthroughUA 取链并回源 115 CDN，把 CDN 响应
+// （状态码 + 全部响应头 + body）原样流式回传给前置 nginx，供其切片缓存。
+// ⚠️ 只透传 Range + UA 到 CDN；回程原样透传 CDN 的所有头，绝不自己重算任何
+//
+//	长度字段（nginx slice 靠 Content-Range 的 TOTAL 切分整文件）。
+func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode string) {
+	item, err := s.resolveURL(r, pickCode, passthroughUA)
+	if err != nil {
+		if r.Context().Err() != nil {
 			return
 		}
-		http.Redirect(w, r, res.Val.(*DownloadUrlInfo).Url, http.StatusFound)
+		http.NotFound(w, r)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, item.url, nil)
+	if err != nil {
+		http.Error(w, "构造回源请求失败", http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("User-Agent", passthroughUA)
+	if rng := r.Header.Get("Range"); rng != "" {
+		req.Header.Set("Range", rng) // 原样转发 nginx 的切片 Range
+	}
+
+	resp, err := proxyClient.Do(req)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		slog.Error("[strm后端] 回源CDN失败", "名称", item.name, "err", err)
+		http.Error(w, "回源失败", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 原样透传 CDN 的全部响应头（含同名多值），绝不重算任何长度字段
+	// （nginx slice 靠 Content-Range 的 TOTAL 切分整文件）。
+	dst := w.Header()
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			dst.Add(k, v)
+		}
+	}
+
+	w.WriteHeader(resp.StatusCode) // 原样透传 200 / 206
+	if _, err := io.Copy(w, resp.Body); err != nil && r.Context().Err() == nil {
+		slog.Debug("[strm后端] 透传中断", "名称", item.name, "err", err)
 	}
 }

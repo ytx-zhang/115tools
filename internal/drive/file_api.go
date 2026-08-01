@@ -16,11 +16,8 @@ type DownloadUrlInfo struct {
 }
 
 // GetDownloadUrl 用 pickcode 换取文件的真实下载地址。
-// ua 是 115 的强制校验项（服务端按 User-Agent 区分调用方），不能为空。
+// ua 会被 115 记入直链绑定，回源 CDN 时须带相同 UA（透传模式已保证非空）。
 func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*DownloadUrlInfo, error) {
-	if ua == "" {
-		return nil, fmt.Errorf("请求ua为空")
-	}
 	res, err := doAPI[map[string]struct {
 		FileName string `json:"file_name"`
 		Url      struct {
