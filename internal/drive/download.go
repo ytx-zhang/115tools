@@ -33,14 +33,18 @@ type Redirector struct {
 var errEmptyURL = errors.New("115接口返回空直链")
 
 // proxyClient 透传专用客户端：body 不限时（大文件流式），仅限响应头等待。
+// ⚠️ MaxIdleConnsPerHost 默认仅 2，nginx slice 并发拉片会超出并丢弃空闲连接，
+// 导致每片重做 TLS 握手（非对称运算，CPU 杀手）。必须显式放大。
 var proxyClient = &http.Client{
 	Timeout: 0,
 	Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
-		MaxIdleConns:          100,
+		MaxIdleConns:          200,
+		MaxIdleConnsPerHost:   100,
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     false, // CDN 拉流用 HTTP/1.1 开销更低
 	},
 }
 
@@ -133,6 +137,18 @@ func isPassthrough(ua string) bool {
 	return ua == "" || strings.HasPrefix(ua, "Lavf")
 }
 
+// downgradeToHTTP 把直链的 https 降级为 http，省掉回源 TLS 解密（CPU 大头）。
+// ⚠️ 仅用于透传模式（服务端到 CDN 的内部回源）。302 模式绝不可降级：
+// 浏览器在 https 页面下会因混合内容拦截 http 跳转，导致页面加载失败。
+func downgradeToHTTP(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" {
+		return raw
+	}
+	u.Scheme = "http"
+	return u.String()
+}
+
 // RedirectToRealURL 处理 /download?pickcode=xxx：按 UA 分流透传 / 302。
 func (s *Redirector) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	pickCode := r.URL.Query().Get("pickcode")
@@ -177,7 +193,8 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 		return
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, item.url, nil)
+	// 回源降级为 http：省掉 TLS 解密开销。仅限透传，302 分支保持 https。
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, downgradeToHTTP(item.url), nil)
 	if err != nil {
 		http.Error(w, "构造回源请求失败", http.StatusInternalServerError)
 		return
