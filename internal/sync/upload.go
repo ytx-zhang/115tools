@@ -2,12 +2,15 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ytx-zhang/115tools/internal/drive"
 )
 
 // 本文件实现上传执行层：固定大小的 worker 池 + 两种上传任务（普通文件 / .strm）。
@@ -114,7 +117,12 @@ func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 		err = l.upFileTask(ctx, cid, fPath, fileInfo)
 	}
 	if err != nil {
-		slog.Error("同步失败", "文件", fPath, "错误", err, "耗时", time.Since(upStart))
+		// 上传前文件被外部修改导致大小变化的错误属可自愈（后续扫描会重传），降级为 Warn 减少日志噪音。
+		if errors.Is(err, drive.ErrUploadSizeChanged) {
+			slog.Warn("同步跳过（文件上传前被修改，待下次扫描重传）", "文件", fPath, "错误", err, "耗时", time.Since(upStart))
+		} else {
+			slog.Error("同步失败", "文件", fPath, "错误", err, "耗时", time.Since(upStart))
+		}
 	} else {
 		slog.Info("上传文件完成", "文件", fPath, "耗时", time.Since(upStart))
 	}

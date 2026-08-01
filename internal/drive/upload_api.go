@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,10 @@ import (
 
 	"github.com/tidwall/gjson"
 )
+
+// ErrUploadSizeChanged 表示上传前复核发现文件大小相对 init 阶段已变化（被外部重写/截断）。
+// 属可自愈的瞬时状态，调用方应降级为警告并交由后续扫描重传，不应视为致命错误。
+var ErrUploadSizeChanged = errors.New("上传前文件大小已变化")
 
 // 本文件是 115 上传 API：普通文件上传（UploadFile）。
 //
@@ -143,6 +148,12 @@ func (d *Open115) uploadReal(ctx context.Context, pathStr string, size int64, in
 		return nil, fmt.Errorf("打开文件失败: %w", err)
 	}
 	defer f.Close()
+	// init 阶段 stat 与此处 open 之间可能受外部重写/截断影响，复核大小一致再上传，
+	// 避免 Content-Length 与实际 body 不符触发 "ContentLength=... with Body length ..."
+	// 传输错误，也避免上传变长后的残缺内容。不一致则放弃本次，由后续扫描重新 init 重传。
+	if fi, statErr := f.Stat(); statErr == nil && fi.Size() != size {
+		return nil, fmt.Errorf("%w: 期望=%d 实际=%d", ErrUploadSizeChanged, size, fi.Size())
+	}
 	cbResp, err := d.ossUpload(ctx, tokenBody, initBody, size, f)
 	if err != nil {
 		return nil, fmt.Errorf("OSS上传失败: %w", err)
