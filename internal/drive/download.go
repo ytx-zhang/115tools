@@ -48,6 +48,40 @@ var proxyClient = &http.Client{
 	},
 }
 
+// 透传防风控门禁（均在 proxyEnter 内串行生效）：
+//   - 速率限制 proxyMinInterval=1s：任意 1s 内最多放行 1 次回源；
+//   - 并发信号量 proxySem 容量 1：同时最多 1 个回源在飞。
+//
+// nginx slice 缓存兜底，串行+限速只影响冷拉速度。lastProxyAt 为上次放行回源的 unixnano。
+var (
+	proxyRateMu sync.Mutex
+	lastProxyAt int64
+)
+
+const proxyMinInterval = 1 * time.Second
+
+var proxySem = make(chan struct{}, 1)
+
+// proxyEnter 回源准入：等速率间隔（1s 内只放行一次）+ 占并发名额；
+// 回源返回后须配对 proxyExit 释放。
+func proxyEnter() {
+	proxyRateMu.Lock()
+	now := time.Now()
+	next := time.Unix(0, lastProxyAt).Add(proxyMinInterval)
+	if d := next.Sub(now); d > 0 {
+		time.Sleep(d)
+		now = next // 用计划放行时刻，避免间隔累加漂移
+	}
+	lastProxyAt = now.UnixNano()
+	proxyRateMu.Unlock()
+
+	proxySem <- struct{}{}
+}
+
+func proxyExit() {
+	<-proxySem
+}
+
 // NewRedirector 创建直链重定向器。
 func NewRedirector(api *Open115) *Redirector {
 	return &Redirector{api: api}
@@ -178,54 +212,87 @@ func (s *Redirector) serveRedirect(w http.ResponseWriter, r *http.Request, pickC
 	http.Redirect(w, r, item.url, http.StatusFound)
 }
 
-// serveProxy 透传模式：用 passthroughUA 取链并回源 115 CDN，把 CDN 响应
-// （状态码 + 全部响应头 + body）原样流式回传给前置 nginx，供其切片缓存。
-// ⚠️ 只透传 Range + UA 到 CDN；回程原样透传 CDN 的所有头，绝不自己重算任何
-//
-//	长度字段（nginx slice 靠 Content-Range 的 TOTAL 切分整文件）。
+// serveProxy 透传模式：用 passthroughUA 取链并回源 115 CDN，把 CDN 响应（状态码 +
+// 全部响应头 + body）原样流式回传前置 nginx 做切片缓存。⚠️ 回程绝不重算任何长度
+// 字段（nginx slice 靠 Content-Range 的 TOTAL 切分整文件）。
+// 回源非 2xx 静默重试（最多 2 次，重试前清直链缓存取新链）；所有回源经 proxyEnter
+// 准入（1s 限速 + 并发 1 串行），避免并发拉片触发 115 风控。
 func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode string) {
-	item, err := s.resolveURL(r, pickCode, passthroughUA)
-	if err != nil {
-		if r.Context().Err() != nil {
+	const maxRetries = 2
+	cacheKey := pickCode + "|" + passthroughUA
+	var lastStatus int
+	var lastName string
+	rng := r.Header.Get("Range")
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			s.cache.Delete(cacheKey) // 旧直链可能已失效，重试前取新链
+		}
+
+		item, err := s.resolveURL(r, pickCode, passthroughUA)
+		lastName = item.name
+		if err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
+			http.NotFound(w, r)
 			return
 		}
-		http.NotFound(w, r)
-		return
-	}
 
-	// 回源降级为 http：省掉 TLS 解密开销。仅限透传，302 分支保持 https。
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, downgradeToHTTP(item.url), nil)
-	if err != nil {
-		http.Error(w, "构造回源请求失败", http.StatusInternalServerError)
-		return
-	}
-	req.Header.Set("User-Agent", passthroughUA)
-	if rng := r.Header.Get("Range"); rng != "" {
-		req.Header.Set("Range", rng) // 原样转发 nginx 的切片 Range
-	}
-
-	resp, err := proxyClient.Do(req)
-	if err != nil {
-		if r.Context().Err() != nil {
+		// 回源降级为 http 省掉 TLS 解密；302 分支保持 https
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, downgradeToHTTP(item.url), nil)
+		if err != nil {
+			http.Error(w, "构造回源请求失败", http.StatusInternalServerError)
 			return
 		}
-		slog.Error("[strm后端] 回源CDN失败", "名称", item.name, "err", err)
-		http.Error(w, "回源失败", http.StatusBadGateway)
+		req.Header.Set("User-Agent", passthroughUA)
+		if rng != "" {
+			req.Header.Set("Range", rng) // 原样转发 nginx 的切片 Range
+		}
+
+		proxyEnter()
+		resp, err := proxyClient.Do(req)
+		proxyExit()
+		if err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
+			slog.Error("[strm后端] 回源CDN失败", "名称", item.name, "err", err)
+			http.Error(w, "回源失败", http.StatusBadGateway)
+			return
+		}
+
+		// 仅 2xx 透传；其余关 body 重试
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastStatus = resp.StatusCode
+			resp.Body.Close()
+			if attempt < maxRetries {
+				// 还有重试机会：警告一条即可，带 range 便于定位哪个分片
+				slog.Warn("[strm后端] 回源非2xx，将重试",
+					"名称", item.name, "status", resp.StatusCode,
+					"重试", attempt, "range", rng)
+			}
+			continue
+		}
+
+		// 原样透传 CDN 全部响应头（含同名多值），绝不重算长度字段
+		dst := w.Header()
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				dst.Add(k, v)
+			}
+		}
+
+		w.WriteHeader(resp.StatusCode) // 原样透传 200 / 206
+		if _, err := io.Copy(w, resp.Body); err != nil && r.Context().Err() == nil {
+			slog.Debug("[strm后端] 透传中断", "名称", item.name, "err", err)
+		}
+		resp.Body.Close()
 		return
 	}
-	defer resp.Body.Close()
 
-	// 原样透传 CDN 的全部响应头（含同名多值），绝不重算任何长度字段
-	// （nginx slice 靠 Content-Range 的 TOTAL 切分整文件）。
-	dst := w.Header()
-	for k, vs := range resp.Header {
-		for _, v := range vs {
-			dst.Add(k, v)
-		}
-	}
-
-	w.WriteHeader(resp.StatusCode) // 原样透传 200 / 206
-	if _, err := io.Copy(w, resp.Body); err != nil && r.Context().Err() == nil {
-		slog.Debug("[strm后端] 透传中断", "名称", item.name, "err", err)
-	}
+	// 用尽重试仍非 2xx：打印错误并 502 返回
+	slog.Error("[strm后端] 回源多次重试仍失败",
+		"名称", lastName, "status", lastStatus, "重试", maxRetries, "range", rng)
+	http.Error(w, "回源失败", http.StatusBadGateway)
 }
