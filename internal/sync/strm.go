@@ -108,7 +108,10 @@ func regenerateStrmTree(ctx context.Context, env *Env, root string) {
 		}
 		if err := env.SaveStrmFile(pickcode, fid, p); err != nil {
 			slog.Error("重写 strm 文件失败", "文件", p, "错误", err)
+			return nil
 		}
+		// 立即更新数据库版本号（mtime），避免依赖后续扫描兜底刷新时重复比对。
+		env.DB.SaveRecord(p, fid, time.Now().Unix())
 		return nil
 	})
 }
