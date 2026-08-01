@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+	"golang.org/x/time/rate"
 )
 
 // passthroughUA 透传模式取链 & 回源 CDN 统一使用的 UA。
@@ -48,39 +49,10 @@ var proxyClient = &http.Client{
 	},
 }
 
-// 透传防风控门禁（均在 proxyEnter 内串行生效）：
-//   - 速率限制 proxyMinInterval=1s：任意 1s 内最多放行 1 次回源；
-//   - 并发信号量 proxySem 容量 1：同时最多 1 个回源在飞。
-//
-// nginx slice 缓存兜底，串行+限速只影响冷拉速度。lastProxyAt 为上次放行回源的 unixnano。
-var (
-	proxyRateMu sync.Mutex
-	lastProxyAt int64
-)
-
-const proxyMinInterval = 1 * time.Second
-
-var proxySem = make(chan struct{}, 1)
-
-// proxyEnter 回源准入：等速率间隔（1s 内只放行一次）+ 占并发名额；
-// 回源返回后须配对 proxyExit 释放。
-func proxyEnter() {
-	proxyRateMu.Lock()
-	now := time.Now()
-	next := time.Unix(0, lastProxyAt).Add(proxyMinInterval)
-	if d := next.Sub(now); d > 0 {
-		time.Sleep(d)
-		now = next // 用计划放行时刻，避免间隔累加漂移
-	}
-	lastProxyAt = now.UnixNano()
-	proxyRateMu.Unlock()
-
-	proxySem <- struct{}{}
-}
-
-func proxyExit() {
-	<-proxySem
-}
+// proxyLimiter 透传回源防风控门禁：令牌桶速率 1/s、burst 3。
+// 千兆带宽下出网本身即为天然限速，放宽原 1s 串行+并发1 的过死限制；
+// 切片 50MB 场景下少量并发回源不会触发 115 风控。
+var proxyLimiter = rate.NewLimiter(rate.Limit(1), 3)
 
 // NewRedirector 创建直链重定向器。
 func NewRedirector(api *Open115) *Redirector {
@@ -215,8 +187,8 @@ func (s *Redirector) serveRedirect(w http.ResponseWriter, r *http.Request, pickC
 // serveProxy 透传模式：用 passthroughUA 取链并回源 115 CDN，把 CDN 响应（状态码 +
 // 全部响应头 + body）原样流式回传前置 nginx 做切片缓存。⚠️ 回程绝不重算任何长度
 // 字段（nginx slice 靠 Content-Range 的 TOTAL 切分整文件）。
-// 回源非 2xx 静默重试（最多 2 次，重试前清直链缓存取新链）；所有回源经 proxyEnter
-// 准入（1s 限速 + 并发 1 串行），避免并发拉片触发 115 风控。
+// 回源非 2xx 静默重试（最多 2 次，重试前清直链缓存取新链）；所有回源经 proxyLimiter
+// 令牌桶准入（1/s、burst 3），避免并发拉片触发 115 风控。
 func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode string) {
 	const maxRetries = 2
 	cacheKey := pickCode + "|" + passthroughUA
@@ -250,9 +222,11 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 			req.Header.Set("Range", rng) // 原样转发 nginx 的切片 Range
 		}
 
-		proxyEnter()
+		// 令牌桶准入：速率 1/s、瞬时最多 3 并发；等待期客户端断开即返回
+		if err := proxyLimiter.Wait(r.Context()); err != nil {
+			return
+		}
 		resp, err := proxyClient.Do(req)
-		proxyExit()
 		if err != nil {
 			if r.Context().Err() != nil {
 				return
