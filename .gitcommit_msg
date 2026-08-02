@@ -1,0 +1,6 @@
+refactor(watcher): 主循环与执行体解耦，避免处理期间阻塞文件事件
+
+主 select 循环只负责收事件、登记待处理目录、续命全局防抖计时器；
+processFolders 移到常驻 executor 协程串行执行。处理目录期间文件事件照常
+被消费并续命防抖，避免 fswatcher channel 溢出丢事件、避免误判静默而扫描
+未下载完的文件。executor 跑完一批后若有待处理目录则保守地重新走一轮防抖。

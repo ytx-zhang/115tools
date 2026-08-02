@@ -13,7 +13,8 @@ import (
 )
 
 // watchPump 是文件监听器主循环（常驻协程，ctx 取消退出）。
-// 无视事件类型，只记父目录 → 全局静默窗口去抖（按目录去重）→ 统一处理本轮目录。
+// 无视事件类型，只记父目录 → 全局静默窗口去抖（按目录去重）→ 交由 executor 协程处理。
+// 主循环只做「收事件/登记/续命计时器」，绝不执行耗时业务，保证事件即时消费不丢、防抖心跳不断。
 // 云端无记录的目录先用 AddCloudFolder 补建祖先。子目录各自独立触发，避免重复扫描。
 func (l *instance) watchPump(ctx context.Context) {
 	watcher, err := fswatcher.New(
@@ -32,20 +33,24 @@ func (l *instance) watchPump(ctx context.Context) {
 	}()
 	slog.Info("文件监听器启动", "路径", l.env.Paths.SyncPath)
 
-	// 待处理目录集合（仅本协程，mu 保护）：按目录去重。任意事件只取父目录加入集合；
-	// 全局防抖计时器由集合中最后一个事件重置，直到全部静默 Debounce 秒才发 wake 统一处理。
+	// 待处理目录集合（主循环与 executor 并发读写，mu 必须保护）：按目录去重。
+	// 任意事件只取父目录加入集合；全局防抖计时器由最后一个事件重置，
+	// 全部静默 Debounce 秒后 kick executor 统一处理。
 	var mu sync.Mutex
 	pending := make(map[string]struct{})
-	wake := make(chan struct{}, 1)
+	kick := make(chan struct{}, 1)
+
+	// notify 唤醒 executor。cap=1 且满了就丢——executor 每轮取走全部 pending，多余信号无意义。
+	notify := func() {
+		select {
+		case kick <- struct{}{}:
+		default:
+		}
+	}
 
 	// 复用型全局防抖计时器：全程只分配一次，后续只 Reset，避免持续写入时每次事件新建 Timer。
 	// 回调幂等——多触发一次多跑一轮空扫，无害。
-	gTimer := time.AfterFunc(time.Hour, func() {
-		select {
-		case wake <- struct{}{}:
-		default:
-		}
-	})
+	gTimer := time.AfterFunc(time.Hour, notify)
 	gTimer.Stop()
 
 	// arm 把事件父目录加入待处理集合（去重），并重置全局防抖计时器。
@@ -57,16 +62,44 @@ func (l *instance) watchPump(ctx context.Context) {
 		gTimer.Reset(l.env.Paths.Debounce)
 	}
 
-	processReady := func() {
+	// take 取出并清空当前待处理集合（快照后立即释放锁，处理期间事件可继续登记）。
+	take := func() []string {
 		mu.Lock()
+		defer mu.Unlock()
+		if len(pending) == 0 {
+			return nil
+		}
 		folders := make([]string, 0, len(pending))
 		for f := range pending {
 			folders = append(folders, f)
 		}
 		pending = make(map[string]struct{})
-		mu.Unlock()
-		l.processFolders(ctx, folders)
+		return folders
 	}
+
+	// executor 常驻协程：串行处理每一批目录，与主循环解耦，处理耗时不阻塞事件消费。
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-kick:
+				folders := take()
+				if len(folders) == 0 {
+					continue
+				}
+				l.processFolders(ctx, folders)
+				// 处理期间新登记的目录：重新走一轮防抖，避免扫到仍在写入的文件。
+				mu.Lock()
+				remain := len(pending)
+				mu.Unlock()
+				if remain > 0 {
+					gTimer.Stop()
+					gTimer.Reset(l.env.Paths.Debounce)
+				}
+			}
+		}
+	}()
 
 	for {
 		select {
@@ -79,13 +112,12 @@ func (l *instance) watchPump(ctx context.Context) {
 				return
 			}
 			arm(filepath.Dir(ev.Path))
-		case <-wake:
-			processReady()
 		}
 	}
 }
 
-// processFolders 处理本轮所有待处理目录（缺失的父目录自动云端创建）。不自行中断：syncDir 幂等跑到底。
+// processFolders 由 executor 协程串行调用，处理一批待处理目录（缺失的父目录自动云端创建）。
+// 不自行中断：syncDir 幂等跑到底。os.Stat 复活检查必须保留（解耦后处理延迟更长，本地目录被删窗口更大）。
 func (l *instance) processFolders(ctx context.Context, folders []string) {
 	for _, f := range folders {
 		// 本地已不存在的目录不要据此重建云端：嵌套目录整体删除时，子目录删除事件会把每一层
