@@ -35,6 +35,22 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 	walk = func(path, fid string) error {
 		slog.Debug("[云端遍历] 进入目录", "路径", path)
 
+		// ⚠️ 信号量在 walk 入口获取、在 wg.Wait 前主动释放。
+		// 父协程不代为子协程获取信号量（避免「64 个活跃协程全部
+		// 卡在 sem<- 等待孙协程」的死锁）。
+		select {
+		case dirSem <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		done := false
+		defer func() {
+			if !done {
+				<-dirSem
+			}
+			// wg 在信号量释放后 Wait：子协程有机会拿到槽位、不被饿死。
+		}()
+
 		// 第一步：计数跳过优化。GetDirInfo 是一次很轻的 API 调用，
 		// 而 DB 前缀扫描是毫秒级的本地操作，两者比对一致即可跳过整目录。
 		if v.SkipByCount {
@@ -52,8 +68,7 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 			}
 		}
 
-		// 第二步：拉文件列表。API 并发由 drive 的 resty 限流（3/s + burst 5）兜底，
-		// 不再在此持配额（避免递归死锁隐患）。
+		// 第二步：拉文件列表。API 并发由 drive 的 resty 限流（3/s + burst 5）兜底。
 		slog.Debug("[云端遍历] 获取文件列表", "路径", path)
 		items, err := e.API.GetFileList(ctx, fid)
 		if err != nil {
@@ -66,7 +81,6 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 
 		// 第三步：逐项分派给回调。wg 等待本目录派生的子目录协程全部结束。
 		var wg sync.WaitGroup
-		defer wg.Wait()
 
 		for _, item := range items {
 			if err := ctx.Err(); err != nil {
@@ -85,16 +99,10 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 					}
 				}
 				if descend {
-					// 子目录递归前领取目录协程配额；ctx 取消则放弃递归。
-					select {
-					case dirSem <- struct{}{}:
-						wg.Go(func() {
-							defer func() { <-dirSem }()
-							_ = walk(fullPath, item.Fid)
-						})
-					case <-ctx.Done():
-						return ctx.Err()
-					}
+					// 子协程自行获取信号量（而非父协程代领），避免死锁。
+					wg.Go(func() {
+						_ = walk(fullPath, item.Fid)
+					})
 				}
 				continue
 			}
@@ -105,6 +113,18 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 					slog.Error("[云端遍历] 文件处理失败", "路径", fullPath, "错误", ferr)
 				}
 			}
+		}
+
+		// 主动释放信号量再等子协程——释放后子协程可以拿到槽位继续工作，
+		// 避免了旧版「父协程持槽等子协程 → 子协程等槽 → 死锁」。
+		<-dirSem
+		done = true
+
+		wg.Wait()
+		// ⚠️ 子协程错误被 `_ = walk(...)` 丢弃，但 onFatal 已通过
+		// WithCancelCause 把原始错误存入 ctx，这里捞出向上传播。
+		if err := context.Cause(ctx); err != nil {
+			return err
 		}
 		return nil
 	}

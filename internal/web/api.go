@@ -173,21 +173,17 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		slog.Info("[WEB] 配置已补齐，启动同步器")
 		s.Wg.Go(func() { s.Sync.Reload("") })
 		triggered = true
-	case cs.PathsChanged || cs.CronChanged || cs.DebounceChanged:
-		// 路径/定时策略变化：热重载同步器（重建实例天然含重扫）。
-		slog.Info("[WEB] 路径/定时配置变更，热重载同步器")
+	case cs.PathsChanged || cs.CronChanged || cs.DebounceChanged || cs.StrmUrlChanged:
+		// 路径/定时/直链变化：热重载同步器（重建实例天然含重扫）。
+		// ⚠️ 重载不重写既有 .strm（扫描只比 mtime），直链变更须显式重写。
+		slog.Info("[WEB] 配置变更，热重载同步器")
 		s.Wg.Go(func() {
 			s.Sync.Reload(oldSyncPath)
-			// 路径重载已重建实例；仅当 strm 直链单独变化（路径未变）才需补一次重写。
-			if cs.StrmUrlChanged && !cs.PathsChanged {
-				s.Sync.RegenerateStrm(s.Sync.TaskCtx())
+			if cs.StrmUrlChanged {
+				s.Sync.RegenerateStrm(s.Sync.TaskCtx(), s.Cfg.StrmUrl)
 			}
 		})
 		triggered = true
-	case cs.StrmUrlChanged:
-		// 仅 strm 直链变化：纯本地重写 .strm 内容
-		slog.Info("[WEB] strm 直链变更，重写本地 .strm")
-		s.Wg.Go(func() { s.Sync.RegenerateStrm(s.Sync.TaskCtx()) })
 	case cs.SyncRulesChanged:
 		// 排除名单/视频扩展名变化：触发一次全量重扫（清理云端存量 / 重判视频）。
 		slog.Info("[WEB] 上传规则已更新，触发全量扫描清理")

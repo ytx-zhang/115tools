@@ -106,7 +106,6 @@ func (l *instance) scanDir(ctx context.Context, currentPath, currentFid string, 
 		}
 		localSize, refreshed := compareLocalFile(fullPath, name, dbFid, dbSize, fileInfo)
 		if refreshed {
-			// .strm mtime 变了但 fid 一致：读事务之外直接刷新数据库 size（安全）。
 			l.env.DB.SaveRecord(fullPath, dbFid, localSize)
 			continue
 		}

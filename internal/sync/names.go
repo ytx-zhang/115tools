@@ -50,7 +50,9 @@ func ExtractPickcode(fPath string) (pickcode, fid string) {
 	if err != nil {
 		return "", ""
 	}
-	u, err := url.Parse(strings.TrimSpace(string(content)))
+	// 去除 UTF-8 BOM（某些外部工具写入 strm 时可能带 BOM）
+	contentStr := strings.TrimPrefix(strings.TrimSpace(string(content)), "\ufeff")
+	u, err := url.Parse(contentStr)
 	if err != nil {
 		return "", ""
 	}

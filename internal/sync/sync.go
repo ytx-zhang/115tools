@@ -179,8 +179,11 @@ func (s *Syncer) RescanRoot(ctx context.Context) {
 }
 
 // RegenerateStrm 在 StrmUrl 变更后重写本地所有 .strm 内容（纯本地 IO）。
-func (s *Syncer) RegenerateStrm(ctx context.Context) {
+// ⚠️ 调用前必须把新 URL 传入：Reload 重建实例不重写既有 .strm（扫描只比 mtime），
+// 仅 StrmUrl 变不 Reload 时 Env.Paths.StrmUrl 仍是旧值，不更新会导致重写=空转。
+func (s *Syncer) RegenerateStrm(ctx context.Context, strmURL string) {
 	if cur := s.current(); cur != nil {
+		cur.env.Paths.StrmUrl = strmURL
 		cur.RegenerateStrmFiles(ctx)
 	}
 }

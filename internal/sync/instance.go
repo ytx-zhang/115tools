@@ -114,6 +114,7 @@ func (l *instance) initRoot(parentCtx context.Context, oldSyncPath string) error
 	var scanErr error
 	defer func() {
 		if scanErr != nil {
+			slog.Error("云端扫描被中止，正在清理数据库", "错误信息", scanErr)
 			l.env.DB.BatchClearPaths([]string{l.env.Paths.SyncPath})
 		}
 	}()
@@ -146,11 +147,7 @@ func (l *instance) initRoot(parentCtx context.Context, oldSyncPath string) error
 	}, stopWithErr)
 	if scanErr != nil {
 		cancel(scanErr)
-	}
-
-	if err := context.Cause(ctx); err != nil {
-		slog.Error("云端扫描被中止，正在清理数据库", "错误信息", err)
-		return err
+		return scanErr
 	}
 	slog.Info("[初始化] 云端数据库初始化完成")
 	return nil
