@@ -88,7 +88,11 @@ func (l *instance) watchPump(ctx context.Context) {
 				if len(folders) == 0 {
 					continue
 				}
-				l.processFolders(ctx, folders)
+				pendingDir := l.processFolders(ctx, folders)
+				// 子目录已删时父目录需重新扫描：登记回 pending 并续命防抖。
+				for _, d := range pendingDir {
+					arm(d)
+				}
 				// 处理期间新登记的目录：重新走一轮防抖，避免扫到仍在写入的文件。
 				mu.Lock()
 				remain := len(pending)
@@ -118,12 +122,20 @@ func (l *instance) watchPump(ctx context.Context) {
 
 // processFolders 由 executor 协程串行调用，处理一批待处理目录（缺失的父目录自动云端创建）。
 // 不自行中断：syncDir 幂等跑到底。os.Stat 复活检查必须保留（解耦后处理延迟更长，本地目录被删窗口更大）。
-func (l *instance) processFolders(ctx context.Context, folders []string) {
+// 返回需重新登记的父目录：子目录已删时其父目录需扫描才能发现子项缺失并清理 DB 孤儿记录。
+func (l *instance) processFolders(ctx context.Context, folders []string) []string {
+	var retryParents []string
 	for _, f := range folders {
 		// 本地已不存在的目录不要据此重建云端：嵌套目录整体删除时，子目录删除事件会把每一层
 		// 都登记为待处理；若此时父层清理已清 DB 并删了云端目录，这里会误判「新目录」而复活云端。
+		// ⚠️ 子目录已删时，必须把父目录重新加入待处理：只有父目录扫描才能发现子项缺失并清理 DB。
 		if _, statErr := os.Stat(f); statErr != nil {
 			slog.Debug("待处理目录本地已不存在，跳过", "路径", f, "错误", statErr)
+			if f != l.env.Paths.SyncPath {
+				if parent := filepath.Dir(f); parent != "." {
+					retryParents = append(retryParents, parent)
+				}
+			}
 			continue
 		}
 		fid := l.env.DB.GetFid(f)
@@ -138,4 +150,5 @@ func (l *instance) processFolders(ctx context.Context, folders []string) {
 		}
 		l.syncDir(ctx, f, fid, false)
 	}
+	return retryParents
 }

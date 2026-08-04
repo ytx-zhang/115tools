@@ -192,6 +192,46 @@ func (d *DB) ClearOldRoot(oldPrefix, keepPrefix string) {
 	}
 }
 
+// FindOrphanSubdirs 扫描 currentPath 下所有条目，返回「子项仍在但目录 entry 已丢失」的子目录完整路径。
+// 用于检测深层孤儿：子目录被删后其目录 DB entry 未同步清理，导致子文件（Fonts.7z 等）永久残留。
+func (d *DB) FindOrphanSubdirs(currentPath string) []string {
+	prefix := currentPath
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	prefixBytes := []byte(prefix)
+
+	var orphans []string
+	seen := make(map[string]bool)
+
+	d.boltDB.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(d.bucketName)
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, _ := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, _ = c.Next() {
+			rel := string(k[len(prefixBytes):])
+			slashIdx := strings.IndexByte(rel, '/')
+			if slashIdx == -1 {
+				continue // 直属子项，不是深层
+			}
+			subDir := rel[:slashIdx]
+			if seen[subDir] {
+				continue
+			}
+			seen[subDir] = true
+
+			subDirFull := prefix + subDir
+			if v := b.Get([]byte(subDirFull)); v == nil {
+				orphans = append(orphans, subDirFull)
+			}
+		}
+		return nil
+	})
+	return orphans
+}
+
 // CountRecursive 递归统计 path 下所有子条目的总数（含文件和子目录）。
 // 通过 bbolt 前缀扫描实现，数百万条目录毫秒级完成，远比 GetFileList API 调用便宜。
 func (d *DB) CountRecursive(path string) int64 {

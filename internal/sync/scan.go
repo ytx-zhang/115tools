@@ -116,6 +116,14 @@ func (l *instance) scanDir(ctx context.Context, currentPath, currentFid string, 
 	}
 
 	// 云端删除与数据库清理（本地已删的项）
+	// 深层孤儿检测：子目录 DB entry 已丢但子文件仍在 → 一并清理。
+	if recursive {
+		orphans := l.env.DB.FindOrphanSubdirs(currentPath)
+		if len(orphans) > 0 {
+			slog.Debug("检测到深层孤儿记录", "目录", currentPath, "数量", len(orphans))
+			deletes = append(deletes, orphans...)
+		}
+	}
 	if err := l.cloudCleanTask(ctx, deletes, currentPath); err != nil {
 		slog.Error("云端删除失败", "目录", currentPath, "错误", err)
 	}
