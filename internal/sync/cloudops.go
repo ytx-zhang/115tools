@@ -5,27 +5,20 @@ import (
 	"fmt"
 	"github.com/ytx-zhang/115tools/internal/db"
 	"github.com/ytx-zhang/115tools/internal/logs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // moveChunk 单次 MoveFile 请求的视频 FID 上限，避免逗号串过长。
 const moveChunk = 500
 
-// AddCloudFolder 确保云端目录存在并返回 FID。纯云端操作，不写库（FID 由调用方落库）。
-// currentCID 非空时直接在其下建末级目录（扫描热路径，单步）；
-// 为空时从根 "0" 逐级 GetDirInfo 确认、缺失再建（初始化/watcher 补建祖先用）。
-func AddCloudFolder(ctx context.Context, env *Env, currentCID, path string) (string, error) {
-	if currentCID != "" {
-		fid, err := env.API.AddFolder(ctx, currentCID, filepath.Base(path))
-		if err != nil {
-			return "", fmt.Errorf("[%s]: 创建云端文件夹失败: %w", path, err)
-		}
-		return fid, nil
-	}
-
-	// 起点：115 根目录 FID 恒为 "0"，无需经 get_info 反推。
+// AddCloudFolder 逐级确保云端目录存在并写入数据库。
+// 每层先查 DB：已有则复用 FID；缺失则云端 AddFolder 并即时写库。
+// 返回末级 FID，调用方无需再 SaveRecord。
+func AddCloudFolder(ctx context.Context, env *Env, path string) (string, error) {
 	parentFid := "0"
 	cur := ""
 	for seg := range strings.SplitSeq(path, "/") {
@@ -33,8 +26,8 @@ func AddCloudFolder(ctx context.Context, env *Env, currentCID, path string) (str
 			continue
 		}
 		cur = cur + "/" + seg
-		if info, err := env.API.GetDirInfo(ctx, cur); err == nil {
-			parentFid = info.Fid
+		if fid := env.DB.GetFid(cur); fid != "" {
+			parentFid = fid
 			continue
 		}
 		fid, err := env.API.AddFolder(ctx, parentFid, seg)
@@ -42,6 +35,7 @@ func AddCloudFolder(ctx context.Context, env *Env, currentCID, path string) (str
 			return "", fmt.Errorf("创建云端目录 %s 失败: %w", cur, err)
 		}
 		parentFid = fid
+		env.DB.SaveRecord(cur, fid, db.SizeDir)
 	}
 	return parentFid, nil
 }
@@ -104,4 +98,53 @@ func (l *instance) cloudCleanTask(ctx context.Context, fPaths []string, workPath
 	l.env.DB.BatchClearPaths(fPaths)
 
 	return nil
+}
+
+// ──── 云端 → 本地全量同步 ────
+
+// runCloudSync 执行一轮完整云端同步（在 Task 的协程中运行）。
+func runCloudSync(ctx context.Context, env *Env, task *Task) {
+	start := time.Now()
+	defer func() {
+		logs.Info(logs.ModuleSync, "云端同步任务结束", "总数", task.Total(), "耗时", time.Since(start))
+	}()
+	logs.Info(logs.ModuleSync, "开始同步云端文件...")
+
+	_ = env.WalkCloud(ctx, env.Paths.SyncPath, env.Paths.SyncFid, Visitor{
+		SkipByCount: true,
+		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
+			if env.DB.GetFid(path) == "" {
+				if err := os.MkdirAll(path, 0755); err != nil {
+					logs.Error(logs.ModuleSync, "创建目录失败", "文件", path, "错误", err)
+					return false, nil
+				}
+				env.DB.SaveRecord(path, fid, db.SizeDir)
+				logs.Info(logs.ModuleSync, "创建本地目录", "路径", path)
+			}
+			return true, nil
+		},
+		VisitFile: func(ctx context.Context, path, fid, pickCode string, e Entry) error {
+			savePath, saveSize := ProcessCloudFile(path, e)
+
+			dbFid := env.DB.GetFid(savePath)
+			if dbFid != "" {
+				if dbFid != fid {
+					t0 := time.Now()
+					if err := env.API.DeleteFile(ctx, fid); err != nil {
+						logs.Error(logs.ModuleSync, "清理云端冗余项失败", "文件", savePath, "错误", err)
+					} else {
+						logs.Info(logs.ModuleSync, "删除云端冗余项", "路径", savePath, "云端FID", fid, "耗时", time.Since(t0))
+					}
+				}
+				return nil
+			}
+			task.AddTotal(1)
+			if err := env.FetchAndSave(ctx, pickCode, fid, savePath, e.IsVideo); err != nil {
+				return nil
+			}
+			env.DB.SaveRecord(savePath, fid, saveSize)
+			task.AddCompleted(1)
+			return nil
+		},
+	}, nil)
 }

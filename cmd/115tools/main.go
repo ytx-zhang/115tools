@@ -7,8 +7,8 @@ import (
 	"github.com/ytx-zhang/115tools/internal/config"
 	"github.com/ytx-zhang/115tools/internal/db"
 	"github.com/ytx-zhang/115tools/internal/drive"
+	initbr "github.com/ytx-zhang/115tools/internal/init"
 	"github.com/ytx-zhang/115tools/internal/logs"
-	synclib "github.com/ytx-zhang/115tools/internal/sync"
 	"github.com/ytx-zhang/115tools/internal/web"
 	"net/http"
 	"os"
@@ -59,19 +59,14 @@ func main() {
 		logs.Warn(logs.ModuleSystem, "数据库压缩失败", "错误信息", err)
 	}
 
-	// 4. 创建 Syncer + 注册管理面板（配置不完整面板也可用）
-	syncer := synclib.NewSyncer(appCtx, cfg, apiClient, boltDB, &wg, hub)
-	web.Register(mux, web.Deps{
-		Cfg: cfg, Api: apiClient, AppCtx: appCtx, Wg: &wg, Hub: hub, Sync: syncer,
-	})
+	// 4. 创建 Broker（聚合所有模块，统一编排初始化与前后端交互）
+	br := initbr.New(cfg, apiClient, boltDB, hub, appCtx, &wg)
+	web.Register(mux, web.Deps{Broker: br, AppCtx: appCtx, Wg: &wg})
 
-	// 5. 配置完整才启动同步器，否则仅 Warn（面板补齐后由 web 保存逻辑拉起）
-	if cfg.IsSyncReady() {
-		if err := syncer.Start(); err != nil {
-			logs.Error(logs.ModuleSystem, "同步器启动失败", "错误信息", err)
-		}
-	} else {
-		logs.Warn(logs.ModuleWeb, "配置不完整，同步未启动", "缺失项", cfg.RequiredMissing())
+	// 5. 统一初始化（配置校验 → Token 验证 → 同步器重建）
+	if err := br.Initialize(); err != nil {
+		logs.Warn(logs.ModuleSystem, "初始化未完成", "原因", err)
+		// 不退出——管理面板仍可用，初始化错误经 SSE 推前端展示
 	}
 
 	// 6. 优雅关闭

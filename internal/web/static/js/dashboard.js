@@ -5,10 +5,10 @@ import { api, toast, connectSSE } from './api.js';
 const startText = { sync: '开始同步', strm: '开始生成' };
 
 // dash 是 petite-vue 托管的响应式状态对象（reactive 包裹，导出即代理，SSE 写入即刷新 DOM）。
-export const dash = window.PetiteVue.reactive({
+  export const dash = window.PetiteVue.reactive({
   configReady: true,
   missing: [],
-  reloading: false,
+  initError: '',
   sync: { running: false, done: 0, total: 0, ready: false, badgeText: '未就绪', badgeCls: 'badge warn', barWidth: '0%', btnText: '开始同步', btnCls: 'btn primary' },
   strm: { running: false, done: 0, total: 0, ready: false, badgeText: '未就绪', badgeCls: 'badge warn', barWidth: '0%', btnText: '开始生成', btnCls: 'btn primary' },
 
@@ -131,7 +131,7 @@ function renderLog(en) {
   if (en.status) {
     dash.configReady = en.status.config_ready;
     dash.missing = en.status.missing || [];
-    dash.reloading = !en.status.ready && en.status.config_ready;
+    dash.initError = en.status.init_error || '';
     dash.setStatus('sync', en.status.sync);
     dash.setStatus('strm', en.status.strm);
     return;

@@ -48,11 +48,32 @@ type CronJSON struct {
 	IntervalHours int  `json:"interval_hours"`
 }
 
+// missingLocked 返回缺失的必填项（调用方必须持有锁）。
+func (c *Config) missingLocked() []string {
+	var miss []string
+	if c.token.RefreshToken == "" {
+		miss = append(miss, "refresh_token")
+	}
+	if c.SyncPath == "" {
+		miss = append(miss, "sync_path")
+	}
+	if c.StrmPath == "" {
+		miss = append(miss, "strm_path")
+	}
+	if c.TempPath == "" {
+		miss = append(miss, "temp_path")
+	}
+	if c.StrmUrl == "" {
+		miss = append(miss, "strm_url")
+	}
+	return miss
+}
+
 // Snapshot 返回当前可编辑配置的副本（不含密码明文，也不回显 refresh_token 明文）。
 func (c *Config) Snapshot() Editable {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	missing := c.RequiredMissing() // 算一次，ConfigReady 与 MissingFields 都从它派生
+	missing := c.missingLocked()
 	return Editable{
 		SyncPath:        c.SyncPath,
 		StrmPath:        c.StrmPath,
@@ -120,24 +141,6 @@ func NormalizeUploadExclude(in []string) []string {
 	return out
 }
 
-// sameStringSlice 无序比较两个字符串切片是否含相同元素（忽略顺序与重复）。
-func sameStringSlice(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	seen := make(map[string]int, len(a))
-	for _, v := range a {
-		seen[v]++
-	}
-	for _, v := range b {
-		if seen[v] == 0 {
-			return false
-		}
-		seen[v]--
-	}
-	return true
-}
-
 // GetAuth 返回登录凭据；username 为空表示未启用登录验证。
 // 返回的 password 字段为 bcrypt 哈希，而非明文。
 func (c *Config) GetAuth() (username, passwordHash string) {
@@ -146,39 +149,20 @@ func (c *Config) GetAuth() (username, passwordHash string) {
 	return c.Auth.Username, c.Auth.PasswordHash
 }
 
-// ChangeSet 描述一次配置保存实际改变了哪些维度。
-// 各字段语义独立，web 层据其精确触发对应副作用，不再用 bool 在控制流里拼装，
-// 因此不会产生「改密码误触发全量扫描」这类兜底分支误判。
-type ChangeSet struct {
-	PathsChanged     bool // 同步根/strm/temp 路径变化 → 热重载同步器
-	StrmUrlChanged   bool // strm 直链变化 → 重写本地 .strm
-	SyncRulesChanged bool // 排除名单/视频扩展名变化 → 全量重扫（仅当未走 PathsChanged 时）
-	CronChanged      bool // 定时策略变化 → 热重载同步器
-	DebounceChanged  bool // 本地监听去抖窗口变化 → 热重载同步器（watcher 启动时绑定 Debounce）
-	AuthChanged      bool // 登录用户名/密码变化 → 无同步副作用
-	TokenChanged     bool // refresh_token 变化 → 无同步副作用
-}
-
-// Update 校验并应用新配置，落盘持久化，返回本次实际改变的维度集合 ChangeSet
-// （调用方据其触发对应副作用）以及旧路径（供 Reload 清理旧根索引）。
-func (c *Config) Update(e Editable) (cs *ChangeSet, oldSyncPath, oldStrmUrl string, err error) {
-	cs = &ChangeSet{}
-	// 注意：不再强制 sync_path / strm_path / temp_path / strm_url 非空，
-	// 允许先保存不完整配置（前端会提示缺失项、同步器暂不启动）；
-	// 待用户在面板补齐后由 web 保存逻辑自动拉起同步器。
+// Update 应用并持久化配置（无校验，仅处理字段合并/token保留/密码哈希等）。
+// 完整验证由 Initialize 流程中的 Check 负责。空字段（密码/token）表示保持原值不变。
+func (c *Config) Update(e Editable) error {
 	if e.AuthUsername != "" && e.AuthPassword == "" {
-		// 允许留空表示沿用旧密码，但旧密码也为空时必须设置
 		if _, old := c.GetAuth(); old == "" {
-			return nil, "", "", fmt.Errorf("启用登录验证时必须设置密码")
+			return fmt.Errorf("启用登录验证时必须设置密码")
 		}
 	}
 
-	// 先完成可能失败的哈希计算，再进入变更区，避免出错时配置被改一半
 	var newHash string
 	if e.AuthUsername != "" && e.AuthPassword != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(e.AuthPassword), bcrypt.DefaultCost)
 		if err != nil {
-			return nil, "", "", fmt.Errorf("密码哈希失败: %w", err)
+			return fmt.Errorf("密码哈希失败: %w", err)
 		}
 		newHash = string(hash)
 	}
@@ -186,35 +170,15 @@ func (c *Config) Update(e Editable) (cs *ChangeSet, oldSyncPath, oldStrmUrl stri
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	oldSyncPath = c.SyncPath
-	oldStrmUrl = c.StrmUrl
-
-	newVideoExts := NormalizeVideoExts(e.VideoExts)
-	newExclude := NormalizeUploadExclude(e.UploadExclude)
-
-	cs.PathsChanged = e.SyncPath != c.SyncPath ||
-		e.StrmPath != c.StrmPath ||
-		e.TempPath != c.TempPath
-	cs.StrmUrlChanged = e.StrmUrl != c.StrmUrl
-	cs.SyncRulesChanged = !sameStringSlice(newExclude, c.UploadExclude) ||
-		!sameStringSlice(newVideoExts, c.VideoExts)
-	cs.CronChanged = e.Cron.Enabled != c.CronEnabled() ||
-		e.Cron.IntervalHours != c.Cron.IntervalHours
-	cs.DebounceChanged = e.DebounceSeconds != c.DebounceSeconds
-	cs.AuthChanged = e.AuthUsername != c.Auth.Username || newHash != ""
-	cs.TokenChanged = e.RefreshToken != c.token.RefreshToken
-
 	c.SyncPath = e.SyncPath
 	c.StrmPath = e.StrmPath
 	c.TempPath = e.TempPath
 	c.StrmUrl = e.StrmUrl
 	c.TorrentPath = e.TorrentPath
-	c.VideoExts = newVideoExts
-	c.UploadExclude = newExclude
+	c.VideoExts = NormalizeVideoExts(e.VideoExts)
+	c.UploadExclude = NormalizeUploadExclude(e.UploadExclude)
 	c.DebounceSeconds = e.DebounceSeconds
-	// 定时全量同步：用堆分配的 *bool 承载（避免局部变量取地址导致悬空指针）。
-	// 前端始终提交明确 true/false，故此处直接按用户意图落盘；
-	// 间隔 <=0 视为使用默认 12 小时，避免 0 触发即时死循环。
+
 	p := new(bool)
 	*p = e.Cron.Enabled
 	c.Cron = CronConfig{Enabled: p, IntervalHours: e.Cron.IntervalHours}
@@ -224,21 +188,19 @@ func (c *Config) Update(e Editable) (cs *ChangeSet, oldSyncPath, oldStrmUrl stri
 
 	switch {
 	case e.AuthUsername == "":
-		// 清空用户名 = 关闭登录验证
 		c.Auth = AuthConfig{}
 	case newHash != "":
-		// 密码非空：以 bcrypt 哈希存储，绝不保存明文
 		c.Auth = AuthConfig{Username: e.AuthUsername, PasswordHash: newHash}
 	default:
-		c.Auth.Username = e.AuthUsername // 密码留空沿用旧哈希
+		c.Auth.Username = e.AuthUsername
 	}
 	if e.RefreshToken != "" {
 		c.token.RefreshToken = e.RefreshToken
 	}
 
 	if err := c.persistLocked(); err != nil {
-		return nil, oldSyncPath, oldStrmUrl, fmt.Errorf("配置写盘失败: %w", err)
+		return fmt.Errorf("配置写盘失败: %w", err)
 	}
-	logs.Info(logs.ModuleWeb, "配置已更新", "变更", cs)
-	return cs, oldSyncPath, oldStrmUrl, nil
+	logs.Info(logs.ModuleWeb, "配置已更新")
+	return nil
 }

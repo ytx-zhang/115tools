@@ -15,8 +15,6 @@ import (
 
 // 本文件实现上传执行层：固定大小的 worker 池 + 两种上传任务（普通文件 / .strm）。
 
-const uploadWorkerCount = 3
-
 // uploadJob 描述一次上传任务：把本地文件 fPath 上传到云端目录 cid 下。
 type uploadJob struct {
 	cid   string
@@ -52,12 +50,15 @@ func (l *instance) uploadOneFile(ctx context.Context, cid, fPath string) {
 }
 
 // alreadyUploaded 查数据库判断是否已上传过（防重复上传产生云端副本）。
-// .strm 存在即完成；普通文件比字节数；视频与同名 .strm 共存视为「替换旧视频」，放行重传。
+// .strm 存在即完成；普通文件比字节数；视频（IsVideoExt 命中）查同名 .strm：
+//
+//	≥10MB → 放行重传替换旧视频；<10MB 片段 → 跳过不上传。
 func (l *instance) alreadyUploaded(fPath string, fileInfo os.FileInfo) bool {
 	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
+	ext := filepath.Ext(fPath)
 	dbKey := fPath
-	if !isStrm && CheckVideo(filepath.Ext(fPath), fileInfo.Size()) {
-		dbKey = strings.TrimSuffix(fPath, filepath.Ext(fPath)) + ".strm"
+	if !isStrm && IsVideoExt(ext) {
+		dbKey = strings.TrimSuffix(fPath, ext) + ".strm"
 	}
 	dbFid, dbSize := l.env.DB.GetInfo(dbKey)
 	if dbFid == "" {
@@ -66,8 +67,14 @@ func (l *instance) alreadyUploaded(fPath string, fileInfo os.FileInfo) bool {
 	if isStrm {
 		return true
 	}
-	if CheckVideo(filepath.Ext(fPath), fileInfo.Size()) {
-		return false
+	// 视频扩展名 + 同名 .strm 已有记录
+	if IsVideoExt(ext) {
+		if CheckVideo(ext, fileInfo.Size()) {
+			return false // ≥10MB → 替换旧视频
+		}
+		logs.Warn(logs.ModuleSync, "同名 strm 已存在但该视频文件未达体积阈值，跳过上传",
+			"文件", fPath, "strm", dbKey)
+		return true
 	}
 	return fileInfo.Size() == dbSize
 }
@@ -88,20 +95,6 @@ func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 		return
 	}
 
-	// 同名 .strm 已存在、且本文件是「视频扩展名但体积未达阈值」的片段：不处理、不上传，仅告警。
-	// 只拦截视频扩展名；.nfo/.jpg/.srt 等伴随文件照常上传。
-	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
-	isVideoExt := IsVideoExt(filepath.Ext(fPath))
-	isVideo := CheckVideo(filepath.Ext(fPath), fileInfo.Size())
-	if !isStrm && isVideoExt && !isVideo {
-		strmKey := strings.TrimSuffix(fPath, filepath.Ext(fPath)) + ".strm"
-		if l.env.DB.GetFid(strmKey) != "" {
-			logs.Warn(logs.ModuleSync, "同名 strm 已存在但该视频文件未达体积阈值，跳过上传",
-				"文件", fPath, "strm", strmKey)
-			return
-		}
-	}
-
 	// 并发去重：替换场景下同名视频不再因 .strm 已存在而跳过，靠 inFlight 防重复上传。
 	if _, loaded := l.inFlight.LoadOrStore(fPath, struct{}{}); loaded {
 		return
@@ -109,6 +102,7 @@ func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 	defer l.inFlight.Delete(fPath)
 
 	upStart := time.Now()
+	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")
 	if isStrm {
 		err = l.upStrmTask(ctx, cid, fPath)
 	} else {

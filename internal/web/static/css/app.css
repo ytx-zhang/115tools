@@ -588,6 +588,11 @@ th {
   padding: 10px 14px;
   margin-bottom: 16px;
 }
+.banner.error {
+  background: rgba(239, 68, 68, .12);
+  border-color: var(--red);
+  color: var(--red);
+}
 
 /* Toast */
 #toast-box {

@@ -44,7 +44,9 @@
         <div id="config-banner" class="banner" v-show="!dash.configReady">
           ⚠️ 配置不完整，同步未启动，请到「设置」补齐：{{ dash.missing.join('、') }}
         </div>
-        <div id="reload-banner" class="banner" v-show="dash.reloading && dash.configReady">⏳ 配置热重载中，同步器正在重建……</div>
+        <div id="init-error-banner" class="banner error" v-show="dash.initError">
+          初始化失败：{{ dash.initError }}
+        </div>
         <div class="grid2">
           <div class="card task-card" id="card-sync">
             <div class="card-head">
@@ -161,7 +163,6 @@
       <!-- 设置 -->
       <section id="view-settings" class="view" hidden v-scope="cfg">
         <h2>设置</h2>
-        <div id="settings-banner" class="banner" v-show="!cfg.configReady" v-text="cfg.bannerText"></div>
         <form id="config-form" @submit.prevent="cfg.save">
           <div class="card">
             <h3>115 账号凭证 <small class="muted">115的 refresh_token；保存后 115 会自动轮换</small></h3>

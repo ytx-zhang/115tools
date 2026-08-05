@@ -122,10 +122,15 @@ func (d *Open115) startRefreshDaemon() {
 
 // VerifyAndApplyRefreshToken 用给定的 refresh_token 试刷新一次：成功则把 115 返回的
 // 新 access_token（及可能轮换的新 refresh_token）持久化到配置；失败返回错误且不改动配置。
-// 用于 web 设置页修改 refresh_token：保存前先校验，避免把无效 token 写盘导致后续刷新全挂。
 func (d *Open115) VerifyAndApplyRefreshToken(ctx context.Context, rt string) error {
 	if rt == "" {
 		return fmt.Errorf("refresh_token 不能为空")
 	}
 	return d.refreshToken(ctx, rt)
+}
+
+// VerifyToken 用一次轻量 API 调用检查当前 token 是否有效（查询根目录文件列表）。
+func (d *Open115) VerifyToken(ctx context.Context) error {
+	_, err := d.GetFileList(ctx, "0")
+	return err
 }

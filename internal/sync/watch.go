@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/sgtdi/fswatcher"
-	"github.com/ytx-zhang/115tools/internal/db"
 	"github.com/ytx-zhang/115tools/internal/logs"
 	"path/filepath"
 	"sync"
@@ -141,14 +140,13 @@ func (l *instance) processFolders(ctx context.Context, folders []string) []strin
 		fid := l.env.DB.GetFid(f)
 		if fid == "" {
 			var err error
-			fid, err = AddCloudFolder(ctx, l.env, "", f)
+			fid, err = AddCloudFolder(ctx, l.env, f)
 			if err != nil {
 				logs.Error(logs.ModuleSync, "自动创建云端目录失败，跳过", "路径", f, "错误", err)
 				continue
 			}
-			l.env.DB.SaveRecord(f, fid, db.SizeDir)
 		}
-		l.syncDir(ctx, f, fid, false)
+		l.syncDir(ctx, f, false)
 	}
 	return retryParents
 }

@@ -78,29 +78,28 @@ type tokenData struct {
 	ExpireAt     time.Time `yaml:"expire_at"`
 }
 
-// New 读取并解析配置文件。
-//
-// 与旧版不同：本函数不再因「缺少必填项」而报错——缺失由 IsSyncReady 判定，
-// 缺失时只阻止同步启动、不影响程序与面板运行（前端会提示用户补齐）。
-//
-// 文件不存在时自动生成一份模板（字段全空、含注释），随后重新读入返回，不致命退出；
-// 仅当文件存在但读取/解析失败时返回 error（属于真实损坏，需用户介入）。
+// ConfigStatus 返回配置就绪状态，供初始化步骤与 SSE 推送前端。
+type ConfigStatus struct {
+	Ready   bool     `json:"ready"`
+	Missing []string `json:"missing"`
+}
+
+// New 读取配置文件。文件不存在时创建空白骨架（字段全空，供 web 面板填写）。
 func New(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// 配置文件缺失：生成模板供用户在面板填写，降级继续运行而非退出。
-			if genErr := writeTemplate(path); genErr != nil {
-				return nil, fmt.Errorf("生成配置文件模板失败: %w", genErr)
+			cfg := &Config{path: path}
+			cfg.mu.Lock()
+			if genErr := cfg.persistLocked(); genErr != nil {
+				cfg.mu.Unlock()
+				return nil, fmt.Errorf("创建配置文件失败: %w", genErr)
 			}
-			logs.Warn(logs.ModuleWeb, "配置文件不存在，已生成模板，请在管理面板填写后保存以启动同步", "路径", path)
-			data, err = os.ReadFile(path)
-			if err != nil {
-				return nil, fmt.Errorf("读取生成的配置文件失败: %w", err)
-			}
-		} else {
-			return nil, fmt.Errorf("读取配置文件失败: %w", err)
+			cfg.mu.Unlock()
+			logs.Warn(logs.ModuleSystem, "配置文件已创建，请通过管理面板填写后保存以启动同步", "路径", path)
+			return cfg, nil
 		}
+		return nil, fmt.Errorf("读取配置文件失败: %w", err)
 	}
 
 	var tmp struct {
@@ -111,15 +110,12 @@ func New(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
-	// 定时全量同步配置已由嵌套 cron 段统一承载。
-	// 间隔兜底：IntervalHours <= 0 时使用默认 12 小时（避免 0 触发即时死循环）。
-	// Enabled 不在此兜底——缺省（nil）由 CronEnabled() 方法按「默认开启」处理，
-	// 只有显式 enabled: false 才真正关闭（见 CronConfig 注释）。
+	// cron 间隔兜底
 	if tmp.Cron.IntervalHours <= 0 {
 		tmp.Cron.IntervalHours = 12
 	}
 
-	// 视频扩展名白名单：配置文件未显式写 video_exts 时回退内置默认。
+	// 视频扩展名白名单：未设置时回退内置默认
 	if len(tmp.VideoExts) == 0 {
 		tmp.VideoExts = append([]string(nil), DefaultVideoExts...)
 	}
@@ -130,97 +126,25 @@ func New(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// templateConfig 是自动生成的配置文件模板内容（字段全空、含注释）。
-// 字段名/缩进与 persistLocked 的 marshal 产物（*Config inline + token）对齐，
-// 避免用户首次保存后产生无谓的字段顺序 diff。
-const templateConfig = `# 115tools 配置文件（自动生成模板）
-# 可直接在此编辑后重启，或通过 Web 管理面板填写。
-# 注意：token 中仅 refresh_token 需手动填写；access_token / expire_at 由程序自动刷新写入。
-
-sync_path: ""
-strm_path: ""
-temp_path: ""
-strm_url: ""
-torrent_path: ""
-
-# 视频文件扩展名白名单（命中且体积达阈值按视频处理，生成 .strm 而非下载原文件）。
-# 留空则使用内置默认；亦可在 Web 设置页修改。删除此段即恢复内置默认。
-video_exts:
-  - .mp4
-  - .mkv
-
-# 上传排除名单（下载器/系统临时文件后缀，逗号或列表均可；整名如 .DS_Store / Thumbs.db 也支持）。
-# 这些文件不上传，且云端已存在的同名项会被联动清理。留空则使用内置默认；亦可在 Web 设置页修改。
-upload_exclude:
-  - .!qB
-  - .DS_Store
-  - Thumbs.db
-
-# 本地同步去抖窗口（秒）：监听事件后等待该时长无新事件再同步；0 表示默认 5 秒（上限 10）
-debounce_seconds: 0
-
-# 定时全量同步：开启后每 interval_hours 小时做一次全量扫描
-# （兜底文件监听可能漏掉的本地变化 + 云端全量同步）。关闭则仅依赖本地文件监听
-cron:
-  enabled: true
-  interval_hours: 12
-
-# 管理面板登录：username 留空表示关闭登录验证（仅内网安全时使用）
-auth:
-  username: ""
-  password_hash: ""
-
-token:
-  access_token: ""
-  refresh_token: ""
-  expire_at: "0001-01-01T00:00:00Z"
-`
-
-// writeTemplate 将模板写入指定路径（目录需已存在，由部署挂载保证）。
-func writeTemplate(path string) error {
-	return os.WriteFile(path, []byte(templateConfig), 0644)
+// Status 返回配置完备状态——供初始化步骤与前端 SSE 使用。
+func (c *Config) Status() ConfigStatus {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	miss := c.missingLocked()
+	return ConfigStatus{Ready: len(miss) == 0, Missing: miss}
 }
 
-// RequiredMissing 返回缺失的必填项（用于前端提示与启动决策）。
-// 仅 refresh_token 是用户必须提供的 token；access_token / expire_at 由程序
-// 首次刷新时自动写入，不计入必填。路径四项是同步器启动的必要条件。
-func (c *Config) RequiredMissing() []string {
-	var miss []string
-	if c.token.RefreshToken == "" {
-		miss = append(miss, "refresh_token")
-	}
-	if c.SyncPath == "" {
-		miss = append(miss, "sync_path")
-	}
-	if c.StrmPath == "" {
-		miss = append(miss, "strm_path")
-	}
-	if c.TempPath == "" {
-		miss = append(miss, "temp_path")
-	}
-	if c.StrmUrl == "" {
-		miss = append(miss, "strm_url")
-	}
-	return miss
-}
-
-// CronEnabled 返回定时全量同步是否启用：未显式设置（Enabled 为 nil）按「默认开启」处理，
-// 仅显式 enabled: false 才返回 false（用户可在面板取消勾选真正关闭）。
+// CronEnabled 返回定时全量同步是否启用：未显式设置（Enabled 为 nil）按「默认开启」处理。
 func (c *Config) CronEnabled() bool {
 	return c.Cron.Enabled == nil || *c.Cron.Enabled
 }
 
-// CronInterval 返回定时全量同步间隔；Cron.IntervalHours <= 0 时回退默认 12 小时。
+// CronInterval 返回定时全量同步间隔；IntervalHours <= 0 时回退默认 12 小时。
 func (c *Config) CronInterval() time.Duration {
 	if c.Cron.IntervalHours <= 0 {
 		return 12 * time.Hour
 	}
 	return time.Duration(c.Cron.IntervalHours) * time.Hour
-}
-
-// IsSyncReady 配置是否已足以启动同步器。
-func (c *Config) IsSyncReady() bool {
-	return len(c.RequiredMissing()) == 0
 }
 
 // Token 返回当前 token 快照（访问令牌 / 刷新令牌 / 到期时间）。

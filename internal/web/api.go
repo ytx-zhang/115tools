@@ -2,20 +2,144 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"github.com/ytx-zhang/115tools/internal/config"
+	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/logs"
-	synclib "github.com/ytx-zhang/115tools/internal/sync"
+	"golang.org/x/crypto/bcrypt"
+	"io"
+	"maps"
 	"net/http"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
-// ──── SSE 写器（/api/status 与 /api/logs 共用）────
-// 可靠性铁律（每条踩过坑，修改时逐条保留）：
-//   1. 先发 ": connected" 注释帧再发数据（触发浏览器 onopen）；
-//   2. 每 15s ": ping" 心跳防代理 504；
-//   3. 写失败立即 return，绝不再 Flush（HTTP/2 会 ERR_HTTP2_PROTOCOL_ERROR）；
-//   4. 不设 SetWriteDeadline、不设 Connection 头。
+// ──── 会话管理（HTTP 层特有，不归入 init.Broker）────
+
+const (
+	sessionCookie = "tools115_session"
+	sessionTTL    = 7 * 24 * time.Hour
+)
+
+type sessionStore struct {
+	mu     sync.Mutex
+	tokens map[string]time.Time
+}
+
+func newSessionStore() sessionStore {
+	return sessionStore{tokens: make(map[string]time.Time)}
+}
+
+func (s *sessionStore) create() string {
+	buf := make([]byte, 32)
+	_, _ = rand.Read(buf)
+	token := hex.EncodeToString(buf)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	maps.DeleteFunc(s.tokens, func(_ string, exp time.Time) bool { return now.After(exp) })
+	s.tokens[token] = now.Add(sessionTTL)
+	return token
+}
+
+func (s *sessionStore) valid(token string) bool {
+	if token == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exp, ok := s.tokens[token]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(s.tokens, token)
+		return false
+	}
+	return true
+}
+
+func (s *sessionStore) remove(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.tokens, token)
+}
+
+func (s *Server) authRequired() bool {
+	return s.Broker.AuthRequired()
+}
+
+func (s *Server) loggedIn(r *http.Request) bool {
+	c, err := r.Cookie(sessionCookie)
+	return err == nil && s.sessions.valid(c.Value)
+}
+
+func (s *Server) protect(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authRequired() && !s.loggedIn(r) {
+			writeErr(w, http.StatusUnauthorized, "未登录或会话已过期")
+			return
+		}
+		next(w, r)
+	})
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{
+		"auth_required": s.authRequired(),
+		"logged_in":     !s.authRequired() || s.loggedIn(r),
+	})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := readJSON(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	user, passHash := s.Broker.GetAuth()
+	if user == "" {
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+
+	userOK := subtle.ConstantTimeCompare([]byte(req.Username), []byte(user)) == 1
+	passOK := bcrypt.CompareHashAndPassword([]byte(passHash), []byte(req.Password)) == nil
+	if !userOK || !passOK {
+		time.Sleep(500 * time.Millisecond)
+		logs.Warn(logs.ModuleWeb, "登录失败", "用户名", req.Username, "来源", clientIP(r))
+		writeErr(w, http.StatusUnauthorized, "账号或密码错误")
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: s.sessions.create(), Path: "/",
+		MaxAge: int(sessionTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
+	logs.Info(logs.ModuleWeb, "登录成功", "用户名", req.Username, "来源", clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		s.sessions.remove(c.Value)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+	})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// ──── SSE 写器 ────
 
 type sseWriter struct {
 	w       http.ResponseWriter
@@ -49,10 +173,6 @@ func (s *sseWriter) writeComment(msg string) bool {
 	return true
 }
 
-// serveSSE 是状态/日志两路 SSE 的共用主循环（包级泛型函数：Go 方法不支持类型参数）。
-// 连接即发 ": connected" + 首帧回放，之后合流「客户端断开 / AppCtx 取消 / 15s 心跳 /
-// 数据事件」四路 select；每个事件统一 json.Marshal 成一帧 data 写出（写失败立即断流，
-// 序列化失败跳过本帧不断流）。
 func serveSSE[T any](w http.ResponseWriter, r *http.Request, appCtx context.Context, events <-chan T, replay []T) {
 	sw, ok := newSSEWriter(w)
 	if !ok {
@@ -96,129 +216,233 @@ func serveSSE[T any](w http.ResponseWriter, r *http.Request, appCtx context.Cont
 
 // ──── 任务启停 ────
 
-// handleTaskStart 启动任务：POST /api/task/{name}，name 为 sync 或 strm。
 func (s *Server) handleTaskStart(w http.ResponseWriter, r *http.Request) {
-	if err := s.Sync.StartTask(r.PathValue("name")); err != nil {
+	if err := s.Broker.StartTask(r.PathValue("name")); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "%v", err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
 }
 
-// handleTaskStop 停止任务：DELETE /api/task/{name}。
 func (s *Server) handleTaskStop(w http.ResponseWriter, r *http.Request) {
-	s.Sync.StopTask(r.PathValue("name"))
+	s.Broker.StopTask(r.PathValue("name"))
 	writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
 }
 
 // ──── 配置 ────
 
-// handleGetConfig 返回当前可编辑配置（不含密码明文）。
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.Cfg.Snapshot())
+	writeJSON(w, http.StatusOK, s.Broker.ConfigSnapshot())
 }
 
-// handleSaveConfig 保存配置并实时生效。三段：
-//
-//	① refresh_token 校验（有输入才校验落盘，成功后剥离）；
-//	② 全局变量刷新（VideoExts/SetUploadExclude 即时生效）；
-//	③ 同步器推进（四分支：不完整不启动 / 首次拉起 / 路径类热重载 / 仅排除名单触发全量扫描）。
 func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	var req config.Editable
 	if err := readJSON(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求格式错误: %v", err)
 		return
 	}
-
-	// ① refresh_token：校验成功后保留原始值交给 Update 落盘，使 web 持有的
-	// config 副本与 drive 引用的 config 保持一致（两者是同一指针，此处保留
-	// 即可保证 Snapshot().HasRefreshToken 反映真实状态）。空值表示保持不变。
-	if req.RefreshToken != "" {
-		if err := s.Api.VerifyAndApplyRefreshToken(r.Context(), req.RefreshToken); err != nil {
-			writeErr(w, http.StatusBadRequest, "refresh_token 校验失败: %v", err)
-			return
-		}
-		// 保留原始值给 Update 落盘（不再清空，让 s.Cfg 的 token 与 drive 同步）
-	} else {
-		req.RefreshToken = "" // 未填写：保持原 token 不变
-	}
-
-	// 更新配置（只覆盖可编辑字段，不丢认证），返回本次实际变更维度
-	cs, oldSyncPath, _, err := s.Cfg.Update(req)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "%v", err)
+	if err := s.Broker.ApplyConfig(r.Context(), req); err != nil {
+		writeErr(w, http.StatusInternalServerError, "保存配置失败: %v", err)
 		return
 	}
-	// ② 刷新运行期全局变量（atomic 更新，避免与扫描协程竞争）
-	synclib.SetVideoExts(s.Cfg.VideoExts)
-	synclib.SetUploadExclude(s.Cfg.UploadExclude)
-
-	// ③ 同步器推进：据 ChangeSet 精确触发副作用，无兜底分支。
-	missing := s.Cfg.RequiredMissing()
-	ready := len(missing) == 0
-	triggered := false // 本次是否刚拉起/重载了同步器（供前端提示）
-	switch {
-	case !ready: // 配置不完整，不启动、不重载
-	case !s.Sync.Snapshot().Ready:
-		// 首次补齐缺失项：拉起同步器
-		logs.Info(logs.ModuleWeb, "配置已补齐，启动同步器")
-		s.Wg.Go(func() { s.Sync.Reload("") })
-		triggered = true
-	case cs.PathsChanged || cs.CronChanged || cs.DebounceChanged || cs.StrmUrlChanged:
-		// 路径/定时/直链变化：热重载同步器（重建实例天然含重扫）。
-		// ⚠️ 重载不重写既有 .strm（扫描只比 mtime），直链变更须显式重写。
-		logs.Info(logs.ModuleWeb, "配置变更，热重载同步器")
-		s.Wg.Go(func() {
-			s.Sync.Reload(oldSyncPath)
-			if cs.StrmUrlChanged {
-				s.Sync.RegenerateStrm(s.Sync.TaskCtx(), s.Cfg.StrmUrl)
-			}
-		})
-		triggered = true
-	case cs.SyncRulesChanged:
-		// 排除名单/视频扩展名变化：触发一次全量重扫（清理云端存量 / 重判视频）。
-		logs.Info(logs.ModuleWeb, "上传规则已更新，触发全量扫描清理")
-		s.Wg.Go(func() { s.Sync.RescanRoot(s.Sync.TaskCtx()) })
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":        true,
-		"reloading": triggered,
-		"ready":     ready,
-		"started":   triggered,
-		"missing":   missing,
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // ──── 日志 SSE ────
 
 const logReplayLimit = 1000
 
-// handleLogs SSE 实时推送运行日志 + 任务状态。连接时首帧推送当前状态快照，再回放近期日志，最后持续推送。
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
-	hub := s.Hub
-	sub := hub.Subscribe()
-	defer hub.Unsubscribe(sub)
+	sub := s.Broker.Subscribe()
+	defer s.Broker.Unsubscribe(sub)
 
-	// 首帧：当前状态快照
-	snap := s.Sync.Snapshot()
-	replay := hub.Recent(logReplayLimit)
+	snap := s.Broker.Snapshot()
+	replay := s.Broker.Recent(logReplayLimit)
 	replay = append([]logs.Entry{{
 		Time: time.Now(), Level: "INFO", Module: "status", Msg: "状态快照",
 		Status: &logs.StatusData{
 			Ready:       snap.Ready,
 			ConfigReady: snap.ConfigReady,
 			Missing:     snap.Missing,
-			Sync:        (*logs.TaskStatus)(snap.Sync),
-			Strm:        (*logs.TaskStatus)(snap.Strm),
+			InitError:   snap.InitError,
+			Sync:        snap.Sync,
+			Strm:        snap.Strm,
 		},
 	}}, replay...)
 
 	serveSSE(w, r, s.AppCtx, sub, replay)
 }
 
-// handleLogsClear 清空内存中的运行日志缓冲。
 func (s *Server) handleLogsClear(w http.ResponseWriter, r *http.Request) {
-	s.Hub.Clear()
+	s.Broker.Clear()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// ──── 离线下载 ────
+
+const _torrentMaxSize = 10 << 20
+
+func (s *Server) handleOfflineTasks(w http.ResponseWriter, r *http.Request) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	list, err := s.Broker.OfflineTaskList(r.Context(), page)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "获取任务列表失败: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) handleOfflineQuota(w http.ResponseWriter, r *http.Request) {
+	quota, err := s.Broker.OfflineQuotaInfo(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "获取配额失败: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, quota)
+}
+
+func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Urls     string `json:"urls"`
+		SavePath string `json:"save_path"`
+	}
+	if err := readJSON(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	var urls []string
+	for line := range strings.Lines(req.Urls) {
+		if line = strings.TrimSpace(line); line != "" {
+			urls = append(urls, line)
+		}
+	}
+	if len(urls) == 0 {
+		writeErr(w, http.StatusBadRequest, "请至少提供一条下载链接")
+		return
+	}
+
+	dirID, err := s.Broker.ResolveCloudDir(r.Context(), req.SavePath)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "保存目录无效: %v", err)
+		return
+	}
+
+	results, err := s.Broker.AddOfflineTasks(r.Context(), urls, dirID)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "添加离线任务失败: %v", err)
+		return
+	}
+	added := 0
+	for _, res := range results {
+		if res.State {
+			added++
+		}
+	}
+	logs.Info(logs.ModuleWeb, "添加离线任务", "提交", len(urls), "成功", added, "目录ID", dirID)
+	writeJSON(w, http.StatusOK, map[string]any{"added": added, "results": results})
+}
+
+func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(_torrentMaxSize); err != nil {
+		writeErr(w, http.StatusBadRequest, "解析上传数据失败: %v", err)
+		return
+	}
+	file, hdr, err := r.FormFile("torrent")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "未收到种子文件")
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil || len(data) == 0 {
+		writeErr(w, http.StatusBadRequest, "读取种子文件失败")
+		return
+	}
+
+	cfg := s.Broker.ConfigSnapshot()
+
+	savePath := strings.TrimSpace(r.FormValue("save_path"))
+	if savePath == "" {
+		savePath = strings.TrimSpace(cfg.StrmPath)
+	}
+	savePath = strings.Trim(savePath, "/")
+	if savePath == "" {
+		savePath = "/"
+	}
+
+	torrentPath := strings.TrimSpace(cfg.TorrentPath)
+	if torrentPath == "" {
+		torrentPath = strings.TrimSpace(cfg.TempPath)
+	}
+	if torrentPath == "" {
+		torrentPath = "/"
+	}
+	torrentCID, err := s.Broker.ResolveCloudDir(r.Context(), torrentPath)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "种子临时目录无效: %v", err)
+		return
+	}
+	result, err := s.Broker.AddTorrentTask(r.Context(), data, hdr.Filename, torrentCID, savePath)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "添加种子任务失败: %v", err)
+		return
+	}
+
+	logs.Info(logs.ModuleWeb, "添加种子任务",
+		"文件名", hdr.Filename, "大小", len(data),
+		"info_hash", result.InfoHash, "保存路径", savePath, "成功", result.State)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"added":   boolToInt(result.State),
+		"results": []drive.OfflineAddResult{*result},
+	})
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func (s *Server) handleOfflineDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		InfoHash    string `json:"info_hash"`
+		DeleteFiles bool   `json:"delete_files"`
+	}
+	if err := readJSON(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求格式错误: %v", err)
+		return
+	}
+	if req.InfoHash == "" {
+		writeErr(w, http.StatusBadRequest, "缺少 info_hash")
+		return
+	}
+	if err := s.Broker.DeleteOfflineTask(r.Context(), req.InfoHash, req.DeleteFiles); err != nil {
+		writeErr(w, http.StatusBadGateway, "删除任务失败: %v", err)
+		return
+	}
+	logs.Info(logs.ModuleWeb, "删除离线任务", "info_hash", req.InfoHash, "删除源文件", req.DeleteFiles)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleOfflineClear(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Flag int `json:"flag"`
+	}
+	if err := readJSON(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求格式错误: %v", err)
+		return
+	}
+	if req.Flag < 0 || req.Flag > 5 {
+		writeErr(w, http.StatusBadRequest, "flag 取值范围 0-5")
+		return
+	}
+	if err := s.Broker.ClearOfflineTasks(r.Context(), req.Flag); err != nil {
+		writeErr(w, http.StatusBadGateway, "清除任务失败: %v", err)
+		return
+	}
+	logs.Info(logs.ModuleWeb, "批量清除任务", "flag", req.Flag)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

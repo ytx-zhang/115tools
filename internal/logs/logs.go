@@ -158,6 +158,7 @@ type StatusData struct {
 	Ready       bool        `json:"ready"`
 	ConfigReady bool        `json:"config_ready"`
 	Missing     []string    `json:"missing,omitempty"`
+	InitError   string      `json:"init_error,omitempty"`
 	Sync        *TaskStatus `json:"sync"`
 	Strm        *TaskStatus `json:"strm"`
 }

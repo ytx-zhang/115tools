@@ -128,28 +128,18 @@ func (d *DB) SaveRecord(localPath string, fid string, size int64) {
 }
 
 // deleteTree 在单个写事务内删除前缀为 prefix 的全部记录（含 prefix 自身与所有后代）。
-// keepPrefix 非空时，其自身及其子树（keepPrefix + '/'）被跳过——用于「新根在旧根子树内」
-// 时避免误删刚重建的新索引。
-func (d *DB) deleteTree(tx *bbolt.Tx, prefix, keepPrefix string) error {
+func (d *DB) deleteTree(tx *bbolt.Tx, prefix string) error {
 	b := tx.Bucket(d.bucketName)
 	if b == nil {
 		return nil
 	}
 	selfBytes := []byte(prefix)
 	childPrefix := append(append([]byte{}, selfBytes...), '/')
-	var keepBytes, keepChild []byte
-	if keepPrefix != "" {
-		keepBytes = []byte(keepPrefix)
-		keepChild = append(append([]byte{}, keepBytes...), '/')
-	}
 
 	c := b.Cursor()
 	for k, _ := c.Seek(selfBytes); k != nil; k, _ = c.Next() {
 		if !bytes.Equal(k, selfBytes) && !bytes.HasPrefix(k, childPrefix) {
 			break
-		}
-		if keepBytes != nil && (bytes.Equal(k, keepBytes) || bytes.HasPrefix(k, keepChild)) {
-			continue
 		}
 		if err := c.Delete(); err != nil {
 			return err
@@ -159,8 +149,6 @@ func (d *DB) deleteTree(tx *bbolt.Tx, prefix, keepPrefix string) error {
 }
 
 // BatchClearPaths 删除传入路径（含目录的全部子条目）。
-// 一次性在单个写事务内用游标遍历并删除——bbolt 自身对删除已优化良好，
-// 写事务对读事务（MVCC 快照）无阻塞，旧的分块逻辑只是多余复杂度。
 func (d *DB) BatchClearPaths(fPaths []string) {
 	if len(fPaths) == 0 {
 		return
@@ -168,7 +156,7 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 	logs.Info(logs.ModuleDB, "批量清理路径开始", "数量", len(fPaths))
 	err := d.boltDB.Update(func(tx *bbolt.Tx) error {
 		for _, fPath := range fPaths {
-			if e := d.deleteTree(tx, fPath, ""); e != nil {
+			if e := d.deleteTree(tx, fPath); e != nil {
 				return e
 			}
 		}
@@ -176,22 +164,6 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 	})
 	if err != nil {
 		logs.Error(logs.ModuleDB, "批量清理失败", "数量", len(fPaths), "错误信息", err)
-	}
-}
-
-// ClearOldRoot 删除旧同步根 oldPrefix 下的全部记录，但保留与当前同步根 keepPrefix
-// 重叠的子树——用于「新目录是旧目录子树」时避免误删刚重建的新索引。
-// oldPrefix=="" 或 ==keepPrefix 时直接返回（无清理）。
-func (d *DB) ClearOldRoot(oldPrefix, keepPrefix string) {
-	if oldPrefix == "" || oldPrefix == keepPrefix {
-		return
-	}
-	logs.Info(logs.ModuleDB, "清理旧同步根", "旧根", oldPrefix)
-	err := d.boltDB.Update(func(tx *bbolt.Tx) error {
-		return d.deleteTree(tx, oldPrefix, keepPrefix)
-	})
-	if err != nil {
-		logs.Error(logs.ModuleDB, "清理旧同步根失败", "旧根", oldPrefix, "错误信息", err)
 	}
 }
 

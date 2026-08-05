@@ -39,13 +39,13 @@ func runStrmGen(ctx context.Context, env *Env, task *Task) {
 		}
 	}
 
-	info, err := env.API.GetDirInfo(ctx, env.Paths.StrmPath)
-	if err != nil {
-		logs.Error(logs.ModuleStrm, "无法获取起始目录id", "错误信息", err)
+	// StrmPath 的 FID 在 Init 时已查询并缓存，直接复用避免重复 API 调用
+	if env.Paths.StrmFid == "" {
+		logs.Error(logs.ModuleStrm, "StrmFid 为空，需重新初始化")
 		return
 	}
 
-	_ = env.WalkCloud(ctx, env.Paths.StrmPath, info.Fid, Visitor{
+	_ = env.WalkCloud(ctx, env.Paths.StrmPath, env.Paths.StrmFid, Visitor{
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			appendMoveFid(path, fid)
 			if err := os.MkdirAll(path, 0755); err != nil {

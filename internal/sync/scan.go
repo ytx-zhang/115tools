@@ -24,13 +24,13 @@ func (l *instance) FullScan(ctx context.Context) {
 		logs.Info(logs.ModuleSync, "检测到深层孤儿DB记录", "数量", len(orphans))
 		l.env.DB.BatchClearPaths(orphans)
 	}
-	l.syncDir(ctx, l.env.Paths.SyncPath, l.env.Paths.SyncFid, true)
+	l.syncDir(ctx, l.env.Paths.SyncPath, true)
 }
 
 // syncDir 同步一个目录：扫描差异 → 投递待上传文件到队列（异步）。幂等。
 // recursive=true 递归子树（全量）；false 只扫直属子项（监控）。
-func (l *instance) syncDir(ctx context.Context, currentPath, currentFid string, recursive bool) {
-	uploadPaths := l.scanDir(ctx, currentPath, currentFid, recursive)
+func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bool) {
+	uploadPaths := l.scanDir(ctx, currentPath, recursive)
 	if len(uploadPaths) == 0 {
 		return
 	}
@@ -52,7 +52,7 @@ func (l *instance) syncDir(ctx context.Context, currentPath, currentFid string, 
 
 // scanDir 对比数据库记录与本地实际内容，返回待上传文件列表。
 // 两步：① DB 子项中本地已删→待清理，都在→比对内容；② 本地新增项→建云端目录/列入上传。
-func (l *instance) scanDir(ctx context.Context, currentPath, currentFid string, recursive bool) []string {
+func (l *instance) scanDir(ctx context.Context, currentPath string, recursive bool) []string {
 	logs.Debug(logs.ModuleSync, "扫描本地文件", "处理目录", currentPath)
 	start := time.Now()
 	defer func() {
@@ -101,7 +101,7 @@ func (l *instance) scanDir(ctx context.Context, currentPath, currentFid string, 
 
 		if localFile.IsDir() {
 			if dbSize == db.SizeDir && recursive {
-				uploads = append(uploads, l.scanDir(ctx, fullPath, dbFid, recursive)...)
+				uploads = append(uploads, l.scanDir(ctx, fullPath, recursive)...)
 			}
 			continue
 		}
@@ -133,14 +133,12 @@ func (l *instance) scanDir(ctx context.Context, currentPath, currentFid string, 
 		}
 		fullPath := filepath.Join(currentPath, name)
 		if entry.IsDir() {
-			fid, err := AddCloudFolder(ctx, l.env, currentFid, fullPath)
-			if err != nil {
+			if _, err := AddCloudFolder(ctx, l.env, fullPath); err != nil {
 				logs.Error(logs.ModuleSync, "创建云端目录失败", "路径", fullPath, "错误", err)
 				continue
 			}
-			l.env.DB.SaveRecord(fullPath, fid, db.SizeDir)
 			if recursive {
-				uploads = append(uploads, l.scanDir(ctx, fullPath, fid, recursive)...)
+				uploads = append(uploads, l.scanDir(ctx, fullPath, recursive)...)
 			}
 		} else {
 			uploads = append(uploads, fullPath)

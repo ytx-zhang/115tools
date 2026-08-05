@@ -1,5 +1,6 @@
 // Package web 提供管理面板 HTTP 层：登录鉴权、配置、离线下载、任务触发与状态推送。
 // /download 直链接口不在本包注册（位于 main，供 Emby 免验证使用）。
+// 所有业务逻辑经 init.Broker 代理，web 不直接导入 sync/config/drive。
 package web
 
 import (
@@ -7,10 +8,8 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"github.com/ytx-zhang/115tools/internal/config"
-	"github.com/ytx-zhang/115tools/internal/drive"
+	"github.com/ytx-zhang/115tools/internal/init"
 	"github.com/ytx-zhang/115tools/internal/logs"
-	synclib "github.com/ytx-zhang/115tools/internal/sync"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -20,14 +19,11 @@ import (
 //go:embed all:static
 var staticFS embed.FS
 
-// Deps 由 main 注入的依赖。Sync 是同步器生命周期管理器，web 经它的方法访问当前实例。
+// Deps 由 main 注入的依赖。Broker 聚合所有模块，web 仅通过它交互。
 type Deps struct {
-	Cfg    *config.Config
-	Api    *drive.Open115
+	Broker *broker.Broker
 	AppCtx context.Context
 	Wg     *sync.WaitGroup
-	Hub    *logs.Hub
-	Sync   *synclib.Syncer
 }
 
 // Server 管理面板 HTTP 服务。
