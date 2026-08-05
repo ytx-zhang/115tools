@@ -76,7 +76,7 @@ function resetCounts() {
 function bumpCount(level, mod) {
   counts.all++;
   _updateChip('all', counts.all);
-  if (level === 'WARN' || level === 'ERROR') { counts.warn++; _updateChip('warn', counts.warn); }
+  if (level === 'WARN') { counts.warn++; _updateChip('warn', counts.warn); }
   if (level === 'ERROR') { counts.error++; _updateChip('error', counts.error); }
   if (mod && counts.hasOwnProperty(mod)) { counts[mod]++; _updateChip(mod, counts[mod]); }
 }
@@ -127,7 +127,7 @@ async function clearLogs() {
 
 function matchFilter(level, mod) {
   if (logFilter === 'all') return true;
-  if (logFilter === 'warn') return level === 'WARN' || level === 'ERROR';
+  if (logFilter === 'warn') return level === 'WARN';
   if (logFilter === 'error') return level === 'ERROR';
   // 按模块过滤 — 该模块所有级别
   return mod === logFilter;

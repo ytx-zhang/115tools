@@ -2,6 +2,7 @@ package drive
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -17,16 +18,21 @@ type DownloadUrlInfo struct {
 	Name string // 云端文件名
 }
 
+// downloadItem 是 GetDownloadUrl 的 data 单条条目类型。
+type downloadItem struct {
+	FileName string `json:"file_name"`
+	Url      struct {
+		Url string `json:"url"`
+	} `json:"url"`
+}
+
 // GetDownloadUrl 用 pickcode 换取文件的真实下载地址。
 // ua 会被 115 记入直链绑定，回源 CDN 时须带相同 UA（透传模式已保证非空）。
+// ⚠️ 115 在 pickcode 无效/文件不可用时可能返回 {"state":true,"data":[]}（空数组），
+// 而非常规的 {"fid":{...}} 对象，故先用 json.RawMessage 承接再手动解析。
 func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*DownloadUrlInfo, error) {
 	logs.Info(logs.ModuleCloud, "获取下载直链", "pickcode", pickCode)
-	res, err := doAPI[map[string]struct {
-		FileName string `json:"file_name"`
-		Url      struct {
-			Url string `json:"url"`
-		} `json:"url"`
-	}](ctx, d, "POST", "/open/ufile/downurl",
+	res, err := doAPI[json.RawMessage](ctx, d, "POST", "/open/ufile/downurl",
 		withHeader("User-Agent", ua),
 		withForm(map[string]string{"pick_code": pickCode}),
 	)
@@ -34,7 +40,12 @@ func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*Dow
 		return nil, err
 	}
 
-	for fid, item := range res.Data {
+	var data map[string]downloadItem
+	if err := json.Unmarshal(res.Data, &data); err != nil {
+		return nil, fmt.Errorf("解析下载信息失败: %w", err)
+	}
+
+	for fid, item := range data {
 		return &DownloadUrlInfo{
 			Fid:  fid,
 			Url:  item.Url.Url,

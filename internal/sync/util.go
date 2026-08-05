@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,36 +72,19 @@ func IsVideoExt(path string) bool {
 	return false
 }
 
-// ExtractPickcode 从 .strm 文件首行提取 115 pickcode（24 字节十六进制 = FID）。
-func ExtractPickcode(strmPath string) (link string, fid string) {
+// ExtractPickcode 从 .strm 文件首行提取 pickcode 与 fid。
+// 格式：{url}/download?pickcode=xxx&fid=yyy
+func ExtractPickcode(strmPath string) (pickcode string, fid string) {
 	data, err := os.ReadFile(strmPath)
 	if err != nil {
 		return "", ""
 	}
-	link = strings.TrimSpace(string(data))
-	if len(link) < 24 {
-		return link, ""
+	raw := strings.TrimSpace(strings.TrimPrefix(string(data), "\xEF\xBB\xBF"))
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", ""
 	}
-	prefix := "/d/" // https?://domain/d/xxxx 之 pickcode
-	if idx := strings.LastIndex(link, prefix); idx != -1 {
-		fid = link[idx+len(prefix):]
-	} else {
-		fid = link
-	}
-	if len(fid) >= 24 {
-		fid = fid[:24]
-	}
-	isPickcode := true
-	for _, c := range fid {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			isPickcode = false
-			break
-		}
-	}
-	if !isPickcode {
-		return link, ""
-	}
-	return link, fid
+	return u.Query().Get("pickcode"), u.Query().Get("fid")
 }
 
 // ──── 上传排除过滤 ────
