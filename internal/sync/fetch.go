@@ -3,8 +3,8 @@ package sync
 import (
 	"context"
 	"fmt"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -37,18 +37,18 @@ func (e *Env) FetchAndSave(ctx context.Context, pickCode, fid, savePath string, 
 	if isVideo {
 		t0 := time.Now()
 		if err := e.SaveStrmFile(pickCode, fid, savePath); err != nil {
-			slog.Error("创建strm文件失败", "文件", savePath, "错误", err)
+			logs.Error(logs.ModuleSync, "创建strm文件失败", "文件", savePath, "错误", err)
 			return err
 		}
-		slog.Info("新增STRM文件", "文件", savePath, "耗时", time.Since(t0))
+		logs.Info(logs.ModuleSync, "新增STRM文件", "文件", savePath, "耗时", time.Since(t0))
 		return nil
 	}
 	t0 := time.Now()
 	if err := e.DownloadFile(ctx, pickCode, savePath); err != nil {
-		slog.Error("下载文件失败", "文件", savePath, "错误", err)
+		logs.Error(logs.ModuleSync, "下载文件失败", "文件", savePath, "错误", err)
 		return err
 	}
-	slog.Info("下载文件成功", "文件", savePath, "耗时", time.Since(t0))
+	logs.Info(logs.ModuleSync, "下载文件成功", "文件", savePath, "耗时", time.Since(t0))
 	return nil
 }
 

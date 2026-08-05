@@ -9,10 +9,9 @@ import (
 	"fmt"
 	"github.com/ytx-zhang/115tools/internal/config"
 	"github.com/ytx-zhang/115tools/internal/drive"
-	"github.com/ytx-zhang/115tools/internal/event"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	synclib "github.com/ytx-zhang/115tools/internal/sync"
 	"io/fs"
-	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -27,7 +26,7 @@ type Deps struct {
 	Api    *drive.Open115
 	AppCtx context.Context
 	Wg     *sync.WaitGroup
-	Hub    *event.Hub
+	Hub    *logs.Hub
 	Sync   *synclib.Syncer
 }
 
@@ -49,7 +48,6 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 	// 受保护接口
 	protected := map[string]http.HandlerFunc{
 		"POST /api/logout":          s.handleLogout,
-		"GET /api/status":           s.handleStatus,
 		"GET /api/logs":             s.handleLogs,
 		"POST /api/logs/clear":      s.handleLogsClear,
 		"POST /api/task/{name}":     s.handleTaskStart,
@@ -73,12 +71,12 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 func (s *Server) registerStatic(mux *http.ServeMux) {
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
-		slog.Error("[WEB] 静态资源目录缺失", "错误信息", err)
+		logs.Error(logs.ModuleWeb, "静态资源目录缺失", "错误信息", err)
 		return
 	}
 	indexData, err := fs.ReadFile(sub, "index.html")
 	if err != nil {
-		slog.Error("[WEB] 读取 index.html 失败", "错误信息", err)
+		logs.Error(logs.ModuleWeb, "读取 index.html 失败", "错误信息", err)
 		indexData = []byte("<h1>index.html missing</h1>")
 	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {

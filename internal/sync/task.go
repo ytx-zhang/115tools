@@ -2,15 +2,12 @@ package sync
 
 import (
 	"context"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"sync/atomic"
 )
 
-// TaskProgress 是任务进度的快照，供 web 层 SSE 推送（JSON 字段勿动，前端依赖）。
-type TaskProgress struct {
-	Total     int64 `json:"total"`
-	Completed int64 `json:"completed"`
-	Running   bool  `json:"running"`
-}
+// TaskProgress 是任务进度的快照（类型别名，零开销；JSON 字段勿动，前端依赖）。
+type TaskProgress = logs.TaskStatus
 
 // Task 一次性任务：防重入启动 + 可取消上下文 + 原子进度上报一体。
 // 云端同步与 STRM 生成各持一个，各自只写 run(ctx) 业务体即可。

@@ -6,7 +6,7 @@ import (
 
 	"github.com/sgtdi/fswatcher"
 	"github.com/ytx-zhang/115tools/internal/db"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"path/filepath"
 	"sync"
 	"time"
@@ -23,15 +23,15 @@ func (l *instance) watchPump(ctx context.Context) {
 		fswatcher.WithCooldown(0),                      // 关闭库内默认去抖，拿到持续写入的原始事件
 	)
 	if err != nil {
-		slog.Error("监听器启动失败", "err", err)
+		logs.Error(logs.ModuleSync, "监听器启动失败", "err", err)
 		return
 	}
 	go func() {
 		if err := watcher.Watch(ctx); err != nil {
-			slog.Error("[监听器] 运行异常退出", "err", err)
+			logs.Error(logs.ModuleSync, "监听器运行异常退出", "err", err)
 		}
 	}()
-	slog.Info("文件监听器启动", "路径", l.env.Paths.SyncPath)
+	logs.Info(logs.ModuleSync, "文件监听器启动", "路径", l.env.Paths.SyncPath)
 
 	// 待处理目录集合（主循环与 executor 并发读写，mu 必须保护）：按目录去重。
 	// 任意事件只取父目录加入集合；全局防抖计时器由最后一个事件重置，
@@ -109,7 +109,7 @@ func (l *instance) watchPump(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			gTimer.Stop()
-			slog.Info("文件监听器已退出")
+			logs.Info(logs.ModuleSync, "文件监听器已退出")
 			return
 		case ev, ok := <-watcher.Events():
 			if !ok {
@@ -130,7 +130,7 @@ func (l *instance) processFolders(ctx context.Context, folders []string) []strin
 		// 都登记为待处理；若此时父层清理已清 DB 并删了云端目录，这里会误判「新目录」而复活云端。
 		// ⚠️ 子目录已删时，必须把父目录重新加入待处理：只有父目录扫描才能发现子项缺失并清理 DB。
 		if _, statErr := os.Stat(f); statErr != nil {
-			slog.Debug("待处理目录本地已不存在，跳过", "路径", f, "错误", statErr)
+			logs.Debug(logs.ModuleSync, "待处理目录本地已不存在，跳过", "路径", f, "错误", statErr)
 			if f != l.env.Paths.SyncPath {
 				if parent := filepath.Dir(f); parent != "." {
 					retryParents = append(retryParents, parent)
@@ -143,7 +143,7 @@ func (l *instance) processFolders(ctx context.Context, folders []string) []strin
 			var err error
 			fid, err = AddCloudFolder(ctx, l.env, "", f)
 			if err != nil {
-				slog.Error("自动创建云端目录失败，跳过", "路径", f, "错误", err)
+				logs.Error(logs.ModuleSync, "自动创建云端目录失败，跳过", "路径", f, "错误", err)
 				continue
 			}
 			l.env.DB.SaveRecord(f, fid, db.SizeDir)

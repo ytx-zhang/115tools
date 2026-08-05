@@ -1,13 +1,13 @@
 package sync
 
 import (
-	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
 
 	"github.com/ytx-zhang/115tools/internal/config"
+	"github.com/ytx-zhang/115tools/internal/logs"
 )
 
 // uploadExclude 是运行期生效的上传排除名单（统一小写、原子可热更新）。
@@ -21,7 +21,7 @@ func init() { uploadExclude.Store(&[]string{}) }
 func SetUploadExclude(patterns []string) []string {
 	clean := config.NormalizeUploadExclude(patterns)
 	uploadExclude.Store(&clean)
-	slog.Info("[CORE] 上传排除名单已更新", "规则数", len(clean))
+	logs.Info(logs.ModuleSync, "上传排除名单已更新", "规则数", len(clean))
 	return clean
 }
 

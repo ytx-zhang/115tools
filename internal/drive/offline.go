@@ -5,7 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"strconv"
 	"strings"
 )
@@ -25,6 +25,7 @@ type OfflineAddResult struct {
 // AddOfflineTasks 批量添加离线下载链接（http/https/magnet/ed2k），
 // 保存到 saveDirID 对应的云端目录（"0" 表示根目录）。
 func (d *Open115) AddOfflineTasks(ctx context.Context, urls []string, saveDirID string) ([]OfflineAddResult, error) {
+	logs.Info(logs.ModuleCloud, "添加离线下载任务", "count", len(urls), "save_dir", saveDirID)
 	res, err := doAPI[[]OfflineAddResult](ctx, d, "POST", "/open/offline/add_task_urls",
 		withForm(map[string]string{
 			"urls":       strings.Join(urls, "\n"),
@@ -32,6 +33,7 @@ func (d *Open115) AddOfflineTasks(ctx context.Context, urls []string, saveDirID 
 		}),
 	)
 	if err != nil {
+		logs.Error(logs.ModuleCloud, "添加离线下载任务失败", "count", len(urls), "err", err)
 		return nil, err
 	}
 	return res.Data, nil
@@ -74,6 +76,7 @@ func (d *Open115) OfflineTaskList(ctx context.Context, page int) (*OfflineTaskPa
 
 // DeleteOfflineTask 删除单个云下载任务；deleteFiles 为 true 时同时删除已下载的源文件。
 func (d *Open115) DeleteOfflineTask(ctx context.Context, infoHash string, deleteFiles bool) error {
+	logs.Info(logs.ModuleCloud, "删除离线任务", "info_hash", infoHash, "delete_files", deleteFiles)
 	form := map[string]string{
 		"info_hash":       infoHash,
 		"del_source_file": "0",
@@ -84,15 +87,22 @@ func (d *Open115) DeleteOfflineTask(ctx context.Context, infoHash string, delete
 	_, err := doAPI[any](ctx, d, "POST", "/open/offline/del_task",
 		withForm(form),
 	)
+	if err != nil {
+		logs.Error(logs.ModuleCloud, "删除离线任务失败", "info_hash", infoHash, "err", err)
+	}
 	return err
 }
 
 // ClearOfflineTasks 批量清除任务。
 // flag：0 已完成，1 全部，2 失败，3 进行中，4 已完成且删源文件，5 全部且删源文件。
 func (d *Open115) ClearOfflineTasks(ctx context.Context, flag int) error {
+	logs.Info(logs.ModuleCloud, "批量清除离线任务", "flag", flag)
 	_, err := doAPI[any](ctx, d, "POST", "/open/offline/clear_task",
 		withForm(map[string]string{"flag": strconv.Itoa(flag)}),
 	)
+	if err != nil {
+		logs.Error(logs.ModuleCloud, "批量清除离线任务失败", "flag", flag, "err", err)
+	}
 	return err
 }
 
@@ -155,7 +165,7 @@ func (d *Open115) ParseTorrent(ctx context.Context, torrentSha1, pickCode string
 	if info.InfoHash == "" {
 		return nil, fmt.Errorf("种子解析失败，未获取到 info_hash")
 	}
-	slog.Debug("[BT调试] 解析种子成功",
+	logs.Debug(logs.ModuleCloud, "解析种子成功",
 		"info_hash", info.InfoHash,
 		"名称", info.Name,
 		"file_count", info.FileCount,
@@ -184,7 +194,7 @@ func (d *Open115) AddOfflineTaskBT(ctx context.Context, infoHash, wanted, torren
 	if wpPathID != "" {
 		form["wp_path_id"] = wpPathID
 	}
-	slog.Debug("[BT调试] 请求 add_task_bt",
+	logs.Debug(logs.ModuleCloud, "请求 add_task_bt",
 		"info_hash", infoHash,
 		"wanted", wanted,
 		"save_path", savePath,
@@ -212,6 +222,7 @@ func (d *Open115) AddOfflineTaskBT(ctx context.Context, infoHash, wanted, torren
 // cid 为种子文件上传到的目录（云端临时存放，需目录 ID）；savePath 为离线下载
 // 保存路径（相对根目录的路径串，如 "STRM/电影"，必填非空）。
 func (d *Open115) AddTorrentTask(ctx context.Context, torrentData []byte, torrentName, cid, savePath string) (*OfflineAddResult, error) {
+	logs.Info(logs.ModuleCloud, "添加种子离线任务", "name", torrentName, "save_path", savePath)
 	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}

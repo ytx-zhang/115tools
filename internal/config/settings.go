@@ -2,7 +2,7 @@ package config
 
 import (
 	"fmt"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -239,6 +239,6 @@ func (c *Config) Update(e Editable) (cs *ChangeSet, oldSyncPath, oldStrmUrl stri
 	if err := c.persistLocked(); err != nil {
 		return nil, oldSyncPath, oldStrmUrl, fmt.Errorf("配置写盘失败: %w", err)
 	}
-	slog.Info("[CONFIG] 配置已更新", "变更", cs)
+	logs.Info(logs.ModuleWeb, "配置已更新", "变更", cs)
 	return cs, oldSyncPath, oldStrmUrl, nil
 }

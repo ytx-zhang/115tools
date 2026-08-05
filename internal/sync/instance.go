@@ -18,7 +18,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/ytx-zhang/115tools/internal/db"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,7 +83,7 @@ func (l *instance) RegenerateStrmFiles(ctx context.Context) {
 // 不一致或首次运行则全量扫描；扫描被中止时清理半成品索引。
 func (l *instance) initRoot(parentCtx context.Context, oldSyncPath string) error {
 	if err := context.Cause(parentCtx); err != nil {
-		slog.Warn("[任务中止] 初始化同步", "错误信息", err)
+		logs.Warn(logs.ModuleSync, "初始化同步", "错误信息", err)
 		return err
 	}
 	ctx, cancel := context.WithCancelCause(parentCtx)
@@ -103,9 +103,9 @@ func (l *instance) initRoot(parentCtx context.Context, oldSyncPath string) error
 	}
 
 	if dbFid == "" {
-		slog.Info("初次运行，开始初始化云端数据库...")
+		logs.Info(logs.ModuleSync, "初次运行，开始初始化云端数据库...")
 	} else {
-		slog.Info("[初始化] 云端目录 FID 已变更，将清空旧索引并重新全量扫描",
+		logs.Info(logs.ModuleSync, "云端目录 FID 已变更，将清空旧索引并重新全量扫描",
 			"旧FID", dbFid, "新FID", cloudFid)
 		l.env.DB.BatchClearPaths([]string{l.env.Paths.SyncPath})
 	}
@@ -114,7 +114,7 @@ func (l *instance) initRoot(parentCtx context.Context, oldSyncPath string) error
 	var scanErr error
 	defer func() {
 		if scanErr != nil {
-			slog.Error("云端扫描被中止，正在清理数据库", "错误信息", scanErr)
+			logs.Error(logs.ModuleSync, "云端扫描被中止，正在清理数据库", "错误信息", scanErr)
 			l.env.DB.BatchClearPaths([]string{l.env.Paths.SyncPath})
 		}
 	}()
@@ -149,14 +149,14 @@ func (l *instance) initRoot(parentCtx context.Context, oldSyncPath string) error
 		cancel(scanErr)
 		return scanErr
 	}
-	slog.Info("[初始化] 云端数据库初始化完成")
+	logs.Info(logs.ModuleSync, "云端数据库初始化完成")
 	return nil
 }
 
 // initTemp 查询云端回收目录 FID，只存内存（不落库，避免 temp_path 变更后用过期 FID）。
 func (l *instance) initTemp(ctx context.Context) error {
 	if err := context.Cause(ctx); err != nil {
-		slog.Warn("[任务中止] Temp目录初始化", "错误信息", err)
+		logs.Warn(logs.ModuleSync, "Temp目录初始化", "错误信息", err)
 		return err
 	}
 	info, err := l.env.API.GetDirInfo(ctx, l.env.Paths.TempPath)
@@ -200,18 +200,18 @@ func (l *instance) ensureDirs(ctx context.Context) error {
 // cron.enabled=false 时挂起空转，仅依赖文件监听。
 func (l *instance) cronSync(ctx context.Context) {
 	if !l.env.CronEnabled {
-		slog.Info("[定时] 定时全量同步已关闭（配置 cron.enabled=false），仅依赖本地文件监听")
+		logs.Info(logs.ModuleSync, "定时全量同步已关闭（配置 cron.enabled=false），仅依赖本地文件监听")
 		<-ctx.Done()
 		return
 	}
 	interval := l.env.CronInterval
-	slog.Info("[定时] 定时全量同步已启用", "间隔", interval.String())
+	logs.Info(logs.ModuleSync, "定时全量同步已启用", "间隔", interval.String())
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			slog.Debug("触发定时全量同步任务")
+			logs.Info(logs.ModuleSync, "触发定时全量同步任务")
 			l.FullScan(ctx)
 			l.cloudTask.Start(ctx, func(c context.Context) {
 				runCloudSync(c, l.env, l.cloudTask)

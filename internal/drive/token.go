@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -60,7 +60,7 @@ func (d *Open115) refreshToken(ctx context.Context, overrideRT ...string) error 
 	// fail 记录刷新失败并安排短间隔重试，同时重排守护，避免失败链断裂后无机会再刷。
 	fail := func(format string, a ...any) error {
 		err := fmt.Errorf(format, a...)
-		slog.Warn("[TOKEN] 刷新失败，将短间隔重试", "错误信息", err)
+		logs.Warn(logs.ModuleCloud, "刷新失败，将短间隔重试", "错误信息", err)
 		time.AfterFunc(time.Minute, func() {
 			_ = d.refreshToken(context.Background())
 			d.scheduleRefresh() // 失败也重排守护，保持链不断

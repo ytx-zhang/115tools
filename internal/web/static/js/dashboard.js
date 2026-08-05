@@ -1,8 +1,6 @@
-// dashboard.js —— 任务状态实时展示（SSE）与启停控制，含日志流（渲染/过滤/暂停/清空）。
+// dashboard.js —— 任务状态与日志统一走 /api/logs SSE。
 // 状态卡用 petite-vue 声明式绑定（见 index.html v-scope="dash"）；日志流保留命令式 append。
 import { api, toast, connectSSE } from './api.js';
-
-let closeStatus = null; // 状态 SSE 的关闭函数
 
 const startText = { sync: '开始同步', strm: '开始生成' };
 
@@ -40,50 +38,34 @@ export const dash = window.PetiteVue.reactive({
 });
 
 export function initDashboard() {
-  closeStatus = connectSSE('/api/status', { onMessage: render });
   initLogs();
 }
 
 export function stopDashboard() {
-  closeStatus?.();
-  closeStatus = null;
   stopLogs();
-}
-
-function render(data) {
-  dash.configReady = data.config_ready;
-  dash.missing = data.missing || [];
-  dash.reloading = !data.ready && data.config_ready;
-  dash.setStatus('sync', data.sync);
-  dash.setStatus('strm', data.strm);
 }
 
 // ──── 日志流（保留命令式 append）────
 
 let closeLogs = null;   // 日志 SSE 的关闭函数
 let logPaused = false;  // 暂停自动滚动
-let logFilter = 'all';  // all / info / warn / error
-const counts = { all: 0, info: 0, warn: 0, error: 0 };
+let logFilter = 'all';  // all / warn / error / sync / strm / drive / web / system（同一行互斥）
+let countsAll = 0;
 
 function resetCounts() {
-  counts.all = counts.info = counts.warn = counts.error = 0;
-  document.querySelectorAll('#log-filter .chip').forEach(ch => {
-    const s = ch.querySelector('.chip-count');
-    if (s) s.textContent = '0';
-  });
+  countsAll = 0;
+  const el = document.querySelector('#log-filter .chip[data-lv="all"] .chip-count');
+  if (el) el.textContent = '0';
 }
 
-function bumpCount(level) {
-  counts.all++;
-  const allEl = document.querySelector('#log-filter .chip[data-lv="all"] .chip-count');
-  if (allEl) allEl.textContent = counts.all;
-  const key = String(level).toLowerCase();
-  if (key in counts) {
-    counts[key]++;
-    const el = document.querySelector(`#log-filter .chip[data-lv="${key}"] .chip-count`);
-    if (el) el.textContent = counts[key];
-  }
+function bumpCount() {
+  countsAll++;
+  const el = document.querySelector('#log-filter .chip[data-lv="all"] .chip-count');
+  if (el) el.textContent = countsAll;
 }
+
+// 模块中文名映射（module label 显示）
+const moduleLabels = { sync: '同步', strm: 'STRM', drive: '直链', web: '管理', system: '系统', cloud: '云端', db: '数据库' };
 
 export function initLogs() {
   const box = document.getElementById('log-box');
@@ -93,7 +75,6 @@ export function initLogs() {
   closeLogs = connectSSE('/api/logs', {
     onMessage: renderLog,
     onOpen: () => {
-      // 重连时服务端会重新回放近期日志，先清空旧内容避免重复。
       const box = document.getElementById('log-box');
       if (box) box.innerHTML = '<div class="muted empty">暂无日志</div>';
       resetCounts();
@@ -109,7 +90,7 @@ export function initLogs() {
 
   document.querySelectorAll('#log-filter .chip').forEach(btn => {
     btn.onclick = () => {
-      logFilter = btn.dataset.lv;
+      logFilter = btn.dataset.lv || btn.dataset.mod;
       document.querySelectorAll('#log-filter .chip')
         .forEach(b => b.classList.toggle('active', b === btn));
       applyFilter();
@@ -129,29 +110,50 @@ async function clearLogs() {
   try { await api('/api/logs/clear', { method: 'POST' }); } catch { /* 忽略 */ }
 }
 
-function matchFilter(level) {
-  return logFilter === 'all' || level === logFilter.toUpperCase();
+function matchFilter(level, mod) {
+  if (logFilter === 'all') return true;
+  if (logFilter === 'warn') return level === 'WARN' || level === 'ERROR';
+  if (logFilter === 'error') return level === 'ERROR';
+  // 按模块过滤 — 该模块所有级别
+  return mod === logFilter;
 }
 
 function applyFilter() {
   const box = document.getElementById('log-box');
   if (!box) return;
   box.querySelectorAll('.log-line').forEach(line => {
-    line.hidden = !matchFilter(line.dataset.level);
+    line.hidden = !matchFilter(line.dataset.level, line.dataset.module);
   });
 }
 
 function renderLog(en) {
+  // status 条目不创建日志 DOM，直接更新 dash 卡片
+  if (en.status) {
+    dash.configReady = en.status.config_ready;
+    dash.missing = en.status.missing || [];
+    dash.reloading = !en.status.ready && en.status.config_ready;
+    dash.setStatus('sync', en.status.sync);
+    dash.setStatus('strm', en.status.strm);
+    return;
+  }
+
   const box = document.getElementById('log-box');
   if (!box) return;
   const empty = box.querySelector('.empty');
   if (empty) empty.remove();
 
   const level = String(en.level || 'INFO').toUpperCase();
+  const mod = String(en.module || 'system');
   const line = document.createElement('div');
   line.className = 'log-line lv-' + level.toLowerCase();
   line.dataset.level = level;
-  line.hidden = !matchFilter(level);
+  line.dataset.module = mod;
+  line.hidden = !matchFilter(level, mod);
+
+  // 模块标签
+  const modSpan = document.createElement('span');
+  modSpan.className = 'log-mod lv-' + mod;
+  modSpan.textContent = moduleLabels[mod] || mod;
 
   const t = document.createElement('span');
   t.className = 'log-time';
@@ -167,10 +169,10 @@ function renderLog(en) {
   msg.className = 'log-msg';
   msg.textContent = en.msg + (en.attrs ? '  ' + en.attrs : '');
 
-  line.append(t, lv, msg);
+  line.append(modSpan, t, lv, msg);
   box.appendChild(line);
 
-  bumpCount(level);
+  bumpCount();
   while (box.childElementCount > 300) box.removeChild(box.firstElementChild);
   if (!logPaused) box.scrollTop = box.scrollHeight;
 }

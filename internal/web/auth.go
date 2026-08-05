@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"maps"
 	"net/http"
 	"sync"
@@ -115,7 +115,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	passOK := bcrypt.CompareHashAndPassword([]byte(passHash), []byte(req.Password)) == nil
 	if !userOK || !passOK {
 		time.Sleep(500 * time.Millisecond)
-		slog.Warn("[WEB] 登录失败", "用户名", req.Username, "来源", clientIP(r))
+		logs.Warn(logs.ModuleWeb, "登录失败", "用户名", req.Username, "来源", clientIP(r))
 		writeErr(w, http.StatusUnauthorized, "账号或密码错误")
 		return
 	}
@@ -124,7 +124,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Name: sessionCookie, Value: s.sessions.create(), Path: "/",
 		MaxAge: int(sessionTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode,
 	})
-	slog.Info("[WEB] 登录成功", "用户名", req.Username, "来源", clientIP(r))
+	logs.Info(logs.ModuleWeb, "登录成功", "用户名", req.Username, "来源", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

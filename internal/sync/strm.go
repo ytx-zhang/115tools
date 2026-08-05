@@ -5,7 +5,7 @@ package sync
 
 import (
 	"context"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,10 +16,10 @@ import (
 
 // runStrmGen 执行一轮 STRM 生成任务（在 Task 的协程中运行）。
 func runStrmGen(ctx context.Context, env *Env, task *Task) {
-	slog.Info("开始生成strm文件...")
+	logs.Info(logs.ModuleStrm, "开始生成strm文件...")
 	start := time.Now()
 	defer func() {
-		slog.Info("生成strm任务结束", "总数", task.Total(), "耗时", time.Since(start))
+		logs.Info(logs.ModuleStrm, "生成strm任务结束", "总数", task.Total(), "耗时", time.Since(start))
 	}()
 
 	task.Reset()
@@ -41,7 +41,7 @@ func runStrmGen(ctx context.Context, env *Env, task *Task) {
 
 	info, err := env.API.GetDirInfo(ctx, env.Paths.StrmPath)
 	if err != nil {
-		slog.Error("无法获取起始目录id", "错误信息", err)
+		logs.Error(logs.ModuleStrm, "无法获取起始目录id", "错误信息", err)
 		return
 	}
 
@@ -49,7 +49,7 @@ func runStrmGen(ctx context.Context, env *Env, task *Task) {
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			appendMoveFid(path, fid)
 			if err := os.MkdirAll(path, 0755); err != nil {
-				slog.Error("创建目录失败", "文件", path, "错误", err)
+				logs.Error(logs.ModuleStrm, "创建目录失败", "文件", path, "错误", err)
 				failed.Store(true)
 				return false, nil
 			}
@@ -72,7 +72,7 @@ func runStrmGen(ctx context.Context, env *Env, task *Task) {
 	}, nil)
 
 	if err := context.Cause(ctx); err != nil {
-		slog.Error("生成strm任务被取消", "取消信息", err)
+		logs.Error(logs.ModuleStrm, "生成strm任务被取消", "取消信息", err)
 		return
 	}
 	// 零失败才把原始文件移入回收目录：任一文件生成失败时保持云端原状。
@@ -85,9 +85,9 @@ func runStrmGen(ctx context.Context, env *Env, task *Task) {
 func moveStrmPathFiles(ctx context.Context, env *Env, fids []string) {
 	t0 := time.Now()
 	if err := env.API.MoveFile(ctx, strings.Join(fids, ","), env.Paths.TempFid); err != nil {
-		slog.Error("移动文件至 TempPath 失败", "错误", err)
+		logs.Error(logs.ModuleStrm, "移动文件至 TempPath 失败", "错误", err)
 	} else {
-		slog.Info("移动文件至 TempPath", "文件数量", len(fids), "耗时", time.Since(t0))
+		logs.Info(logs.ModuleStrm, "移动文件至 TempPath", "文件数量", len(fids), "耗时", time.Since(t0))
 	}
 }
 
@@ -103,11 +103,11 @@ func regenerateStrmTree(ctx context.Context, env *Env, root string) {
 		}
 		pickcode, fid := ExtractPickcode(p)
 		if pickcode == "" || fid == "" {
-			slog.Warn("strm 文件更新时 pickcode 解析失败，跳过", "文件", p)
+			logs.Warn(logs.ModuleStrm, "strm 文件更新时 pickcode 解析失败，跳过", "文件", p)
 			return nil
 		}
 		if err := env.SaveStrmFile(pickcode, fid, p); err != nil {
-			slog.Error("重写 strm 文件失败", "文件", p, "错误", err)
+			logs.Error(logs.ModuleStrm, "重写 strm 文件失败", "文件", p, "错误", err)
 			return nil
 		}
 		// 立即更新数据库版本号（mtime），避免依赖后续扫描兜底刷新时重复比对。

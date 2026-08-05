@@ -2,7 +2,7 @@ package config
 
 import (
 	"fmt"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"os"
 	"sync"
 	"time"
@@ -93,7 +93,7 @@ func New(path string) (*Config, error) {
 			if genErr := writeTemplate(path); genErr != nil {
 				return nil, fmt.Errorf("生成配置文件模板失败: %w", genErr)
 			}
-			slog.Warn("[CONFIG] 配置文件不存在，已生成模板，请在管理面板填写后保存以启动同步", "路径", path)
+			logs.Warn(logs.ModuleWeb, "配置文件不存在，已生成模板，请在管理面板填写后保存以启动同步", "路径", path)
 			data, err = os.ReadFile(path)
 			if err != nil {
 				return nil, fmt.Errorf("读取生成的配置文件失败: %w", err)
@@ -244,12 +244,12 @@ func (c *Config) SaveToken(access, refresh string, expiresIn int64) {
 	c.token.ExpireAt = expireAt
 
 	if err := c.persistLocked(); err != nil {
-		slog.Error("[CONFIG] Token 写盘失败，内存已更新但未落盘，重启后可能读到旧 Token", "错误信息", err)
+		logs.Error(logs.ModuleWeb, "Token 写盘失败，内存已更新但未落盘，重启后可能读到旧 Token", "错误信息", err)
 		return
 	}
 
 	// 显示直观的到期时间日志
-	slog.Info("[CONFIG] Token 已更新", "到期时间", expireAt.Format("2006-01-02 15:04:05"))
+	logs.Info(logs.ModuleWeb, "Token 已更新", "到期时间", expireAt.Format("2006-01-02 15:04:05"))
 }
 
 // persistLocked 序列化并写盘，调用方必须已持有 c.mu 写锁。

@@ -3,7 +3,7 @@ package sync
 import (
 	"context"
 	"fmt"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"path/filepath"
 	"sync"
 )
@@ -33,7 +33,7 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 
 	var walk func(path, fid string) error
 	walk = func(path, fid string) error {
-		slog.Debug("[云端遍历] 进入目录", "路径", path)
+		logs.Debug(logs.ModuleSync, "进入目录", "路径", path)
 
 		// ⚠️ 信号量在 walk 入口获取、在 wg.Wait 前主动释放。
 		// 父协程不代为子协程获取信号量（避免「64 个活跃协程全部
@@ -56,28 +56,24 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 		if v.SkipByCount {
 			info, err := e.API.GetDirInfo(ctx, path)
 			if err != nil {
-				slog.Warn("[云端遍历] GetDirInfo 失败，回退全量同步", "路径", path, "错误", err)
+				logs.Warn(logs.ModuleSync, "GetDirInfo 失败，回退全量同步", "路径", path, "错误", err)
 			} else {
 				cloudTotal := info.FileCount + info.FolderCount
 				dbTotal := e.DB.CountRecursive(path)
-				slog.Debug("[云端遍历] 计数比对", "路径", path, "云端", cloudTotal, "本地", dbTotal)
 				if dbTotal > 0 && cloudTotal == dbTotal {
-					slog.Debug("[云端遍历] 跳过未变化目录", "路径", path, "子项数", cloudTotal)
 					return nil
 				}
 			}
 		}
 
 		// 第二步：拉文件列表。API 并发由 drive 的 resty 限流（3/s + burst 5）兜底。
-		slog.Debug("[云端遍历] 获取文件列表", "路径", path)
 		items, err := e.API.GetFileList(ctx, fid)
 		if err != nil {
 			if onFatal != nil {
-				onFatal(fmt.Errorf("[云端遍历] 获取列表失败[%s]: %w", path, err))
+				onFatal(fmt.Errorf("获取列表失败[%s]: %w", path, err))
 			}
 			return err
 		}
-		slog.Info("[云端遍历] 获取文件列表完成", "路径", path, "条目数", len(items))
 
 		// 第三步：逐项分派给回调。wg 等待本目录派生的子目录协程全部结束。
 		var wg sync.WaitGroup
@@ -93,7 +89,7 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 				if v.EnterDir != nil {
 					d, derr := v.EnterDir(ctx, fullPath, item.Fid)
 					if derr != nil {
-						slog.Error("[云端遍历] 目录处理失败", "路径", fullPath, "错误", derr)
+						logs.Error(logs.ModuleSync, "目录处理失败", "路径", fullPath, "错误", derr)
 					} else {
 						descend = d
 					}
@@ -110,7 +106,7 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 			if v.VisitFile != nil {
 				if ferr := v.VisitFile(ctx, fullPath, item.Fid, item.PickCode,
 					Entry{IsVideo: item.IsVideo, Size: item.Size, PickCode: item.PickCode}); ferr != nil {
-					slog.Error("[云端遍历] 文件处理失败", "路径", fullPath, "错误", ferr)
+					logs.Error(logs.ModuleSync, "文件处理失败", "路径", fullPath, "错误", ferr)
 				}
 			}
 		}

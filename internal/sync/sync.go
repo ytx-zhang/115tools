@@ -9,8 +9,7 @@ import (
 	"github.com/ytx-zhang/115tools/internal/config"
 	"github.com/ytx-zhang/115tools/internal/db"
 	"github.com/ytx-zhang/115tools/internal/drive"
-	"github.com/ytx-zhang/115tools/internal/event"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"sync"
 	"time"
 )
@@ -24,7 +23,7 @@ type Syncer struct {
 	db     *db.DB
 	appWg  *sync.WaitGroup
 
-	events *event.Stream[*StatusView] // 跨热重载共享的状态事件流
+	hub *logs.Hub // 状态事件经日志 Hub 推前端
 
 	mu       sync.Mutex // 保护 cur/ctx/cancel/wg
 	reloadMu sync.Mutex // 序列化热重载，避免并发 Reload 重复重建
@@ -35,14 +34,14 @@ type Syncer struct {
 }
 
 // NewSyncer 构造 Syncer（不立即启动，调用方再调 Start 或 Reload）。
-func NewSyncer(appCtx context.Context, cfg *config.Config, api *drive.Open115, boltDB *db.DB, appWg *sync.WaitGroup) *Syncer {
+func NewSyncer(appCtx context.Context, cfg *config.Config, api *drive.Open115, boltDB *db.DB, appWg *sync.WaitGroup, hub *logs.Hub) *Syncer {
 	return &Syncer{
 		appCtx: appCtx,
 		cfg:    cfg,
 		api:    api,
 		db:     boltDB,
 		appWg:  appWg,
-		events: event.New[*StatusView](16),
+		hub:    hub,
 	}
 }
 
@@ -102,7 +101,7 @@ func (s *Syncer) Reload(oldSyncPath string) {
 	oldWg := s.wg
 	cancel := s.cancel
 	if cancel != nil {
-		slog.Info("[RELOAD] 停止旧同步器实例...")
+		logs.Info(logs.ModuleSync, "停止旧同步器实例...")
 		s.cur = nil
 	}
 	s.mu.Unlock()
@@ -120,15 +119,15 @@ func (s *Syncer) Reload(oldSyncPath string) {
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
-			slog.Warn("[RELOAD] 旧实例未在 3s 内退出，强制重建（残留协程将随 ctx 取消自行退出）")
+			logs.Warn(logs.ModuleSync, "旧实例未在 3s 内退出，强制重建（残留协程将随 ctx 取消自行退出）")
 		}
 	}
 
 	if err := s.startLocked(oldSyncPath); err != nil {
-		slog.Error("[RELOAD] 同步器重建失败", "错误信息", err)
+		logs.Error(logs.ModuleSync, "同步器重建失败", "错误信息", err)
 		return
 	}
-	slog.Info("[RELOAD] 配置热重载完成")
+	logs.Info(logs.ModuleSync, "配置热重载完成")
 	s.publishStatus()
 }
 
@@ -229,16 +228,17 @@ func (s *Syncer) Snapshot() *StatusView {
 	return view
 }
 
-// publishStatus 组装快照并广播一次状态事件（非阻塞，慢订阅者丢事件）。
+// publishStatus 组装快照并通过 LogStatus 推送前端（非阻塞）。
 // 由任务 onChange 回调及热重载节点调用。
 func (s *Syncer) publishStatus() {
-	s.events.Publish(s.Snapshot())
+	snap := s.Snapshot()
+	logs.LogStatus(&logs.StatusData{
+		Ready:       snap.Ready,
+		ConfigReady: snap.ConfigReady,
+		Missing:     snap.Missing,
+		Sync:        (*logs.TaskStatus)(snap.Sync),
+		Strm:        (*logs.TaskStatus)(snap.Strm),
+	})
 }
-
-// Events 返回状态事件订阅通道，供 web 层 SSE 消费。
-func (s *Syncer) Events() chan *StatusView { return s.events.Subscribe(16) }
-
-// Unsubscribe 退订状态事件通道。
-func (s *Syncer) Unsubscribe(ch chan *StatusView) { s.events.Unsubscribe(ch) }
 
 // ──── 实例初始化编排见 instance.go（initRoot/initTemp/ensureDirs/cronSync）────

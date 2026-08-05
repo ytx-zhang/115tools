@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/ytx-zhang/115tools/internal/config"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	synclib "github.com/ytx-zhang/115tools/internal/sync"
-	"log/slog"
 	"net/http"
 	"time"
 )
@@ -94,15 +94,6 @@ func serveSSE[T any](w http.ResponseWriter, r *http.Request, appCtx context.Cont
 	}
 }
 
-// ──── 状态 SSE ────
-
-// handleStatus SSE 实时推送任务状态（云端同步/STRM 生成进度）。
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	sub := s.Sync.Events()
-	defer s.Sync.Unsubscribe(sub)
-	serveSSE(w, r, s.AppCtx, sub, []*synclib.StatusView{s.Sync.Snapshot()})
-}
-
 // ──── 任务启停 ────
 
 // handleTaskStart 启动任务：POST /api/task/{name}，name 为 sync 或 strm。
@@ -170,13 +161,13 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	case !ready: // 配置不完整，不启动、不重载
 	case !s.Sync.Snapshot().Ready:
 		// 首次补齐缺失项：拉起同步器
-		slog.Info("[WEB] 配置已补齐，启动同步器")
+		logs.Info(logs.ModuleWeb, "配置已补齐，启动同步器")
 		s.Wg.Go(func() { s.Sync.Reload("") })
 		triggered = true
 	case cs.PathsChanged || cs.CronChanged || cs.DebounceChanged || cs.StrmUrlChanged:
 		// 路径/定时/直链变化：热重载同步器（重建实例天然含重扫）。
 		// ⚠️ 重载不重写既有 .strm（扫描只比 mtime），直链变更须显式重写。
-		slog.Info("[WEB] 配置变更，热重载同步器")
+		logs.Info(logs.ModuleWeb, "配置变更，热重载同步器")
 		s.Wg.Go(func() {
 			s.Sync.Reload(oldSyncPath)
 			if cs.StrmUrlChanged {
@@ -186,7 +177,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		triggered = true
 	case cs.SyncRulesChanged:
 		// 排除名单/视频扩展名变化：触发一次全量重扫（清理云端存量 / 重判视频）。
-		slog.Info("[WEB] 上传规则已更新，触发全量扫描清理")
+		logs.Info(logs.ModuleWeb, "上传规则已更新，触发全量扫描清理")
 		s.Wg.Go(func() { s.Sync.RescanRoot(s.Sync.TaskCtx()) })
 	}
 
@@ -201,14 +192,29 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 
 // ──── 日志 SSE ────
 
-const logReplayLimit = 300
+const logReplayLimit = 1000
 
-// handleLogs SSE 实时推送运行日志。连接时先回放近期日志，再持续推送。
+// handleLogs SSE 实时推送运行日志 + 任务状态。连接时首帧推送当前状态快照，再回放近期日志，最后持续推送。
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	hub := s.Hub
 	sub := hub.Subscribe()
 	defer hub.Unsubscribe(sub)
-	serveSSE(w, r, s.AppCtx, sub, hub.Recent(logReplayLimit))
+
+	// 首帧：当前状态快照
+	snap := s.Sync.Snapshot()
+	replay := hub.Recent(logReplayLimit)
+	replay = append([]logs.Entry{{
+		Time: time.Now(), Level: "INFO", Module: "status", Msg: "状态快照",
+		Status: &logs.StatusData{
+			Ready:       snap.Ready,
+			ConfigReady: snap.ConfigReady,
+			Missing:     snap.Missing,
+			Sync:        (*logs.TaskStatus)(snap.Sync),
+			Strm:        (*logs.TaskStatus)(snap.Strm),
+		},
+	}}, replay...)
+
+	serveSSE(w, r, s.AppCtx, sub, replay)
 }
 
 // handleLogsClear 清空内存中的运行日志缓冲。

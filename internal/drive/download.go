@@ -2,8 +2,8 @@ package drive
 
 import (
 	"errors"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -95,7 +95,7 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 	cacheKey := pickCode + "|" + ua
 
 	if item, ok := s.loadCache(cacheKey); ok && !time.Now().After(item.expireAt) {
-		slog.Debug("[strm后端] 缓存命中", "媒体名称", item.name, "UA", ua)
+		logs.Debug(logs.ModuleDrive, "缓存命中", "媒体名称", item.name, "UA", ua)
 		return item, nil
 	}
 
@@ -103,11 +103,11 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 	ch := s.sf.DoChan(cacheKey, func() (any, error) {
 		info, err := s.api.GetDownloadUrl(r.Context(), pickCode, ua)
 		if err != nil {
-			slog.Error("[strm后端] 115接口报错", "err", err)
+			logs.Error(logs.ModuleCloud, "115接口报错", "err", err)
 			return nil, err
 		}
 		if info == nil || info.Url == "" {
-			slog.Error("[strm后端] 115接口报错", "err", errEmptyURL)
+			logs.Error(logs.ModuleCloud, "115接口报错", "err", errEmptyURL)
 			return nil, errEmptyURL
 		}
 
@@ -123,7 +123,7 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 		}
 
 		s.storeCache(cacheKey, info.Url, info.Name, expiration)
-		slog.Info("[strm后端] 获取新地址", "名称", info.Name, "UA", ua, "缓存时长", expiration.Round(time.Second).String())
+		logs.Info(logs.ModuleCloud, "获取新地址", "名称", info.Name, "UA", ua, "缓存时长", expiration.Round(time.Second).String())
 		return &cacheItem{url: info.Url, name: info.Name}, nil
 	})
 	select {
@@ -159,7 +159,7 @@ func downgradeToHTTP(raw string) string {
 func (s *Redirector) RedirectToRealURL(w http.ResponseWriter, r *http.Request) {
 	pickCode := r.URL.Query().Get("pickcode")
 	if pickCode == "" {
-		slog.Warn("[strm后端] 未找到pickcode")
+		logs.Warn(logs.ModuleDrive, "未找到pickcode")
 		http.Error(w, "未找到pickcode", http.StatusBadRequest)
 		return
 	}
@@ -231,7 +231,7 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 			if r.Context().Err() != nil {
 				return
 			}
-			slog.Error("[strm后端] 回源CDN失败", "名称", item.name, "err", err)
+			logs.Error(logs.ModuleDrive, "回源CDN失败", "名称", item.name, "err", err)
 			http.Error(w, "回源失败", http.StatusBadGateway)
 			return
 		}
@@ -242,7 +242,7 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 			resp.Body.Close()
 			if attempt < maxRetries {
 				// 还有重试机会：警告一条即可，带 range 便于定位哪个分片
-				slog.Warn("[strm后端] 回源非2xx，将重试",
+				logs.Warn(logs.ModuleDrive, "回源非2xx，将重试",
 					"名称", item.name, "status", resp.StatusCode,
 					"重试", attempt, "range", rng)
 			}
@@ -259,14 +259,14 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 
 		w.WriteHeader(resp.StatusCode) // 原样透传 200 / 206
 		if _, err := io.Copy(w, resp.Body); err != nil && r.Context().Err() == nil {
-			slog.Debug("[strm后端] 透传中断", "名称", item.name, "err", err)
+			logs.Debug(logs.ModuleDrive, "透传中断", "名称", item.name, "err", err)
 		}
 		resp.Body.Close()
 		return
 	}
 
 	// 用尽重试仍非 2xx：打印错误并 502 返回
-	slog.Error("[strm后端] 回源多次重试仍失败",
+	logs.Error(logs.ModuleDrive, "回源多次重试仍失败",
 		"名称", lastName, "status", lastStatus, "重试", maxRetries, "range", rng)
 	http.Error(w, "回源失败", http.StatusBadGateway)
 }

@@ -449,7 +449,7 @@ th {
   margin: 0;
 }
 
-/* 日志级别过滤按钮组（chip 小按钮：未选中 bg3 底，选中 accent 蓝底） */
+/* 日志级别/模块过滤按钮组（chip 小按钮：未选中 bg3 底，选中 accent 蓝底） */
 .log-filter {
   display: flex;
   gap: 6px;
@@ -559,6 +559,25 @@ th {
 .log-line.lv-error .log-msg {
   color: var(--red);
 }
+
+/* 模块标签 */
+.log-mod {
+  flex: 0 0 42px;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 1.8;
+}
+
+.log-mod.lv-sync { color: var(--accent); background: rgba(68, 147, 248, .12); }
+.log-mod.lv-strm { color: var(--green); background: rgba(63, 185, 80, .12); }
+.log-mod.lv-drive { color: var(--yellow); background: rgba(210, 153, 34, .12); }
+.log-mod.lv-cloud { color: #539bf5; background: rgba(83, 155, 245, .12); }
+.log-mod.lv-web { color: #a371f7; background: rgba(163, 113, 247, .12); }
+.log-mod.lv-system { color: var(--muted); background: rgba(139, 148, 158, .08); }
+.log-mod.lv-db { color: #e879f9; background: rgba(232, 121, 249, .12); }
 
 /* 横幅提示 */
 .banner {

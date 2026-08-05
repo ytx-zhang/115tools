@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"github.com/ytx-zhang/115tools/internal/db"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 )
 
 // moveChunk 单次 MoveFile 请求的视频 FID 上限，避免逗号串过长。
@@ -23,7 +22,6 @@ func AddCloudFolder(ctx context.Context, env *Env, currentCID, path string) (str
 		if err != nil {
 			return "", fmt.Errorf("[%s]: 创建云端文件夹失败: %w", path, err)
 		}
-		slog.Info("创建云端目录", "路径", path, "云端FID", fid)
 		return fid, nil
 	}
 
@@ -43,7 +41,6 @@ func AddCloudFolder(ctx context.Context, env *Env, currentCID, path string) (str
 		if err != nil {
 			return "", fmt.Errorf("创建云端目录 %s 失败: %w", cur, err)
 		}
-		slog.Info("创建云端目录", "路径", cur, "云端FID", fid)
 		parentFid = fid
 	}
 	return parentFid, nil
@@ -91,23 +88,19 @@ func (l *instance) cloudCleanTask(ctx context.Context, fPaths []string, workPath
 		for start := 0; start < len(moveFids); start += moveChunk {
 			end := min(start+moveChunk, len(moveFids))
 			chunk := moveFids[start:end]
-			t0 := time.Now()
 			if err := l.env.API.MoveFile(ctx, strings.Join(chunk, ","), l.env.Paths.TempFid); err != nil {
 				return fmt.Errorf("[%s]: 批量移动云端视频失败: %w", workPath, err)
 			}
-			slog.Info("移动云端视频到临时目录", "路径", joined, "数量", len(chunk), "耗时", time.Since(t0))
 		}
 	}
 
 	if len(deleteFids) > 0 {
-		t0 := time.Now()
 		if err := l.env.API.DeleteFile(ctx, strings.Join(deleteFids, ",")); err != nil {
 			return fmt.Errorf("[%s]: 批量删除云端项失败: %w", workPath, err)
 		}
-		slog.Info("删除云端项(进回收站)", "路径", joined, "数量", len(deleteFids), "耗时", time.Since(t0))
 	}
 
-	slog.Debug("清理数据库索引", "路径", joined, "数量", len(fPaths))
+	logs.Info(logs.ModuleSync, "清理数据库索引", "路径", joined, "数量", len(fPaths))
 	l.env.DB.BatchClearPaths(fPaths)
 
 	return nil

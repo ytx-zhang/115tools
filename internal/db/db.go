@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"os"
 	"strings"
 	"sync"
@@ -60,7 +60,7 @@ func New(path string) (*DB, error) {
 		return nil, fmt.Errorf("[数据库] 创建 Bucket 失败: %w", err)
 	}
 
-	slog.Info("[数据库] 初始化成功", "路径", path)
+	logs.Info(logs.ModuleDB, "初始化成功", "路径", path)
 	return instance, nil
 }
 
@@ -70,9 +70,9 @@ func (d *DB) Close() {
 	defer d.mu.Unlock()
 	if d.boltDB != nil {
 		if err := d.boltDB.Close(); err != nil {
-			slog.Error("[数据库] 关闭失败", "错误信息", err)
+			logs.Error(logs.ModuleDB, "关闭失败", "错误信息", err)
 		} else {
-			slog.Info("[数据库] 关闭成功")
+			logs.Info(logs.ModuleDB, "关闭成功")
 		}
 	}
 }
@@ -119,6 +119,7 @@ func (d *DB) GetFid(localPath string) (fid string) {
 
 // SaveRecord 写入单条记录（bbolt 原生短事务，无需额外 Batch 缓冲）。
 func (d *DB) SaveRecord(localPath string, fid string, size int64) {
+	logs.Debug(logs.ModuleDB, "保存记录", "路径", localPath, "FID", fid)
 	val := encodeValue(fid, size)
 	d.boltDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
@@ -164,6 +165,7 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 	if len(fPaths) == 0 {
 		return
 	}
+	logs.Info(logs.ModuleDB, "批量清理路径开始", "数量", len(fPaths))
 	err := d.boltDB.Update(func(tx *bbolt.Tx) error {
 		for _, fPath := range fPaths {
 			if e := d.deleteTree(tx, fPath, ""); e != nil {
@@ -173,7 +175,7 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 		return nil
 	})
 	if err != nil {
-		slog.Error("[数据库] 批量清理失败", "数量", len(fPaths), "错误信息", err)
+		logs.Error(logs.ModuleDB, "批量清理失败", "数量", len(fPaths), "错误信息", err)
 	}
 }
 
@@ -184,17 +186,19 @@ func (d *DB) ClearOldRoot(oldPrefix, keepPrefix string) {
 	if oldPrefix == "" || oldPrefix == keepPrefix {
 		return
 	}
+	logs.Info(logs.ModuleDB, "清理旧同步根", "旧根", oldPrefix)
 	err := d.boltDB.Update(func(tx *bbolt.Tx) error {
 		return d.deleteTree(tx, oldPrefix, keepPrefix)
 	})
 	if err != nil {
-		slog.Error("[数据库] 清理旧同步根失败", "旧根", oldPrefix, "错误信息", err)
+		logs.Error(logs.ModuleDB, "清理旧同步根失败", "旧根", oldPrefix, "错误信息", err)
 	}
 }
 
 // FindOrphanSubdirs 扫描 currentPath 下所有条目，返回「子项仍在但目录 entry 已丢失」的子目录完整路径。
 // 用于检测深层孤儿：子目录被删后其目录 DB entry 未同步清理，导致子文件（Fonts.7z 等）永久残留。
 func (d *DB) FindOrphanSubdirs(currentPath string) []string {
+	logs.Info(logs.ModuleDB, "查找孤儿子目录", "路径", currentPath)
 	prefix := currentPath
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
@@ -258,6 +262,7 @@ func (d *DB) CountRecursive(path string) int64 {
 // 一旦等待，Go 的 sync.RWMutex 会让后续嵌套 RLock 阻塞以避免写饥饿 → 永久卡死。
 // 通过 0xFF 跳转直接跳过深层子目录，避免无谓遍历。
 func (d *DB) ScanChildren(ctx context.Context, workPath string) []Child {
+	logs.Debug(logs.ModuleDB, "扫描子条目", "路径", workPath)
 	if err := ctx.Err(); err != nil {
 		return nil
 	}
@@ -313,6 +318,7 @@ func (d *DB) ScanChildren(ctx context.Context, workPath string) []Child {
 // 实现：bbolt 前缀扫描 dirPath/ 下全部后代 key，按 .strm 后缀过滤并解出 fid；
 // 不跳过深层目录（要的是整棵子树），故不用 ScanChildren 的 0xFF 跳转。
 func (d *DB) ListStrmFids(dirPath string) []string {
+	logs.Info(logs.ModuleDB, "列出Strm链接", "路径", dirPath)
 	prefix := dirPath
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
@@ -392,7 +398,7 @@ func (d *DB) Compact() error {
 	}
 
 	afterSize := fileSize(d.path)
-	slog.Info("[数据库] 压缩完成",
+	logs.Info(logs.ModuleDB, "压缩完成",
 		"原大小", formatSize(beforeSize),
 		"新大小", formatSize(afterSize),
 		"释放", formatSize(beforeSize-afterSize))

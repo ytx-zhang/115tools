@@ -7,10 +7,9 @@ import (
 	"github.com/ytx-zhang/115tools/internal/config"
 	"github.com/ytx-zhang/115tools/internal/db"
 	"github.com/ytx-zhang/115tools/internal/drive"
-	"github.com/ytx-zhang/115tools/internal/event"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	synclib "github.com/ytx-zhang/115tools/internal/sync"
 	"github.com/ytx-zhang/115tools/internal/web"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,8 +20,8 @@ import (
 )
 
 func main() {
-	hub := event.NewHub()
-	event.Setup(hub)
+	hub := logs.NewHub()
+	logs.Setup(hub)
 
 	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -32,7 +31,7 @@ func main() {
 	// 1. 加载配置与 115 API 客户端（配置文件损坏才致命退出）
 	cfg, err := config.New("/app/data/config.yaml")
 	if err != nil {
-		slog.Error("[CONFIG] 配置文件损坏", "错误信息", err)
+		logs.Error(logs.ModuleSystem, "配置文件损坏", "错误信息", err)
 		return
 	}
 	apiClient := drive.New115Drive(cfg)
@@ -42,26 +41,26 @@ func main() {
 	mux.HandleFunc("GET /download", drive.NewRedirector(apiClient).RedirectToRealURL)
 	server := &http.Server{Addr: ":8080", Handler: mux}
 	wg.Go(func() {
-		slog.Info("HTTP服务启动在 :8080")
+		logs.Info(logs.ModuleSystem, "HTTP服务启动在 :8080")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			stop()
-			slog.Error("服务器异常退出", "错误信息", err)
+			logs.Error(logs.ModuleSystem, "服务器异常退出", "错误信息", err)
 		}
 	})
 
 	// 3. 初始化数据库（启动时压缩一次回收空洞页）
 	boltDB, err := db.New(`/app/data/files.db`)
 	if err != nil {
-		slog.Error("数据库初始化失败", "错误信息", err)
+		logs.Error(logs.ModuleSystem, "数据库初始化失败", "错误信息", err)
 		return
 	}
 	defer boltDB.Close()
 	if err := boltDB.Compact(); err != nil {
-		slog.Warn("数据库压缩失败", "错误信息", err)
+		logs.Warn(logs.ModuleSystem, "数据库压缩失败", "错误信息", err)
 	}
 
 	// 4. 创建 Syncer + 注册管理面板（配置不完整面板也可用）
-	syncer := synclib.NewSyncer(appCtx, cfg, apiClient, boltDB, &wg)
+	syncer := synclib.NewSyncer(appCtx, cfg, apiClient, boltDB, &wg, hub)
 	web.Register(mux, web.Deps{
 		Cfg: cfg, Api: apiClient, AppCtx: appCtx, Wg: &wg, Hub: hub, Sync: syncer,
 	})
@@ -69,10 +68,10 @@ func main() {
 	// 5. 配置完整才启动同步器，否则仅 Warn（面板补齐后由 web 保存逻辑拉起）
 	if cfg.IsSyncReady() {
 		if err := syncer.Start(); err != nil {
-			slog.Error("[初始化] 同步器启动失败", "错误信息", err)
+			logs.Error(logs.ModuleSystem, "同步器启动失败", "错误信息", err)
 		}
 	} else {
-		slog.Warn("[CONFIG] 配置不完整，同步未启动", "缺失项", cfg.RequiredMissing())
+		logs.Warn(logs.ModuleWeb, "配置不完整，同步未启动", "缺失项", cfg.RequiredMissing())
 	}
 
 	// 6. 优雅关闭
@@ -80,9 +79,9 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("强制关闭 HTTP 服务器", "错误信息", err)
+		logs.Warn(logs.ModuleSystem, "强制关闭 HTTP 服务器", "错误信息", err)
 	}
-	slog.Debug("正在等待后台任务完成...")
+	logs.Debug(logs.ModuleSystem, "正在等待后台任务完成...")
 	wg.Wait()
-	slog.Info("程序已安全退出。")
+	logs.Info(logs.ModuleSystem, "程序已安全退出。")
 }

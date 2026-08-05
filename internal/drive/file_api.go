@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+
+	"github.com/ytx-zhang/115tools/internal/logs"
 )
 
 // 本文件是 115 文件/目录操作 API：下载直链、目录信息、文件列表、增删移改。
@@ -43,12 +45,14 @@ func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*Dow
 
 // AddFolder 在云端目录 pid 下创建子目录 name，返回新目录的 FID。
 func (d *Open115) AddFolder(ctx context.Context, pid, name string) (fid string, err error) {
+	logs.Info(logs.ModuleCloud, "云端创建目录", "name", name, "pid", pid)
 	res, err := doAPI[struct {
 		FileId string `json:"file_id"`
 	}](ctx, d, "POST", "/open/folder/add",
 		withForm(map[string]string{"pid": pid, "file_name": name}),
 	)
 	if err != nil {
+		logs.Error(logs.ModuleCloud, "云端创建目录失败", "name", name, "err", err)
 		return
 	}
 	fid = res.Data.FileId
@@ -58,29 +62,39 @@ func (d *Open115) AddFolder(ctx context.Context, pid, name string) (fid string, 
 // MoveFile 把云端文件/目录移动到目标目录 cid。
 // fid 支持逗号分隔的多个 ID（批量移动）。
 func (d *Open115) MoveFile(ctx context.Context, fid, cid string) error {
+	logs.Info(logs.ModuleCloud, "云端移动文件", "fid", fid, "cid", cid)
 	_, err := doAPI[any](ctx, d, "POST", "/open/ufile/move",
 		withForm(map[string]string{"file_ids": fid, "to_cid": cid}),
 	)
+	if err != nil {
+		logs.Error(logs.ModuleCloud, "云端移动文件失败", "fid", fid, "err", err)
+	}
 	return err
 }
 
 // DeleteFile 删除云端文件/目录。fid 支持逗号分隔的多个 ID（批量删除）。
 func (d *Open115) DeleteFile(ctx context.Context, fid string) error {
+	logs.Info(logs.ModuleCloud, "云端删除文件", "fid", fid)
 	_, err := doAPI[any](ctx, d, "POST", "/open/ufile/delete",
 		withForm(map[string]string{"file_ids": fid}),
 	)
+	if err != nil {
+		logs.Error(logs.ModuleCloud, "云端删除文件失败", "fid", fid, "err", err)
+	}
 	return err
 }
 
 // UpdateFile 重命名云端文件/目录，返回改名后的实际文件名
 // （115 可能只改主名不动扩展名，调用方需按需二次修正）。
 func (d *Open115) UpdateFile(ctx context.Context, fid, name string) (newName string, err error) {
+	logs.Info(logs.ModuleCloud, "云端重命名", "fid", fid, "name", name)
 	res, err := doAPI[struct {
 		FileName string `json:"file_name"`
 	}](ctx, d, "POST", "/open/ufile/update",
 		withForm(map[string]string{"file_id": fid, "file_name": name}),
 	)
 	if err != nil {
+		logs.Error(logs.ModuleCloud, "云端重命名失败", "fid", fid, "err", err)
 		return
 	}
 	newName = res.Data.FileName
@@ -96,6 +110,7 @@ type DirInfo struct {
 
 // GetDirInfo 按路径查询云端目录信息。
 func (d *Open115) GetDirInfo(ctx context.Context, path string) (*DirInfo, error) {
+	logs.Info(logs.ModuleCloud, "查询云端目录信息", "path", path)
 	res, err := doAPI[DirInfo](ctx, d, "GET", "/open/folder/get_info",
 		withQuery(map[string]string{"path": path}),
 	)
@@ -118,6 +133,7 @@ type FileInfo struct {
 // GetFileList 拉取云端目录 cid 下的全部子项（自动处理分页，每页 1150 条）。
 // 注意：仅返回 Aid == "1" 的条目（过滤掉非常规挂载项）。
 func (d *Open115) GetFileList(ctx context.Context, cid string) ([]FileInfo, error) {
+	logs.Info(logs.ModuleCloud, "拉取云端文件列表", "cid", cid)
 	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}

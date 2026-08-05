@@ -13,6 +13,8 @@ import (
 	"sync"
 
 	"github.com/tidwall/gjson"
+
+	"github.com/ytx-zhang/115tools/internal/logs"
 )
 
 // ErrUploadSizeChanged 表示上传前复核发现文件大小相对 init 阶段已变化（被外部重写/截断）。
@@ -38,6 +40,7 @@ type UploadFileInfo struct {
 // UploadFile 上传本地文件到云端目录 cid。
 // signKey/signVal 用于二次校验重提（status=7 场景），首次调用留空。
 func (d *Open115) UploadFile(ctx context.Context, pathStr, cid, signKey, signVal string) (*UploadFileInfo, error) {
+	logs.Info(logs.ModuleCloud, "上传文件", "path", pathStr, "cid", cid)
 	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
@@ -170,6 +173,7 @@ func (d *Open115) uploadReal(ctx context.Context, pathStr string, size int64, in
 // UploadBytes 上传内存字节数据（如 ≤10MB 的种子文件）到云端目录 cid（"0" 为根）。
 // 实现为写临时文件后复用 UploadFile 流程，避免为内存上传另起一套 SHA1/OSS 逻辑。
 func (d *Open115) UploadBytes(ctx context.Context, name string, data []byte, cid, signKey, signVal string) (*UploadFileInfo, error) {
+	logs.Info(logs.ModuleCloud, "上传内存数据", "name", name, "size", len(data), "cid", cid)
 	tmp, err := os.CreateTemp("", "115up-*"+name)
 	if err != nil {
 		return nil, fmt.Errorf("创建临时文件失败: %w", err)

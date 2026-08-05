@@ -7,7 +7,7 @@ package sync
 import (
 	"context"
 	"github.com/ytx-zhang/115tools/internal/db"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"os"
 	"time"
 )
@@ -16,20 +16,20 @@ import (
 func runCloudSync(ctx context.Context, env *Env, task *Task) {
 	start := time.Now()
 	defer func() {
-		slog.Info("云端同步任务结束", "总数", task.Total(), "耗时", time.Since(start))
+		logs.Info(logs.ModuleSync, "云端同步任务结束", "总数", task.Total(), "耗时", time.Since(start))
 	}()
-	slog.Info("开始同步云端文件...")
+	logs.Info(logs.ModuleSync, "开始同步云端文件...")
 
 	_ = env.WalkCloud(ctx, env.Paths.SyncPath, env.Paths.SyncFid, Visitor{
 		SkipByCount: true, // 计数跳过优化：没变化的目录整棵跳过，大库二次同步提速明显
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			if env.DB.GetFid(path) == "" {
 				if err := os.MkdirAll(path, 0755); err != nil {
-					slog.Error("创建目录失败", "文件", path, "错误", err)
+					logs.Error(logs.ModuleSync, "创建目录失败", "文件", path, "错误", err)
 					return false, nil
 				}
 				env.DB.SaveRecord(path, fid, db.SizeDir)
-				slog.Info("创建本地目录", "路径", path)
+				logs.Info(logs.ModuleSync, "创建本地目录", "路径", path)
 			}
 			return true, nil
 		},
@@ -41,9 +41,9 @@ func runCloudSync(ctx context.Context, env *Env, task *Task) {
 				if dbFid != fid {
 					t0 := time.Now()
 					if err := env.API.DeleteFile(ctx, fid); err != nil {
-						slog.Error("清理云端冗余项失败", "文件", savePath, "错误", err)
+						logs.Error(logs.ModuleSync, "清理云端冗余项失败", "文件", savePath, "错误", err)
 					} else {
-						slog.Info("删除云端冗余项", "路径", savePath, "云端FID", fid, "耗时", time.Since(t0))
+						logs.Info(logs.ModuleSync, "删除云端冗余项", "路径", savePath, "云端FID", fid, "耗时", time.Since(t0))
 					}
 				}
 				return nil

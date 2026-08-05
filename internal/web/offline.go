@@ -2,8 +2,8 @@ package web
 
 import (
 	"github.com/ytx-zhang/115tools/internal/drive"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"io"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -70,7 +70,7 @@ func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 			added++
 		}
 	}
-	slog.Info("[离线下载] 添加任务", "提交", len(urls), "成功", added, "目录ID", dirID)
+	logs.Info(logs.ModuleWeb, "添加离线任务", "提交", len(urls), "成功", added, "目录ID", dirID)
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "results": results})
 }
 
@@ -123,7 +123,7 @@ func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("[离线下载] 添加种子任务",
+	logs.Info(logs.ModuleWeb, "添加种子任务",
 		"文件名", hdr.Filename, "大小", len(data),
 		"info_hash", result.InfoHash, "保存路径", savePath, "成功", result.State)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -172,7 +172,7 @@ func (s *Server) handleOfflineDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "删除任务失败: %v", err)
 		return
 	}
-	slog.Info("[离线下载] 删除任务", "info_hash", req.InfoHash, "删除源文件", req.DeleteFiles)
+	logs.Info(logs.ModuleWeb, "删除离线任务", "info_hash", req.InfoHash, "删除源文件", req.DeleteFiles)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -193,6 +193,6 @@ func (s *Server) handleOfflineClear(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "清除任务失败: %v", err)
 		return
 	}
-	slog.Info("[离线下载] 批量清除任务", "flag", req.Flag)
+	logs.Info(logs.ModuleWeb, "批量清除任务", "flag", req.Flag)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

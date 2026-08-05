@@ -3,7 +3,7 @@ package sync
 import (
 	"context"
 	"github.com/ytx-zhang/115tools/internal/db"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,8 +15,14 @@ import (
 // FullScan 对主同步目录做一次完整递归同步（首启收敛/定时兜底）。
 func (l *instance) FullScan(ctx context.Context) {
 	if l.env.Paths.SyncFid == "" {
-		slog.Warn("主同步目录云端FID未就绪，跳过全量扫描", "路径", l.env.Paths.SyncPath)
+		logs.Warn(logs.ModuleSync, "主同步目录云端FID未就绪，跳过全量扫描", "路径", l.env.Paths.SyncPath)
 		return
+	}
+	// 深层孤儿检测：递归扫描前一次性清理（每个全量扫描周期只跑一次，不在 scanDir 递归体内重复）。
+	// 孤儿记录对应的云端文件已在父目录删除时清理过，这里仅清除 DB 脏记录无需再调云端 API。
+	if orphans := l.env.DB.FindOrphanSubdirs(l.env.Paths.SyncPath); len(orphans) > 0 {
+		logs.Info(logs.ModuleSync, "检测到深层孤儿DB记录", "数量", len(orphans))
+		l.env.DB.BatchClearPaths(orphans)
 	}
 	l.syncDir(ctx, l.env.Paths.SyncPath, l.env.Paths.SyncFid, true)
 }
@@ -35,22 +41,22 @@ func (l *instance) syncDir(ctx context.Context, currentPath, currentFid string, 
 		}
 		cid := l.env.DB.GetFid(filepath.Dir(fPath))
 		if cid == "" {
-			slog.Warn("无法获取父目录FID", "文件", fPath)
+			logs.Warn(logs.ModuleSync, "无法获取父目录FID", "文件", fPath)
 			continue
 		}
 		l.uploadOneFile(ctx, cid, fPath)
 		uploaded++
 	}
-	slog.Info("同步本地目录", "目录", currentPath, "上传文件", uploaded)
+	logs.Info(logs.ModuleSync, "同步本地目录", "目录", currentPath, "上传文件", uploaded)
 }
 
 // scanDir 对比数据库记录与本地实际内容，返回待上传文件列表。
 // 两步：① DB 子项中本地已删→待清理，都在→比对内容；② 本地新增项→建云端目录/列入上传。
 func (l *instance) scanDir(ctx context.Context, currentPath, currentFid string, recursive bool) []string {
-	slog.Debug("扫描本地文件", "处理目录", currentPath)
+	logs.Debug(logs.ModuleSync, "扫描本地文件", "处理目录", currentPath)
 	start := time.Now()
 	defer func() {
-		slog.Debug("本地文件扫描完成", "处理目录", currentPath, "耗时", time.Since(start))
+		logs.Debug(logs.ModuleSync, "本地文件扫描完成", "处理目录", currentPath, "耗时", time.Since(start))
 	}()
 
 	if err := ctx.Err(); err != nil {
@@ -62,13 +68,13 @@ func (l *instance) scanDir(ctx context.Context, currentPath, currentFid string, 
 		if os.IsNotExist(err) {
 			// 本地目录在扫描中途被删除（并发/嵌套目录整体删除）：
 			// 子树通常由上层清理逻辑统一处理，这里兜底再清理一次（幂等）。
-			slog.Debug("本地目录已不存在，兜底清理云端残留", "路径", currentPath)
+			logs.Debug(logs.ModuleSync, "本地目录已不存在，兜底清理云端残留", "路径", currentPath)
 			if cerr := l.cloudCleanTask(ctx, []string{currentPath}, currentPath); cerr != nil {
-				slog.Debug("本地目录已删除，兜底清理云端时部分项已处理", "目录", currentPath, "错误", cerr)
+				logs.Debug(logs.ModuleSync, "本地目录已删除，兜底清理云端时部分项已处理", "目录", currentPath, "错误", cerr)
 			}
 			return nil
 		}
-		slog.Error("读取本地目录失败", "路径", currentPath, "错误", err)
+		logs.Error(logs.ModuleSync, "读取本地目录失败", "路径", currentPath, "错误", err)
 		return nil
 	}
 
@@ -116,16 +122,8 @@ func (l *instance) scanDir(ctx context.Context, currentPath, currentFid string, 
 	}
 
 	// 云端删除与数据库清理（本地已删的项）
-	// 深层孤儿检测：子目录 DB entry 已丢但子文件仍在 → 一并清理。
-	if recursive {
-		orphans := l.env.DB.FindOrphanSubdirs(currentPath)
-		if len(orphans) > 0 {
-			slog.Debug("检测到深层孤儿记录", "目录", currentPath, "数量", len(orphans))
-			deletes = append(deletes, orphans...)
-		}
-	}
 	if err := l.cloudCleanTask(ctx, deletes, currentPath); err != nil {
-		slog.Error("云端删除失败", "目录", currentPath, "错误", err)
+		logs.Error(logs.ModuleSync, "云端删除失败", "目录", currentPath, "错误", err)
 	}
 
 	// 处理本地新增项（不在数据库中的）
@@ -137,7 +135,7 @@ func (l *instance) scanDir(ctx context.Context, currentPath, currentFid string, 
 		if entry.IsDir() {
 			fid, err := AddCloudFolder(ctx, l.env, currentFid, fullPath)
 			if err != nil {
-				slog.Error("创建云端目录失败", "路径", fullPath, "错误", err)
+				logs.Error(logs.ModuleSync, "创建云端目录失败", "路径", fullPath, "错误", err)
 				continue
 			}
 			l.env.DB.SaveRecord(fullPath, fid, db.SizeDir)

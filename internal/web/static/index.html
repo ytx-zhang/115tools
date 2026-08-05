@@ -74,9 +74,15 @@
             <div class="card-actions">
               <div class="log-filter" id="log-filter">
                 <button type="button" class="chip active" data-lv="all">全部 <span class="chip-count">0</span></button>
-                <button type="button" class="chip" data-lv="info">信息 <span class="chip-count">0</span></button>
-                <button type="button" class="chip" data-lv="warn">警告 <span class="chip-count">0</span></button>
-                <button type="button" class="chip" data-lv="error">错误 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-lv="warn">警告</button>
+                <button type="button" class="chip" data-lv="error">错误</button>
+                <button type="button" class="chip" data-mod="sync">同步</button>
+                <button type="button" class="chip" data-mod="strm">STRM</button>
+                <button type="button" class="chip" data-mod="drive">直链</button>
+                <button type="button" class="chip" data-mod="web">管理</button>
+                <button type="button" class="chip" data-mod="system">系统</button>
+                <button type="button" class="chip" data-mod="cloud">云端</button>
+                <button type="button" class="chip" data-mod="db">数据库</button>
               </div>
               <label class="chk"><input type="checkbox" id="log-pause">暂停滚动</label>
               <button class="btn ghost" id="log-clear" type="button">清空</button>

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,12 +80,11 @@ func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 	}
 	fileInfo, err := os.Stat(fPath)
 	if err != nil {
-		slog.Warn("同步的文件不存在", "文件", fPath)
+		logs.Warn(logs.ModuleSync, "同步的文件不存在", "文件", fPath)
 		return
 	}
 
 	if l.alreadyUploaded(fPath, fileInfo) {
-		slog.Debug("文件已存在云端对应记录，跳过重复上传", "文件", fPath)
 		return
 	}
 
@@ -97,7 +96,7 @@ func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 	if !isStrm && isVideoExt && !isVideo {
 		strmKey := strings.TrimSuffix(fPath, filepath.Ext(fPath)) + ".strm"
 		if l.env.DB.GetFid(strmKey) != "" {
-			slog.Warn("同名 strm 已存在但该视频文件未达体积阈值，跳过上传",
+			logs.Warn(logs.ModuleSync, "同名 strm 已存在但该视频文件未达体积阈值，跳过上传",
 				"文件", fPath, "strm", strmKey)
 			return
 		}
@@ -105,7 +104,6 @@ func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 
 	// 并发去重：替换场景下同名视频不再因 .strm 已存在而跳过，靠 inFlight 防重复上传。
 	if _, loaded := l.inFlight.LoadOrStore(fPath, struct{}{}); loaded {
-		slog.Debug("文件正在上传，跳过重复任务", "文件", fPath)
 		return
 	}
 	defer l.inFlight.Delete(fPath)
@@ -119,12 +117,12 @@ func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 	if err != nil {
 		// 上传前文件被外部修改导致大小变化的错误属可自愈（后续扫描会重传），降级为 Warn 减少日志噪音。
 		if errors.Is(err, drive.ErrUploadSizeChanged) {
-			slog.Warn("同步跳过（文件上传前被修改，待下次扫描重传）", "文件", fPath, "错误", err, "耗时", time.Since(upStart))
+			logs.Warn(logs.ModuleSync, "同步跳过（文件上传前被修改，待下次扫描重传）", "文件", fPath, "错误", err, "耗时", time.Since(upStart))
 		} else {
-			slog.Error("同步失败", "文件", fPath, "错误", err, "耗时", time.Since(upStart))
+			logs.Error(logs.ModuleSync, "同步失败", "文件", fPath, "错误", err, "耗时", time.Since(upStart))
 		}
 	} else {
-		slog.Info("上传文件完成", "文件", fPath, "耗时", time.Since(upStart))
+		logs.Info(logs.ModuleSync, "上传文件完成", "文件", fPath, "耗时", time.Since(upStart))
 	}
 }
 
