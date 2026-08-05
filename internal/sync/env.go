@@ -133,6 +133,7 @@ func (e *Env) Init(ctx context.Context) (walked bool, err error) {
 	walkCtx, walkCancel := context.WithCancelCause(ctx)
 	defer walkCancel(nil)
 
+	walkStart := time.Now()
 	var scanErr error
 	defer func() {
 		if scanErr != nil {
@@ -165,6 +166,6 @@ func (e *Env) Init(ctx context.Context) (walked bool, err error) {
 		walkCancel(scanErr)
 		return true, scanErr
 	}
-	logs.Info(logs.ModuleSync, "云端数据库索引构建完成")
+	logs.Info(logs.ModuleSync, "云端数据库索引构建完成", "耗时", time.Since(walkStart).String())
 	return true, nil
 }

@@ -12,6 +12,7 @@ import (
 	synclib "github.com/ytx-zhang/115tools/internal/sync"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Broker 聚合所有模块，充当前后端交互的唯一入口。
@@ -55,6 +56,8 @@ func (b *Broker) Initialize() error {
 		return fmt.Errorf("配置不完整: %v", status.Missing)
 	}
 
+	start := time.Now()
+
 	logs.Info(logs.ModuleSystem, "验证登录凭证...")
 	if err := b.api.VerifyToken(b.appCtx); err != nil {
 		msg := "登录凭证验证失败: " + err.Error()
@@ -63,8 +66,9 @@ func (b *Broker) Initialize() error {
 		logs.Info(logs.ModuleSystem, "初始化失败", "原因", msg)
 		return fmt.Errorf("%s", msg)
 	}
-	logs.Info(logs.ModuleSystem, "登录凭证验证通过")
+	logs.Info(logs.ModuleSystem, "登录凭证验证通过", "耗时", time.Since(start).String())
 
+	syncStart := time.Now()
 	walked, err := b.syncer.Initialize()
 	if err != nil {
 		msg := err.Error()
@@ -72,14 +76,17 @@ func (b *Broker) Initialize() error {
 		b.publishStatus()
 		return err
 	}
-	logs.Info(logs.ModuleSystem, "初始化完成", "构建索引", walked)
+	logs.Info(logs.ModuleSystem, "同步器初始化完成", "构建索引", walked, "耗时", time.Since(syncStart).String())
 
+	logs.Info(logs.ModuleSystem, "初始化完成", "总耗时", time.Since(start).String())
 	b.setInitErr("")
 	return nil
 }
 
 // ApplyConfig 保存配置并重建同步器：路径变更时 Broker 清理旧 DB 记录，sync 专注于业务逻辑。
 func (b *Broker) ApplyConfig(ctx context.Context, req config.Editable) error {
+	syncStart := time.Now()
+
 	oldSyncPath := b.cfg.SyncPath
 	oldTempPath := b.cfg.TempPath
 	oldStrmPath := b.cfg.StrmPath
@@ -113,7 +120,7 @@ func (b *Broker) ApplyConfig(ctx context.Context, req config.Editable) error {
 		b.publishStatus()
 		return err
 	}
-	logs.Info(logs.ModuleSystem, "配置已更新，同步器已重建", "构建索引", walked)
+	logs.Info(logs.ModuleSystem, "配置已更新，同步器已重建", "构建索引", walked, "耗时", time.Since(syncStart).String())
 
 	b.setInitErr("")
 	return nil

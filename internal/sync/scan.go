@@ -18,6 +18,8 @@ func (l *instance) FullScan(ctx context.Context) {
 		logs.Warn(logs.ModuleSync, "主同步目录云端FID未就绪，跳过全量扫描", "路径", l.env.Paths.SyncPath)
 		return
 	}
+	start := time.Now()
+	logs.Info(logs.ModuleSync, "开始全量本地扫描...")
 	// 深层孤儿检测：递归扫描前一次性清理（每个全量扫描周期只跑一次，不在 scanDir 递归体内重复）。
 	// 孤儿记录对应的云端文件已在父目录删除时清理过，这里仅清除 DB 脏记录无需再调云端 API。
 	if orphans := l.env.DB.FindOrphanSubdirs(l.env.Paths.SyncPath); len(orphans) > 0 {
@@ -25,6 +27,7 @@ func (l *instance) FullScan(ctx context.Context) {
 		l.env.DB.BatchClearPaths(orphans)
 	}
 	l.syncDir(ctx, l.env.Paths.SyncPath, true)
+	logs.Info(logs.ModuleSync, "全量本地扫描完成", "耗时", time.Since(start).String())
 }
 
 // syncDir 同步一个目录：扫描差异 → 投递待上传文件到队列（异步）。幂等。
