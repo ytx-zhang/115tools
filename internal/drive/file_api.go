@@ -20,6 +20,7 @@ type DownloadUrlInfo struct {
 // GetDownloadUrl 用 pickcode 换取文件的真实下载地址。
 // ua 会被 115 记入直链绑定，回源 CDN 时须带相同 UA（透传模式已保证非空）。
 func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*DownloadUrlInfo, error) {
+	logs.Info(logs.ModuleCloud, "获取下载直链", "pickcode", pickCode)
 	res, err := doAPI[map[string]struct {
 		FileName string `json:"file_name"`
 		Url      struct {

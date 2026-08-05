@@ -9,6 +9,8 @@ import (
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 	"github.com/tidwall/gjson"
+
+	"github.com/ytx-zhang/115tools/internal/logs"
 )
 
 const (
@@ -57,8 +59,10 @@ func (d *Open115) ossUpload(ctx context.Context, tokenBody, initBody []byte, siz
 		return nil, err
 	}
 	if size > ossMultipartThreshold {
+		logs.Info(logs.ModuleCloud, "OSS分片上传", "size", size)
 		return d.ossUploadMultipart(ctx, tokenBody, initBody, size, readerAt)
 	}
+	logs.Info(logs.ModuleCloud, "OSS单次上传", "size", size)
 	t := newOSSTarget(tokenBody, initBody)
 	result, err := t.client.PutObject(ctx, &oss.PutObjectRequest{
 		Bucket:      &t.bucket,

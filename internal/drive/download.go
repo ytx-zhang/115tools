@@ -103,11 +103,11 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 	ch := s.sf.DoChan(cacheKey, func() (any, error) {
 		info, err := s.api.GetDownloadUrl(r.Context(), pickCode, ua)
 		if err != nil {
-			logs.Error(logs.ModuleCloud, "115接口报错", "err", err)
+			logs.Error(logs.ModuleDrive, "获取直链失败", "err", err)
 			return nil, err
 		}
 		if info == nil || info.Url == "" {
-			logs.Error(logs.ModuleCloud, "115接口报错", "err", errEmptyURL)
+			logs.Error(logs.ModuleDrive, "获取直链失败", "err", errEmptyURL)
 			return nil, errEmptyURL
 		}
 
@@ -123,7 +123,7 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 		}
 
 		s.storeCache(cacheKey, info.Url, info.Name, expiration)
-		logs.Info(logs.ModuleCloud, "获取新地址", "名称", info.Name, "UA", ua, "缓存时长", expiration.Round(time.Second).String())
+		logs.Info(logs.ModuleDrive, "获取新地址", "名称", info.Name, "UA", ua, "缓存时长", expiration.Round(time.Second).String())
 		return &cacheItem{url: info.Url, name: info.Name}, nil
 	})
 	select {
@@ -258,10 +258,17 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 		}
 
 		w.WriteHeader(resp.StatusCode) // 原样透传 200 / 206
-		if _, err := io.Copy(w, resp.Body); err != nil && r.Context().Err() == nil {
-			logs.Debug(logs.ModuleDrive, "透传中断", "名称", item.name, "err", err)
-		}
+		written, copyErr := io.Copy(w, resp.Body)
 		resp.Body.Close()
+		if copyErr != nil {
+			if r.Context().Err() != nil {
+				return // 客户端断开，正常
+			}
+			logs.Debug(logs.ModuleDrive, "透传中断", "名称", item.name, "err", copyErr)
+			return
+		}
+		logs.Info(logs.ModuleDrive, "透传完成", "名称", item.name,
+			"status", resp.StatusCode, "字节数", written, "range", rng)
 		return
 	}
 
