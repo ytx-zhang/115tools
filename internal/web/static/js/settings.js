@@ -1,6 +1,6 @@
 // settings.js —— 配置查看与修改（保存后完整重新初始化同步器）。
 // 表单字段用 petite-vue v-model 双向绑定（见 index.html v-scope="cfg"），提交前做 trim/类型转换。
-import { api, toast } from './api.js';
+import { api, toast, toastError } from './api.js';
 
 export const cfg = window.PetiteVue.reactive({
   refresh_token: '',
@@ -24,13 +24,13 @@ export const cfg = window.PetiteVue.reactive({
       const c = await api('/api/config');
       cfg.sync_path = c.sync_path ?? '';
       cfg.strm_path = c.strm_path ?? '';
-      this.temp_path = c.temp_path ?? '';
-      this.strm_url = c.strm_url ?? '';
-      this.torrent_path = c.torrent_path ?? '';
-      this.debounce_seconds = c.debounce_seconds ?? 0;
-      this.cron_enabled = c.cron?.enabled !== false;
-      this.cron_interval_hours = c.cron?.interval_hours || 12;
-      this.auth_username = c.auth_username ?? '';
+      cfg.temp_path = c.temp_path ?? '';
+      cfg.strm_url = c.strm_url ?? '';
+      cfg.torrent_path = c.torrent_path ?? '';
+      cfg.debounce_seconds = c.debounce_seconds ?? 0;
+      cfg.cron_enabled = c.cron?.enabled !== false;
+      cfg.cron_interval_hours = c.cron?.interval_hours || 12;
+      cfg.auth_username = c.auth_username ?? '';
       cfg.auth_password = '';
       cfg.refresh_token = '';
       cfg.has_token = !!c.has_refresh_token;
@@ -40,7 +40,7 @@ export const cfg = window.PetiteVue.reactive({
       cfg.video_exts = (c.video_exts || []).join(', ');
       cfg.upload_exclude = (c.upload_exclude || []).join(', ');
     } catch (err) {
-      toast(err.message, 'err');
+      toastError(err);
     }
   },
 
@@ -74,7 +74,7 @@ export const cfg = window.PetiteVue.reactive({
       }
       await cfg.load();
     } catch (err) {
-      toast(err.message, 'err');
+      toastError(err);
     } finally {
       if (btn) btn.disabled = false;
     }

@@ -1,9 +1,13 @@
 // offline.js —— 离线下载：添加任务、任务列表轮询、删除/清空、配额。
 // 任务表格用 petite-vue v-for 声明式渲染（见 index.html v-scope="off"），自动转义文本；
 // 表单提交/删除/清空的事件绑定仍走 bindOnce（离线下载无 SSE，命令式更直接）。
-import { api, toast, fmtSize } from './api.js';
+import { api, toast, toastError, fmtSize } from './api.js';
 
 let timer = null;
+
+const POLL_INTERVAL = 5000;
+const FAIL_URL_LEN = 60;
+const TORRENT_SIZE_THRESHOLD = 0;
 
 const statusMap = {
   '-1': ['失败', 'err'],
@@ -47,7 +51,7 @@ export const off = window.PetiteVue.reactive({
         stopOffline();
         return;
       }
-      toast(err.message, 'err');
+      toastError(err);
     }
   },
 });
@@ -57,11 +61,18 @@ export function initOffline() {
   loadSavePathPlaceholder();
   off.refresh();
   loadQuota();
-  timer = setInterval(() => off.refresh(), 5000);
+  poll();
+}
+
+function poll() {
+  timer = setTimeout(() => {
+    off.refresh();
+    poll();
+  }, POLL_INTERVAL);
 }
 
 export function stopOffline() {
-  clearInterval(timer);
+  clearTimeout(timer);
   timer = null;
 }
 
@@ -81,7 +92,7 @@ function bindOnce() {
         toast('已清除', 'ok');
         off.page = 1;
         off.refresh();
-      } catch (err) { toast(err.message, 'err'); }
+      } catch (err) { toastError(err); }
     };
   });
 
@@ -98,7 +109,7 @@ function bindOnce() {
       });
       toast('已删除', 'ok');
       off.refresh();
-    } catch (err) { toast(err.message, 'err'); }
+    } catch (err) { toastError(err); }
   });
 }
 
@@ -111,7 +122,7 @@ async function addTasks(e) {
 
   // 优先处理种子文件上传
   const torrentFile = fd.get('torrent');
-  if (torrentFile instanceof File && torrentFile.size > 0) {
+  if (torrentFile instanceof File && torrentFile.size > TORRENT_SIZE_THRESHOLD) {
     try {
       const upfd = new FormData();
       upfd.set('torrent', torrentFile);
@@ -123,7 +134,7 @@ async function addTasks(e) {
       off.refresh();
       loadQuota();
     } catch (err) {
-      toast(err.message, 'err');
+      toastError(err);
     } finally {
       btn.disabled = false;
     }
@@ -145,13 +156,13 @@ async function addTasks(e) {
     const failed = res.results.filter(r => !r.state);
     toast(`成功添加 ${res.added} 条任务` + (failed.length ? `，失败 ${failed.length} 条` : ''),
       failed.length ? 'err' : 'ok');
-    failed.forEach(f => toast(`${f.message || '添加失败'}：${f.url.slice(0, 60)}`, 'err'));
+    failed.forEach(f => toast(`${f.message || '添加失败'}：${f.url.slice(0, FAIL_URL_LEN)}`, 'err'));
     if (res.added) form.querySelector('[name=urls]').value = '';
     off.page = 1;
     off.refresh();
     loadQuota();
   } catch (err) {
-    toast(err.message, 'err');
+    toastError(err);
   } finally {
     btn.disabled = false;
   }

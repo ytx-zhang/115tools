@@ -1,6 +1,9 @@
 // api.js —— fetch 封装与全局提示
 // 401 时派发 auth:required 事件，由 main.js 切回登录页。
 
+const TOAST_DURATION = 4000;
+const SSE_RECONNECT_MS = 3000;
+
 export async function api(path, options = {}) {
   const isFormData = options.body instanceof FormData;
   if (options.body && typeof options.body !== 'string' && !isFormData) {
@@ -37,8 +40,11 @@ export function toast(msg, type = '') {
   el.className = `toast ${type}`;
   el.textContent = msg;
   box.appendChild(el);
-  setTimeout(() => el.remove(), 4000);
+  setTimeout(() => el.remove(), TOAST_DURATION);
 }
+
+// 常用组合：从 Error 对象直接 toast err 类型
+export function toastError(err) { toast(err.message, 'err'); }
 
 // 格式化字节数
 export function fmtSize(bytes) {
@@ -77,7 +83,7 @@ export function connectSSE(url, { onMessage, onOpen, shouldReconnect } = {}) {
         if (errSeq !== seq) return; // 期间已重建过，放弃本次重连
         if (shouldReconnect && !shouldReconnect()) return;
         try { await api('/api/me'); open(); } catch { /* 401 已由事件处理 */ }
-      }, 3000);
+      }, SSE_RECONNECT_MS);
     };
   }
 

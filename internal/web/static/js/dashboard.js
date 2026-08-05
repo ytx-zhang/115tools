@@ -5,7 +5,7 @@ import { api, toast, connectSSE } from './api.js';
 const startText = { sync: '开始同步', strm: '开始生成' };
 
 // dash 是 petite-vue 托管的响应式状态对象（reactive 包裹，导出即代理，SSE 写入即刷新 DOM）。
-  export const dash = window.PetiteVue.reactive({
+export const dash = window.PetiteVue.reactive({
   configReady: true,
   missing: [],
   initError: '',
@@ -47,36 +47,52 @@ export function stopDashboard() {
 
 // ──── 日志流（保留命令式 append）────
 
+let logBox = null;
+
 let closeLogs = null;   // 日志 SSE 的关闭函数
 let logPaused = false;  // 暂停自动滚动
 let logFilter = 'all';  // all / warn / error / sync / strm / drive / web / system（同一行互斥）
-let countsAll = 0;
+const filterKeys = ['all', 'warn', 'error', 'sync', 'strm', 'drive', 'web', 'system', 'cloud', 'db'];
+let counts = Object.fromEntries(filterKeys.map(k => [k, 0]));
 
-function resetCounts() {
-  countsAll = 0;
-  const el = document.querySelector('#log-filter .chip[data-lv="all"] .chip-count');
-  if (el) el.textContent = '0';
+const MAX_LINES = 300;
+const TRIM_EVERY = 50;
+let trimCount = 0;
+
+const LEVEL_KEYS = new Set(['all', 'warn', 'error']);
+const _chipQ = Object.fromEntries(filterKeys.map(k =>
+  [k, `#log-filter .chip[data-${LEVEL_KEYS.has(k) ? 'lv' : 'mod'}="${k}"] .chip-count`]
+));
+
+function _updateChip(key, val) {
+  const el = document.querySelector(_chipQ[key]);
+  if (el) el.textContent = val;
 }
 
-function bumpCount() {
-  countsAll++;
-  const el = document.querySelector('#log-filter .chip[data-lv="all"] .chip-count');
-  if (el) el.textContent = countsAll;
+function resetCounts() {
+  for (const k of filterKeys) { counts[k] = 0; _updateChip(k, '0'); }
+}
+
+function bumpCount(level, mod) {
+  counts.all++;
+  _updateChip('all', counts.all);
+  if (level === 'WARN' || level === 'ERROR') { counts.warn++; _updateChip('warn', counts.warn); }
+  if (level === 'ERROR') { counts.error++; _updateChip('error', counts.error); }
+  if (mod && counts.hasOwnProperty(mod)) { counts[mod]++; _updateChip(mod, counts[mod]); }
 }
 
 // 模块中文名映射（module label 显示）
 const moduleLabels = { sync: '同步', strm: 'STRM', drive: '直链', web: '管理', system: '系统', cloud: '云端', db: '数据库' };
 
 export function initLogs() {
-  const box = document.getElementById('log-box');
-  if (box && !box.querySelector('.log-line')) {
-    box.innerHTML = '<div class="muted empty">正在连接日志流…</div>';
+  logBox = document.getElementById('log-box');
+  if (logBox && !logBox.querySelector('.log-line')) {
+    logBox.innerHTML = '<div class="muted empty">正在连接日志流…</div>';
   }
   closeLogs = connectSSE('/api/logs', {
     onMessage: renderLog,
     onOpen: () => {
-      const box = document.getElementById('log-box');
-      if (box) box.innerHTML = '<div class="muted empty">暂无日志</div>';
+      if (logBox) logBox.innerHTML = '<div class="muted empty">暂无日志</div>';
       resetCounts();
     },
     shouldReconnect: () => !document.getElementById('view-dashboard').hidden,
@@ -104,8 +120,7 @@ export function stopLogs() {
 }
 
 async function clearLogs() {
-  const box = document.getElementById('log-box');
-  if (box) box.innerHTML = '<div class="muted empty">暂无日志</div>';
+  if (logBox) logBox.innerHTML = '<div class="muted empty">暂无日志</div>';
   resetCounts();
   try { await api('/api/logs/clear', { method: 'POST' }); } catch { /* 忽略 */ }
 }
@@ -119,9 +134,8 @@ function matchFilter(level, mod) {
 }
 
 function applyFilter() {
-  const box = document.getElementById('log-box');
-  if (!box) return;
-  box.querySelectorAll('.log-line').forEach(line => {
+  if (!logBox) return;
+  logBox.querySelectorAll('.log-line').forEach(line => {
     line.hidden = !matchFilter(line.dataset.level, line.dataset.module);
   });
 }
@@ -137,9 +151,8 @@ function renderLog(en) {
     return;
   }
 
-  const box = document.getElementById('log-box');
-  if (!box) return;
-  const empty = box.querySelector('.empty');
+  if (!logBox) return;
+  const empty = logBox.querySelector('.empty');
   if (empty) empty.remove();
 
   const level = String(en.level || 'INFO').toUpperCase();
@@ -170,9 +183,11 @@ function renderLog(en) {
   msg.textContent = en.msg + (en.attrs ? '  ' + en.attrs : '');
 
   line.append(modSpan, t, lv, msg);
-  box.appendChild(line);
+  logBox.appendChild(line);
 
-  bumpCount();
-  while (box.childElementCount > 300) box.removeChild(box.firstElementChild);
-  if (!logPaused) box.scrollTop = box.scrollHeight;
+  bumpCount(level, mod);
+  if (++trimCount % TRIM_EVERY === 0) {
+    while (logBox.childElementCount > MAX_LINES) logBox.removeChild(logBox.firstElementChild);
+  }
+  if (!logPaused) logBox.scrollTop = logBox.scrollHeight;
 }

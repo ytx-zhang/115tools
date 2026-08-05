@@ -1,14 +1,20 @@
 // main.js —— 应用入口：登录探活、视图路由（hash 显隐）、petite-vue 挂载、菜单切换。
-import { api, toast } from './api.js';
+import { api, toast, toastError } from './api.js';
 import { dash, initDashboard, stopDashboard } from './dashboard.js';
 import { off, initOffline, stopOffline } from './offline.js';
 import { cfg } from './settings.js';
 
+function _viewEl(name) { return document.getElementById(`view-${name}`); }
+function makeView(name, init, stop) {
+  const el = _viewEl(name);
+  return { show: () => { el.hidden = false; }, hide: () => { el.hidden = true; }, init, stop };
+}
+
 const ALLOWED = ['dashboard', 'offline', 'settings'];
 const VIEWS = {
-  dashboard: { show: () => { document.getElementById('view-dashboard').hidden = false; }, hide: () => { document.getElementById('view-dashboard').hidden = true; }, init: initDashboard, stop: stopDashboard },
-  offline: { show: () => { document.getElementById('view-offline').hidden = false; }, hide: () => { document.getElementById('view-offline').hidden = true; }, init: initOffline, stop: stopOffline },
-  settings: { show: () => { document.getElementById('view-settings').hidden = false; }, hide: () => { document.getElementById('view-settings').hidden = true; }, init: () => cfg.load(), stop: () => {} },
+  dashboard: makeView('dashboard', initDashboard, stopDashboard),
+  offline: makeView('offline', initOffline, stopOffline),
+  settings: makeView('settings', () => cfg.load(), () => {}),
 };
 
 let current = null;
@@ -101,7 +107,7 @@ function bindLogin() {
         btn.disabled = false;
       }
     } catch (err) {
-      toast(err.message || '登录失败', 'err');
+      toastError(err);
       btn.disabled = false;
     }
   });
