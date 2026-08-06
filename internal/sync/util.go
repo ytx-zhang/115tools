@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -48,13 +49,7 @@ func CheckVideo(ext string, size int64) bool {
 	if exts == nil {
 		return false
 	}
-	ext = strings.ToLower(ext)
-	for _, e := range exts {
-		if e == ext {
-			return size >= 10*1024*1024
-		}
-	}
-	return false
+	return slices.Contains(exts, strings.ToLower(ext)) && size >= 10*1024*1024
 }
 
 // IsVideoExt 仅按扩展名判断（不检查文件大小）。
@@ -63,13 +58,7 @@ func IsVideoExt(path string) bool {
 	if exts == nil {
 		return false
 	}
-	ext := strings.ToLower(filepath.Ext(path))
-	for _, e := range exts {
-		if e == ext {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(exts, strings.ToLower(filepath.Ext(path)))
 }
 
 // ExtractPickcode 从 .strm 文件首行提取 pickcode 与 fid。

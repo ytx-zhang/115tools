@@ -42,9 +42,11 @@ func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*Dow
 
 	var data map[string]downloadItem
 	if err := json.Unmarshal(res.Data, &data); err != nil {
-		return nil, fmt.Errorf("解析下载信息失败: %w", err)
+		return nil, fmt.Errorf("解析下载信息失败: %w, 原始数据: %s", err, truncateBody(res.Data))
 	}
-
+	if len(data) == 0 {
+		return nil, fmt.Errorf("未提取到下载信息, 原始数据: %s", truncateBody(res.Data))
+	}
 	for fid, item := range data {
 		return &DownloadUrlInfo{
 			Fid:  fid,

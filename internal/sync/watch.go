@@ -72,7 +72,7 @@ func (l *instance) watchPump(ctx context.Context) {
 		for f := range pending {
 			folders = append(folders, f)
 		}
-		pending = make(map[string]struct{})
+		clear(pending)
 		return folders
 	}
 
