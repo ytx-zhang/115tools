@@ -13,7 +13,12 @@ import (
 // 本文件实现目录级对比：与数据库记录比对，找出待上传的新文件和待清理的已删项。
 
 // FullScan 对主同步目录做一次完整递归同步（首启收敛/定时兜底）。
+// 云端同步（cloudTask）进行中时直接跳过，避免并发操作云端文件导致冲突。
 func (l *instance) FullScan(ctx context.Context) {
+	if l.cloudTask.Status().Running {
+		logs.Info(logs.ModuleSync, "云端同步正在进行，跳过全量扫描")
+		return
+	}
 	if l.env.Paths.SyncFid == "" {
 		logs.Warn(logs.ModuleSync, "主同步目录云端FID未就绪，跳过全量扫描", "路径", l.env.Paths.SyncPath)
 		return
