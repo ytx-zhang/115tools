@@ -1,17 +1,33 @@
 /* 主题变量与全局布局 */
 :root {
-  --bg: #0d1117;
-  --bg2: #161b22;
-  --bg3: #1f2630;
-  --border: #2d333b;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #4493f8;
-  --accent-h: #2f7de0;
-  --green: #3fb950;
-  --red: #f85149;
-  --yellow: #d29922;
+  --bg: #ffffff;
+  --bg2: #f6f8fa;
+  --bg3: #eef0f2;
+  --border: #d0d7de;
+  --text: #1f2328;
+  --muted: #656d76;
+  --accent: #0969da;
+  --accent-h: #0550ae;
+  --green: #1a7f37;
+  --red: #cf222e;
+  --yellow: #9a6700;
   --radius: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --bg2: #161b22;
+    --bg3: #1f2630;
+    --border: #2d333b;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #4493f8;
+    --accent-h: #2f7de0;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+  }
 }
 
 * {
@@ -136,15 +152,28 @@ small {
     flex-direction: row;
     align-items: center;
     padding: 8px;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
+
+  .sidebar::-webkit-scrollbar { display: none; }
 
   .brand {
     padding: 0 10px;
   }
 
+  .brand span {
+    display: none;
+  }
+
   #nav {
     display: flex;
     gap: 4px;
+  }
+
+  .nav-item {
+    width: auto;
+    flex-shrink: 0;
   }
 
   .nav-item span {
@@ -160,6 +189,78 @@ small {
   .content {
     padding: 16px;
   }
+
+  /* 芯片行横向滑动，不换行 */
+  .log-filter {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+
+  .log-filter::-webkit-scrollbar { display: none; }
+
+  .chip {
+    flex-shrink: 0;
+    font-size: 11px;
+    padding: 2px 8px;
+  }
+
+  /* 卡片紧凑 */
+  .card {
+    padding: 12px 14px;
+  }
+
+  .card-head {
+    gap: 8px;
+  }
+
+  .card-actions {
+    gap: 8px;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  /* 表格紧凑 */
+  td.name {
+    max-width: 180px;
+  }
+
+  /* 日志紧凑 */
+  .log-box {
+    max-height: 260px;
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+
+  .log-line {
+    gap: 4px;
+  }
+
+  .log-mod {
+    flex: 0 0 34px;
+    font-size: 10px;
+    padding: 0 2px;
+  }
+
+  .log-lv {
+    flex: 0 0 38px;
+    font-size: 11px;
+    padding: 0 2px;
+  }
+}
+
+/* 小屏手机 */
+@media (max-width: 480px) {
+  .content { padding: 10px; }
+  .card { padding: 10px 12px; }
+  .card-actions { gap: 6px; }
+  .chip { font-size: 10px; padding: 1px 7px; }
+  .log-box { max-height: 220px; font-size: 10px; }
+  .log-mod { flex: 0 0 28px; font-size: 9px; }
+  .log-lv { flex: 0 0 34px; font-size: 10px; }
+  td.name { max-width: 140px; }
 }
 
 /* 登录页 */
@@ -276,6 +377,18 @@ small {
   font-size: 13px;
 }
 
+.btn.ghost {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  padding: 4px 10px;
+}
+
+.btn.ghost:hover {
+  color: var(--text);
+  background: var(--bg3);
+}
+
 .btn.block {
   width: 100%;
 }
@@ -324,7 +437,7 @@ form .btn[type=submit] {
 
 /* 必填项标记（红色星号） */
 .req {
-  color: #e5484d;
+  color: var(--red);
   font-weight: 700;
   margin-right: 4px;
 }
@@ -449,10 +562,13 @@ th {
   margin: 0;
 }
 
-/* 日志级别/模块过滤按钮组（chip 小按钮：未选中 bg3 底，选中 accent 蓝底） */
+/* 日志级别/模块过滤按钮组（chip 小按钮：未选中 bg3 底，选中 accent 蓝底）
+   窄屏横向滑动，不换行 */
 .log-filter {
   display: flex;
   gap: 6px;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .chip {
