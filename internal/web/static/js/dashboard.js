@@ -1,5 +1,5 @@
 // dashboard.js —— 任务状态与日志统一走 /api/logs SSE。
-// 状态卡用 petite-vue 声明式绑定（见 index.html v-scope="dash"）；日志流保留命令式 append。
+// 状态卡用 petite-vue 声明式绑定（见 index.html v-scope="dash"）；日志流走批量渲染队列。
 import { api, toast, connectSSE } from './api.js';
 
 const startText = { sync: '开始同步', strm: '开始生成' };
@@ -45,7 +45,7 @@ export function stopDashboard() {
   stopLogs();
 }
 
-// ──── 日志流（保留命令式 append）────
+// ──── 日志流（批量渲染：事件入队 → rAF 调度 → Fragment 一次插入）────
 
 let logBox = null;
 
@@ -54,6 +54,9 @@ let logPaused = false;  // 暂停自动滚动
 let logFilter = 'all';  // all / warn / error / sync / strm / drive / web / system（同一行互斥）
 const filterKeys = ['all', 'warn', 'error', 'sync', 'strm', 'drive', 'web', 'system', 'cloud', 'db'];
 let counts = Object.fromEntries(filterKeys.map(k => [k, 0]));
+
+let pending = [];           // 待渲染事件队列（含 status 条目）
+let flushScheduled = false; // 已安排 flush，避免一帧内重复调度
 
 const MAX_LINES = 300;
 const TRIM_EVERY = 50;
@@ -64,6 +67,12 @@ const _chipQ = Object.fromEntries(filterKeys.map(k =>
   [k, `#log-filter .chip[data-${LEVEL_KEYS.has(k) ? 'lv' : 'mod'}="${k}"] .chip-count`]
 ));
 
+// 手写时间格式（保留毫秒），免每条重建 Intl 实例
+function fmtTime(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+
 function _updateChip(key, val) {
   const el = document.querySelector(_chipQ[key]);
   if (el) el.textContent = val;
@@ -73,12 +82,12 @@ function resetCounts() {
   for (const k of filterKeys) { counts[k] = 0; _updateChip(k, '0'); }
 }
 
+// 计数纯变量累加，DOM 写入延迟到 flush 末尾统一完成（消除每条 querySelector）
 function bumpCount(level, mod) {
   counts.all++;
-  _updateChip('all', counts.all);
-  if (level === 'WARN') { counts.warn++; _updateChip('warn', counts.warn); }
-  if (level === 'ERROR') { counts.error++; _updateChip('error', counts.error); }
-  if (mod && counts.hasOwnProperty(mod)) { counts[mod]++; _updateChip(mod, counts[mod]); }
+  if (level === 'WARN') counts.warn++;
+  if (level === 'ERROR') counts.error++;
+  if (mod && counts.hasOwnProperty(mod)) counts[mod]++;
 }
 
 // 模块中文名映射（module label 显示）
@@ -92,6 +101,7 @@ export function initLogs() {
   closeLogs = connectSSE('/api/logs', {
     onMessage: renderLog,
     onOpen: () => {
+      pending = [];
       if (logBox) logBox.innerHTML = '<div class="muted empty">暂无日志</div>';
       resetCounts();
     },
@@ -120,6 +130,7 @@ export function stopLogs() {
 }
 
 async function clearLogs() {
+  pending = [];
   if (logBox) logBox.innerHTML = '<div class="muted empty">暂无日志</div>';
   resetCounts();
   try { await api('/api/logs/clear', { method: 'POST' }); } catch { /* 忽略 */ }
@@ -140,21 +151,70 @@ function applyFilter() {
   });
 }
 
+// 入队：单条或数组帧（后端回放为单个 JSON 数组帧）统一进 pending，由 flush 批量渲染。
 function renderLog(en) {
-  // status 条目不创建日志 DOM，直接更新 dash 卡片
-  if (en.status) {
-    dash.configReady = en.status.config_ready;
-    dash.missing = en.status.missing || [];
-    dash.initError = en.status.init_error || '';
-    dash.setStatus('sync', en.status.sync);
-    dash.setStatus('strm', en.status.strm);
-    return;
+  if (Array.isArray(en)) pending.push(...en);
+  else pending.push(en);
+  scheduleFlush();
+}
+
+function scheduleFlush() {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  // 页面可见走 rAF 贴帧渲染；隐藏时降级定时器，避免后台空转。
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
+  else setTimeout(flush, 25);
+}
+
+function flush() {
+  flushScheduled = false;
+  const batch = pending;
+  pending = [];
+  if (!batch.length) return;
+
+  const box = logBox;
+  // 仅贴底时才自动滚底；用户上翻查看历史不被强制拉回（批量后整批只重排一次）。
+  const wasAtBottom = !!box && !logPaused &&
+    box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+
+  // status 条目即时更新卡片（petite-vue 响应式天然帧末批量）；日志累计计数。
+  let domCount = 0;
+  for (const en of batch) {
+    if (en.status) { handleStatus(en); continue; }
+    domCount++;
+    bumpCount(String(en.level || 'INFO').toUpperCase(), String(en.module || 'system'));
   }
 
-  if (!logBox) return;
-  const empty = logBox.querySelector('.empty');
-  if (empty) empty.remove();
+  // 首帧裁剪：超过 MAX_LINES 只构建末尾 MAX_LINES 条 DOM（计数已全量累计，与 trim 语义一致）。
+  const start = Math.max(0, domCount - MAX_LINES);
+  let skip = 0;
+  const frag = document.createDocumentFragment();
+  for (const en of batch) {
+    if (en.status) continue;
+    if (skip++ < start) continue;
+    frag.appendChild(buildLine(en));
+  }
 
+  if (frag.childElementCount) {
+    const empty = box && box.querySelector('.empty');
+    if (empty) empty.remove();
+    if (box) box.appendChild(frag);
+    trimToMax();
+  }
+  flushChips();
+  if (wasAtBottom && box) box.scrollTop = box.scrollHeight;
+}
+
+function handleStatus(en) {
+  dash.configReady = en.status.config_ready;
+  dash.missing = en.status.missing || [];
+  dash.initError = en.status.init_error || '';
+  dash.setStatus('sync', en.status.sync);
+  dash.setStatus('strm', en.status.strm);
+}
+
+// 构建单行日志 DOM（原 renderLog 的节点构造部分）
+function buildLine(en) {
   const level = String(en.level || 'INFO').toUpperCase();
   const mod = String(en.module || 'system');
   const line = document.createElement('div');
@@ -170,9 +230,7 @@ function renderLog(en) {
 
   const t = document.createElement('span');
   t.className = 'log-time';
-  const d = new Date(en.time);
-  const ms = String(d.getMilliseconds()).padStart(3, '0');
-  t.textContent = d.toLocaleTimeString('zh-CN', { hour12: false }) + '.' + ms;
+  t.textContent = fmtTime(new Date(en.time));
 
   const lv = document.createElement('span');
   lv.className = 'log-lv';
@@ -183,11 +241,16 @@ function renderLog(en) {
   msg.textContent = en.msg + (en.attrs ? '  ' + en.attrs : '');
 
   line.append(modSpan, t, lv, msg);
-  logBox.appendChild(line);
+  return line;
+}
 
-  bumpCount(level, mod);
-  if (++trimCount % TRIM_EVERY === 0) {
-    while (logBox.childElementCount > MAX_LINES) logBox.removeChild(logBox.firstElementChild);
-  }
-  if (!logPaused) logBox.scrollTop = logBox.scrollHeight;
+function flushChips() {
+  for (const k of filterKeys) _updateChip(k, counts[k]);
+}
+
+// 超出上限裁掉最早的行（与原逻辑一致，flush 后统一执行）
+function trimToMax() {
+  if (!logBox) return;
+  if (++trimCount % TRIM_EVERY !== 0) return;
+  while (logBox.childElementCount > MAX_LINES) logBox.removeChild(logBox.firstElementChild);
 }

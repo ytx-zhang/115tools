@@ -182,17 +182,19 @@ func serveSSE[T any](w http.ResponseWriter, r *http.Request, appCtx context.Cont
 	if !sw.writeComment("connected") {
 		return
 	}
+	// 回放打包为单个数据帧（JSON 数组），避免 1000 条逐条写+Flush 拖慢首屏。
+	if len(replay) > 0 {
+		data, err := json.Marshal(replay)
+		if err == nil && !sw.writeData(string(data)) {
+			return
+		}
+	}
 	writeFrame := func(v T) bool {
 		data, err := json.Marshal(v)
 		if err != nil {
 			return true
 		}
 		return sw.writeData(string(data))
-	}
-	for _, item := range replay {
-		if !writeFrame(item) {
-			return
-		}
 	}
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
