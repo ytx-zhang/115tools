@@ -71,7 +71,7 @@ func (d *DB) Close() {
 	defer d.mu.Unlock()
 	if d.boltDB != nil {
 		if err := d.boltDB.Close(); err != nil {
-			logs.Error(logs.ModuleDB, "关闭失败", "错误信息", err)
+			logs.Error(logs.ModuleDB, "关闭失败", "错误", err)
 		} else {
 			logs.Info(logs.ModuleDB, "关闭成功")
 		}
@@ -126,12 +126,13 @@ func (d *DB) SaveRecord(localPath string, fid string, size int64) {
 		b := tx.Bucket(d.bucketName)
 		return b.Put([]byte(localPath), val)
 	}); err != nil {
-		logs.Error(logs.ModuleDB, "保存记录失败", "路径", localPath, "FID", fid, "错误信息", err)
+		logs.Error(logs.ModuleDB, "保存记录失败", "路径", localPath, "FID", fid, "错误", err)
 	}
 }
 
 // deleteTree 在单个写事务内删除前缀为 prefix 的全部记录（含 prefix 自身与所有后代）。
 func (d *DB) deleteTree(tx *bbolt.Tx, prefix string) error {
+	t0 := time.Now()
 	b := tx.Bucket(d.bucketName)
 	if b == nil {
 		return nil
@@ -148,6 +149,8 @@ func (d *DB) deleteTree(tx *bbolt.Tx, prefix string) error {
 			return err
 		}
 	}
+	// 单条删除索引，可能高频（批量清理时逐条）→ Debug
+	logs.Debug(logs.ModuleDB, "删除索引", "路径", prefix, "耗时", time.Since(t0))
 	return nil
 }
 
@@ -157,7 +160,6 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 		return
 	}
 	t0 := time.Now()
-	logs.Info(logs.ModuleDB, "批量清理路径开始", "数量", len(fPaths))
 	err := d.boltDB.Update(func(tx *bbolt.Tx) error {
 		for _, fPath := range fPaths {
 			if e := d.deleteTree(tx, fPath); e != nil {
@@ -167,10 +169,11 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 		return nil
 	})
 	if err != nil {
-		logs.Error(logs.ModuleDB, "批量清理失败", "数量", len(fPaths), "错误信息", err, "耗时", time.Since(t0))
+		logs.Error(logs.ModuleDB, "批量删除索引失败", "数量", len(fPaths), "错误", err, "耗时", time.Since(t0))
 		return
 	}
-	logs.Info(logs.ModuleDB, "批量清理路径完成", "数量", len(fPaths), "耗时", time.Since(t0))
+	// 批量汇总一条 Info；逐条删除索引由 deleteTree Debug 体现
+	logs.Info(logs.ModuleDB, "批量删除索引", "数量", len(fPaths), "耗时", time.Since(t0))
 }
 
 // FindOrphanSubdirs 扫描 currentPath 下所有条目，返回「子项仍在但目录 entry 已丢失」的子目录完整路径。
@@ -178,9 +181,9 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 func (d *DB) FindOrphanSubdirs(currentPath string) []string {
 	t0 := time.Now()
 	defer func() {
-		logs.Info(logs.ModuleDB, "查找孤儿子目录完成", "路径", currentPath, "耗时", time.Since(t0))
+		// 查询操作，只在结束时打 Debug
+		logs.Debug(logs.ModuleDB, "查找孤儿子目录完成", "路径", currentPath, "耗时", time.Since(t0))
 	}()
-	logs.Info(logs.ModuleDB, "查找孤儿子目录", "路径", currentPath)
 	prefix := currentPath
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
@@ -302,9 +305,9 @@ func (d *DB) ScanChildren(ctx context.Context, workPath string) []Child {
 func (d *DB) ListStrmFids(dirPath string) (fids []string) {
 	t0 := time.Now()
 	defer func() {
-		logs.Info(logs.ModuleDB, "列出Strm链接完成", "路径", dirPath, "数量", len(fids), "耗时", time.Since(t0))
+		// 查询操作，只在结束时打 Debug
+		logs.Debug(logs.ModuleDB, "列出Strm链接完成", "路径", dirPath, "数量", len(fids), "耗时", time.Since(t0))
 	}()
-	logs.Info(logs.ModuleDB, "列出Strm链接", "路径", dirPath)
 	prefix := dirPath
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"

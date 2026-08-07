@@ -101,7 +101,8 @@ func (s *Syncer) shutdownLocked() {
 		return
 	}
 
-	logs.Info(logs.ModuleSync, "停止旧同步器实例...")
+	// 同步器实例生命周期属系统级操作 → ModuleSystem
+	logs.Info(logs.ModuleSystem, "停止旧同步器实例...")
 	cancel()
 
 	if oldWg != nil {
@@ -109,9 +110,9 @@ func (s *Syncer) shutdownLocked() {
 		go func() { oldWg.Wait(); close(done) }()
 		select {
 		case <-done:
-			logs.Info(logs.ModuleSync, "旧实例已安全退出")
+			logs.Info(logs.ModuleSystem, "旧实例已安全退出")
 		case <-time.After(30 * time.Second):
-			logs.Warn(logs.ModuleSync, "旧实例退出超时")
+			logs.Warn(logs.ModuleSystem, "旧实例退出超时")
 		}
 	}
 }

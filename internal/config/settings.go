@@ -201,6 +201,6 @@ func (c *Config) Update(e Editable) error {
 	if err := c.persistLocked(); err != nil {
 		return fmt.Errorf("配置写盘失败: %w", err)
 	}
-	logs.Info(logs.ModuleWeb, "配置已更新")
+	logs.Info(logs.ModuleSystem, "配置已更新")
 	return nil
 }

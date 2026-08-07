@@ -50,9 +50,8 @@ export function stopDashboard() {
 let logBox = null;
 
 let closeLogs = null;   // 日志 SSE 的关闭函数
-let logPaused = false;  // 暂停自动滚动
-let logFilter = 'all';  // all / warn / error / sync / strm / drive / web / system（同一行互斥）
-const filterKeys = ['all', 'warn', 'error', 'sync', 'strm', 'drive', 'web', 'system', 'cloud', 'db'];
+let logFilter = 'all';  // all / warn / error / sync / strm / drive / cloud / db / system（同一行互斥）
+const filterKeys = ['all', 'warn', 'error', 'sync', 'strm', 'drive', 'cloud', 'db', 'system'];
 let counts = Object.fromEntries(filterKeys.map(k => [k, 0]));
 
 let pending = [];           // 待渲染事件队列（含 status 条目）
@@ -90,8 +89,8 @@ function bumpCount(level, mod) {
   if (mod && counts.hasOwnProperty(mod)) counts[mod]++;
 }
 
-// 模块中文名映射（module label 显示）
-const moduleLabels = { sync: '同步', strm: 'STRM', drive: '直链', web: '管理', system: '系统', cloud: '云端', db: '数据库' };
+// 模块中文名映射（module label 显示）；web 已并入 system
+const moduleLabels = { sync: '同步', strm: 'STRM', drive: '直链', system: '系统', cloud: '云端', db: '数据库' };
 
 export function initLogs() {
   logBox = document.getElementById('log-box');
@@ -108,9 +107,6 @@ export function initLogs() {
     shouldReconnect: () => !document.getElementById('view-dashboard').hidden,
   });
 
-  const pause = document.getElementById('log-pause');
-  if (pause) pause.onchange = e => { logPaused = e.target.checked; };
-
   const clear = document.getElementById('log-clear');
   if (clear) clear.onclick = clearLogs;
 
@@ -120,6 +116,8 @@ export function initLogs() {
       document.querySelectorAll('#log-filter .chip')
         .forEach(b => b.classList.toggle('active', b === btn));
       applyFilter();
+      // 切换分类时强制滚到底显示最新日志
+      if (logBox) logBox.scrollTop = logBox.scrollHeight;
     };
   });
 }
@@ -173,8 +171,8 @@ function flush() {
   if (!batch.length) return;
 
   const box = logBox;
-  // 仅贴底时才自动滚底；用户上翻查看历史不被强制拉回（批量后整批只重排一次）。
-  const wasAtBottom = !!box && !logPaused &&
+  // 贴底自动跟随滚动；用户上翻查看历史不被强制拉回（批量后整批只重排一次）。
+  const wasAtBottom = !!box &&
     box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
 
   // status 条目即时更新卡片（petite-vue 响应式天然帧末批量）；日志累计计数。

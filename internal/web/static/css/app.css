@@ -538,7 +538,7 @@ th {
   margin-top: 12px;
 }
 
-/* 日志卡片头部右侧操作区：过滤按钮组 + 暂停滚动 + 清空 */
+/* 日志卡片头部右侧操作区：过滤按钮组 + 清空 */
 .card-actions {
   display: flex;
   align-items: center;
@@ -687,13 +687,13 @@ th {
   line-height: 1.8;
 }
 
-.log-mod.lv-sync { color: var(--accent); background: rgba(68, 147, 248, .12); }
-.log-mod.lv-strm { color: var(--green); background: rgba(63, 185, 80, .12); }
-.log-mod.lv-drive { color: var(--yellow); background: rgba(210, 153, 34, .12); }
-.log-mod.lv-cloud { color: #539bf5; background: rgba(83, 155, 245, .12); }
-.log-mod.lv-web { color: #a371f7; background: rgba(163, 113, 247, .12); }
-.log-mod.lv-system { color: var(--muted); background: rgba(139, 148, 158, .08); }
-.log-mod.lv-db { color: #e879f9; background: rgba(232, 121, 249, .12); }
+/* 6 模块各用独立色相，互不接近：蓝/绿/橙/紫/青/灰 */
+.log-mod.lv-sync { color: #4493f8; background: rgba(68, 147, 248, .14); }
+.log-mod.lv-strm { color: #3fb950; background: rgba(63, 185, 80, .14); }
+.log-mod.lv-drive { color: #f0883e; background: rgba(240, 136, 62, .14); }
+.log-mod.lv-cloud { color: #a371f7; background: rgba(163, 113, 247, .14); }
+.log-mod.lv-system { color: #8b949e; background: rgba(139, 148, 158, .12); }
+.log-mod.lv-db { color: #39c5cf; background: rgba(57, 197, 207, .14); }
 
 /* 横幅提示 */
 .banner {

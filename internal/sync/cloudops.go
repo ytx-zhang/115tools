@@ -94,8 +94,9 @@ func (l *instance) cloudCleanTask(ctx context.Context, fPaths []string, workPath
 		}
 	}
 
-	// 目标太多（批量清理）只显示父目录与数量，避免逗号路径串刷屏
-	logs.Info(logs.ModuleSync, "清理数据库索引", "目标目录", workPath, "数量", len(fPaths), "耗时", time.Since(t0))
+	// 本函数真正做的事：清理本地已删路径对应的云端过时项（移动/删除），
+	// 目标太多只显示工作父目录与数量，避免逗号路径串刷屏；清库由 db 模块日志体现
+	logs.Info(logs.ModuleSync, "清理过时文件", "目标目录", workPath, "路径数", len(fPaths), "耗时", time.Since(t0))
 	l.env.DB.BatchClearPaths(fPaths)
 
 	return nil
@@ -116,7 +117,7 @@ func runCloudSync(ctx context.Context, env *Env, task *Task) {
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			if env.DB.GetFid(path) == "" {
 				if err := os.MkdirAll(path, 0755); err != nil {
-					logs.Error(logs.ModuleSync, "创建目录失败", "文件", path, "错误", err)
+					logs.Error(logs.ModuleSync, "创建目录失败", "路径", path, "错误", err)
 					return false, nil
 				}
 				env.DB.SaveRecord(path, fid, db.SizeDir)
@@ -133,15 +134,16 @@ func runCloudSync(ctx context.Context, env *Env, task *Task) {
 				if dbFid != fid {
 					t0 := time.Now()
 					if err := env.API.DeleteFile(ctx, fid); err != nil {
-						logs.Error(logs.ModuleSync, "清理云端冗余项失败", "文件", savePath, "错误", err)
+						logs.Error(logs.ModuleSync, "清理云端冗余项失败", "路径", savePath, "错误", err)
 					} else {
-						logs.Info(logs.ModuleSync, "删除云端冗余项", "路径", savePath, "云端FID", fid, "耗时", time.Since(t0))
+						// 遍历中逐项处理 → Debug；云端删除结果由 cloud 模块「云端删除完成」体现
+						logs.Debug(logs.ModuleSync, "删除云端冗余项", "路径", savePath, "云端FID", fid, "耗时", time.Since(t0))
 					}
 				}
 				return nil
 			}
 			task.AddTotal(1)
-			if err := env.FetchAndSave(ctx, pickCode, fid, savePath, e.IsVideo); err != nil {
+			if err := env.FetchAndSave(ctx, logs.ModuleSync, pickCode, fid, savePath, e.IsVideo); err != nil {
 				return nil
 			}
 			env.DB.SaveRecord(savePath, fid, saveSize)

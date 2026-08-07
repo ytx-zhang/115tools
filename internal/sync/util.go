@@ -66,13 +66,13 @@ func IsVideoExt(path string) bool {
 func ExtractPickcode(strmPath string) (pickcode string, fid string) {
 	data, err := os.ReadFile(strmPath)
 	if err != nil {
-		logs.Debug(logs.ModuleSync, "读取strm文件失败", "文件", strmPath, "错误", err)
+		logs.Debug(logs.ModuleSync, "读取strm文件失败", "路径", strmPath, "错误", err)
 		return "", ""
 	}
 	raw := strings.TrimSpace(strings.TrimPrefix(string(data), "\xEF\xBB\xBF"))
 	u, err := url.Parse(raw)
 	if err != nil {
-		logs.Debug(logs.ModuleSync, "strm内容解析失败", "文件", strmPath, "错误", err)
+		logs.Debug(logs.ModuleSync, "strm内容解析失败", "路径", strmPath, "错误", err)
 		return "", ""
 	}
 	return u.Query().Get("pickcode"), u.Query().Get("fid")
@@ -119,23 +119,25 @@ func ProcessCloudFile(path string, e Entry) (savePath string, saveSize int64) {
 }
 
 // FetchAndSave 按文件类型把云端文件落地：视频写 .strm 索引文件，普通文件真实下载。
+// module 由调用方传入其模块类别（runCloudSync→sync，runStrmGen→strm），
+// 使「新增STRM文件/下载文件」这类逐文件落地日志归属正确模块。
 // 下载文件/生成 strm 是核心任务，即使逐文件高频也保持 Info（重要操作必须可见）。
-func (e *Env) FetchAndSave(ctx context.Context, pickCode, fid, savePath string, isVideo bool) error {
+func (e *Env) FetchAndSave(ctx context.Context, module logs.Module, pickCode, fid, savePath string, isVideo bool) error {
 	if isVideo {
 		t0 := time.Now()
 		if err := e.SaveStrmFile(pickCode, fid, savePath); err != nil {
-			logs.Error(logs.ModuleSync, "创建strm文件失败", "文件", savePath, "错误", err)
+			logs.Error(module, "创建strm文件失败", "路径", savePath, "错误", err)
 			return err
 		}
-		logs.Info(logs.ModuleSync, "新增STRM文件", "文件", savePath, "耗时", time.Since(t0))
+		logs.Info(module, "新增STRM文件", "路径", savePath, "耗时", time.Since(t0))
 		return nil
 	}
 	t0 := time.Now()
 	if err := e.DownloadFile(ctx, pickCode, savePath); err != nil {
-		logs.Error(logs.ModuleSync, "下载文件失败", "文件", savePath, "错误", err)
+		logs.Error(module, "下载文件失败", "路径", savePath, "错误", err)
 		return err
 	}
-	logs.Info(logs.ModuleSync, "下载文件成功", "文件", savePath, "耗时", time.Since(t0))
+	logs.Info(module, "下载文件成功", "路径", savePath, "耗时", time.Since(t0))
 	return nil
 }
 
@@ -175,7 +177,7 @@ func (e *Env) DownloadFile(ctx context.Context, pickcode, localPath string) erro
 
 	if _, copyErr := io.Copy(out, resp.Body); copyErr != nil {
 		if rmErr := os.Remove(localPath); rmErr != nil {
-			logs.Debug(logs.ModuleSync, "清理下载失败的残留文件失败", "文件", localPath, "错误", rmErr)
+			logs.Debug(logs.ModuleSync, "清理下载失败的残留文件失败", "路径", localPath, "错误", rmErr)
 		}
 		return copyErr
 	}

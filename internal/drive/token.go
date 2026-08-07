@@ -60,7 +60,7 @@ func (d *Open115) refreshToken(ctx context.Context, overrideRT ...string) error 
 	// fail 记录刷新失败并安排短间隔重试，同时重排守护，避免失败链断裂后无机会再刷。
 	fail := func(format string, a ...any) error {
 		err := fmt.Errorf(format, a...)
-		logs.Warn(logs.ModuleCloud, "刷新失败，将短间隔重试", "错误信息", err)
+		logs.Warn(logs.ModuleCloud, "刷新失败，将短间隔重试", "错误", err)
 		time.AfterFunc(time.Minute, func() {
 			_ = d.refreshToken(context.Background())
 			d.scheduleRefresh() // 失败也重排守护，保持链不断
@@ -131,6 +131,6 @@ func (d *Open115) VerifyAndApplyRefreshToken(ctx context.Context, rt string) err
 
 // VerifyToken 用一次轻量 API 调用检查当前 token 是否有效（查询根目录文件列表）。
 func (d *Open115) VerifyToken(ctx context.Context) error {
-	_, err := d.GetFileList(ctx, "0")
+	_, err := d.GetFileList(ctx, "0", "根目录")
 	return err
 }

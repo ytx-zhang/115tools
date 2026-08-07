@@ -22,14 +22,15 @@ func (l *instance) watchPump(ctx context.Context) {
 		fswatcher.WithCooldown(0),                      // 关闭库内默认去抖，拿到持续写入的原始事件
 	)
 	if err != nil {
-		logs.Error(logs.ModuleSync, "监听器启动失败", "err", err)
+		logs.Error(logs.ModuleSync, "监听器启动失败", "错误", err)
 		return
 	}
 	go func() {
 		if err := watcher.Watch(ctx); err != nil {
-			logs.Error(logs.ModuleSync, "监听器运行异常退出", "err", err)
+			logs.Error(logs.ModuleSync, "监听器运行异常退出", "错误", err)
 		}
 	}()
+	// 文件监听器是 sync 子模块，生命周期日志归 ModuleSync
 	logs.Info(logs.ModuleSync, "文件监听器启动", "路径", l.env.Paths.SyncPath)
 
 	// 待处理目录集合（主循环与 executor 并发读写，mu 必须保护）：按目录去重。
@@ -108,6 +109,7 @@ func (l *instance) watchPump(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			gTimer.Stop()
+			// 文件监听器是 sync 子模块，生命周期日志归 ModuleSync
 			logs.Info(logs.ModuleSync, "文件监听器已退出")
 			return
 		case ev, ok := <-watcher.Events():
@@ -156,6 +158,7 @@ func (l *instance) processFolders(ctx context.Context, folders []string) []strin
 				continue
 			}
 		}
+		// watcher 触发的单目录处理是任务入口，用户要求开始/完成都显示 → Info
 		logs.Info(logs.ModuleSync, "处理变更目录", "路径", f)
 		l.syncDir(ctx, f, false)
 		processed++

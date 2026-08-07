@@ -86,6 +86,7 @@ func (b *Broker) Initialize() error {
 // ApplyConfig 保存配置并重建同步器：路径变更时 Broker 清理旧 DB 记录，sync 专注于业务逻辑。
 func (b *Broker) ApplyConfig(ctx context.Context, req config.Editable) error {
 	syncStart := time.Now()
+	logs.Info(logs.ModuleSystem, "开始应用配置")
 
 	oldSyncPath := b.cfg.SyncPath
 	oldTempPath := b.cfg.TempPath

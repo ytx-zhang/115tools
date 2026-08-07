@@ -50,7 +50,7 @@ func runStrmGen(ctx context.Context, env *Env, task *Task) {
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			appendMoveFid(path, fid)
 			if err := os.MkdirAll(path, 0755); err != nil {
-				logs.Error(logs.ModuleStrm, "创建目录失败", "文件", path, "错误", err)
+				logs.Error(logs.ModuleStrm, "创建目录失败", "路径", path, "错误", err)
 				failed.Store(true)
 				return false, nil
 			}
@@ -63,7 +63,8 @@ func runStrmGen(ctx context.Context, env *Env, task *Task) {
 				return nil
 			}
 			task.AddTotal(1)
-			if err := env.FetchAndSave(ctx, pickCode, fid, savePath, e.IsVideo); err != nil {
+			// STRM 生成任务产生的落地日志归属 strm 模块（区别于云端同步的 sync）
+			if err := env.FetchAndSave(ctx, logs.ModuleStrm, pickCode, fid, savePath, e.IsVideo); err != nil {
 				failed.Store(true)
 				return nil
 			}
@@ -98,6 +99,7 @@ func moveStrmPathFiles(ctx context.Context, env *Env, fids []string) {
 // 纯本地 IO，ExtractPickcode 反向解析旧的 pickcode/fid）。两棵树（SyncPath+StrmPath）并发。
 func regenerateStrmTree(ctx context.Context, env *Env, root string) {
 	t0 := time.Now()
+	logs.Info(logs.ModuleStrm, "开始重写strm", "路径", root)
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil || ctx.Err() != nil {
 			return nil
@@ -107,11 +109,11 @@ func regenerateStrmTree(ctx context.Context, env *Env, root string) {
 		}
 		pickcode, fid := ExtractPickcode(p)
 		if pickcode == "" || fid == "" {
-			logs.Warn(logs.ModuleStrm, "strm 文件更新时 pickcode 解析失败，跳过", "文件", p)
+			logs.Warn(logs.ModuleStrm, "strm 文件更新时 pickcode 解析失败，跳过", "路径", p)
 			return nil
 		}
 		if err := env.SaveStrmFile(pickcode, fid, p); err != nil {
-			logs.Error(logs.ModuleStrm, "重写 strm 文件失败", "文件", p, "错误", err)
+			logs.Error(logs.ModuleStrm, "重写 strm 文件失败", "路径", p, "错误", err)
 			return nil
 		}
 		// 立即更新数据库版本号（mtime），避免依赖后续扫描兜底刷新时重复比对。

@@ -103,7 +103,6 @@ const (
 	ModuleStrm   Module = "strm"
 	ModuleDrive  Module = "drive"
 	ModuleCloud  Module = "cloud"
-	ModuleWeb    Module = "web"
 	ModuleDB     Module = "db"
 )
 

@@ -116,7 +116,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	passOK := bcrypt.CompareHashAndPassword([]byte(passHash), []byte(req.Password)) == nil
 	if !userOK || !passOK {
 		time.Sleep(500 * time.Millisecond)
-		logs.Warn(logs.ModuleWeb, "登录失败", "用户名", req.Username, "来源", clientIP(r))
+		logs.Warn(logs.ModuleSystem, "登录失败", "用户名", req.Username, "来源", clientIP(r))
 		writeErr(w, http.StatusUnauthorized, "账号或密码错误")
 		return
 	}
@@ -125,7 +125,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Name: sessionCookie, Value: s.sessions.create(), Path: "/",
 		MaxAge: int(sessionTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode,
 	})
-	logs.Info(logs.ModuleWeb, "登录成功", "用户名", req.Username, "来源", clientIP(r))
+	logs.Info(logs.ModuleSystem, "登录成功", "用户名", req.Username, "来源", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -342,7 +342,7 @@ func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 			added++
 		}
 	}
-	logs.Info(logs.ModuleWeb, "添加离线任务", "提交", len(urls), "成功", added, "目标目录", dirID, "耗时", time.Since(t0))
+	logs.Info(logs.ModuleSystem, "添加离线任务", "提交", len(urls), "成功", added, "目标目录", dirID, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "results": results})
 }
 
@@ -394,7 +394,7 @@ func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logs.Info(logs.ModuleWeb, "添加种子任务",
+	logs.Info(logs.ModuleSystem, "添加种子任务",
 		"文件名", hdr.Filename, "大小", len(data),
 		"info_hash", result.InfoHash, "保存路径", savePath, "成功", result.State, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -428,7 +428,7 @@ func (s *Server) handleOfflineDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "删除任务失败: %v", err)
 		return
 	}
-	logs.Info(logs.ModuleWeb, "删除离线任务", "info_hash", req.InfoHash, "删除源文件", req.DeleteFiles, "耗时", time.Since(t0))
+	logs.Info(logs.ModuleSystem, "删除离线任务", "info_hash", req.InfoHash, "删除源文件", req.DeleteFiles, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -449,6 +449,6 @@ func (s *Server) handleOfflineClear(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "清除任务失败: %v", err)
 		return
 	}
-	logs.Info(logs.ModuleWeb, "批量清除任务", "flag", req.Flag, "耗时", time.Since(t0))
+	logs.Info(logs.ModuleSystem, "批量清除任务", "flag", req.Flag, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

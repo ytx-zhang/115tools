@@ -85,7 +85,7 @@ func New115Drive(cfg *config.Config) *Open115 {
 			return false
 		})
 	if err := d.refreshToken(context.Background()); err != nil {
-		logs.Error(logs.ModuleCloud, "更新token失败", "错误信息", err)
+		logs.Error(logs.ModuleCloud, "更新token失败", "错误", err)
 	}
 	d.startRefreshDaemon() // 启动后立刻安排守护，不再依赖业务请求触发首次预约
 	return d

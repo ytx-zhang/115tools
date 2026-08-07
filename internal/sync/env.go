@@ -137,7 +137,7 @@ func (e *Env) Init(ctx context.Context) (walked bool, err error) {
 	var scanErr error
 	defer func() {
 		if scanErr != nil {
-			logs.Error(logs.ModuleSync, "云端扫描被中止，正在清理数据库", "错误信息", scanErr)
+			logs.Error(logs.ModuleSync, "云端扫描被中止，正在清理数据库", "错误", scanErr)
 			e.DB.BatchClearPaths([]string{e.Paths.SyncPath})
 		}
 	}()

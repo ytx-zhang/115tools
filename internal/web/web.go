@@ -67,12 +67,12 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 func (s *Server) registerStatic(mux *http.ServeMux) {
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
-		logs.Error(logs.ModuleWeb, "静态资源目录缺失", "错误信息", err)
+		logs.Error(logs.ModuleSystem, "静态资源目录缺失", "错误", err)
 		return
 	}
 	indexData, err := fs.ReadFile(sub, "index.html")
 	if err != nil {
-		logs.Error(logs.ModuleWeb, "读取 index.html 失败", "错误信息", err)
+		logs.Error(logs.ModuleSystem, "读取 index.html 失败", "错误", err)
 		indexData = []byte("<h1>index.html missing</h1>")
 	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {

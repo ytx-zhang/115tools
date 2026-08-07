@@ -49,7 +49,12 @@ func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bo
 	start := time.Now()
 	uploaded := 0
 	defer func() {
-		logs.Debug(logs.ModuleSync, "同步本地目录", "目录", currentPath, "上传文件", uploaded, "耗时", time.Since(start))
+		// 递归扫描（FullScan 整树）逐目录打 → Debug 防刷屏；非递归（watcher 单目录）→ Info
+		if recursive {
+			logs.Debug(logs.ModuleSync, "同步本地目录", "路径", currentPath, "上传文件", uploaded, "耗时", time.Since(start))
+		} else {
+			logs.Info(logs.ModuleSync, "同步本地目录", "路径", currentPath, "上传文件", uploaded, "耗时", time.Since(start))
+		}
 	}()
 	uploadPaths := l.scanDir(ctx, currentPath, recursive)
 	if len(uploadPaths) == 0 {
@@ -64,7 +69,7 @@ func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bo
 		}
 		cid := l.env.DB.GetFid(filepath.Dir(fPath))
 		if cid == "" {
-			logs.Warn(logs.ModuleSync, "无法获取父目录FID", "文件", fPath)
+			logs.Warn(logs.ModuleSync, "无法获取父目录FID", "路径", fPath)
 			continue
 		}
 		wg.Add(1)
@@ -102,7 +107,7 @@ func (l *instance) scanDir(ctx context.Context, currentPath string, recursive bo
 			// 子树通常由上层清理逻辑统一处理，这里兜底再清理一次（幂等）。
 			logs.Debug(logs.ModuleSync, "本地目录已不存在，兜底清理云端残留", "路径", currentPath)
 			if cerr := l.cloudCleanTask(ctx, []string{currentPath}, currentPath); cerr != nil {
-				logs.Debug(logs.ModuleSync, "本地目录已删除，兜底清理云端时部分项已处理", "目录", currentPath, "错误", cerr)
+				logs.Debug(logs.ModuleSync, "本地目录已删除，兜底清理云端时部分项已处理", "路径", currentPath, "错误", cerr)
 			}
 			return nil
 		}
@@ -155,7 +160,7 @@ func (l *instance) scanDir(ctx context.Context, currentPath string, recursive bo
 
 	// 云端删除与数据库清理（本地已删的项）
 	if err := l.cloudCleanTask(ctx, deletes, currentPath); err != nil {
-		logs.Error(logs.ModuleSync, "云端删除失败", "目录", currentPath, "错误", err)
+		logs.Error(logs.ModuleSync, "云端删除失败", "路径", currentPath, "错误", err)
 	}
 
 	// 处理本地新增项（不在数据库中的）

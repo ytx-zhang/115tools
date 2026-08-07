@@ -5,13 +5,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 	"github.com/tidwall/gjson"
-
-	"github.com/ytx-zhang/115tools/internal/logs"
 )
 
 const (
@@ -54,16 +51,15 @@ func newOSSTarget(tokenBody, initBody []byte) *ossTarget {
 // ossUpload 统一 OSS 真实内容上传（status=1 分支），供磁盘文件与内存字节共用。
 // tokenBody/initBody 为 115 响应原始体；readerAt 提供内容（*os.File 或 bytes.Reader
 // 均实现 io.ReaderAt，单传/分片通用）；size 为内容总字节数。小于等于阈值走单次 PUT，
-// 超过则走分片上传。
-func (d *Open115) ossUpload(ctx context.Context, tokenBody, initBody []byte, size int64, readerAt io.ReaderAt, fileName string) (map[string]any, error) {
+// 超过则走分片上传。返回上传类型供 UploadFile 结束统一打印（上传方式由调用方收敛）。
+func (d *Open115) ossUpload(ctx context.Context, tokenBody, initBody []byte, size int64, readerAt io.ReaderAt) (map[string]any, string, error) {
 	if err := context.Cause(ctx); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if size > ossMultipartThreshold {
-		logs.Info(logs.ModuleCloud, "OSS分片上传", "file", fileName, "size", size)
-		return d.ossUploadMultipart(ctx, tokenBody, initBody, size, readerAt, fileName)
+		res, err := d.ossUploadMultipart(ctx, tokenBody, initBody, size, readerAt)
+		return res, "OSS切片上传", err
 	}
-	logs.Info(logs.ModuleCloud, "OSS单次上传", "file", fileName, "size", size)
 	t := newOSSTarget(tokenBody, initBody)
 	result, err := t.client.PutObject(ctx, &oss.PutObjectRequest{
 		Bucket:      &t.bucket,
@@ -73,9 +69,9 @@ func (d *Open115) ossUpload(ctx context.Context, tokenBody, initBody []byte, siz
 		CallbackVar: &t.cbVarBase64,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return result.CallbackResult, nil
+	return result.CallbackResult, "OSS单文件上传", nil
 }
 
 // ossUploadMultipart 分片上传大文件（对齐 OpenList multpartUpload 实现）。
@@ -84,8 +80,7 @@ func (d *Open115) ossUpload(ctx context.Context, tokenBody, initBody []byte, siz
 // ⚠️ 不要换成 SDK 自带的 oss.Uploader：其 UploadResult 不暴露 CallbackResult
 // （uploader.go 两条路径都丢弃回调体），而回调体是 115 返回 data.file_id /
 // data.pick_code 的唯一通道，拿不到 FID 上传链路就断了（2026-07 评估后保留手写）。
-func (d *Open115) ossUploadMultipart(ctx context.Context, tokenBody, initBody []byte, fileSize int64, readerAt io.ReaderAt, fileName string) (map[string]any, error) {
-	t0 := time.Now()
+func (d *Open115) ossUploadMultipart(ctx context.Context, tokenBody, initBody []byte, fileSize int64, readerAt io.ReaderAt) (map[string]any, error) {
 	t := newOSSTarget(tokenBody, initBody)
 
 	// Step 1: 初始化分片上传，加 sequential 参数使 OSS 返回不带 -N 后缀的 ETag
@@ -143,7 +138,6 @@ func (d *Open115) ossUploadMultipart(ctx context.Context, tokenBody, initBody []
 		return nil, fmt.Errorf("完成分片上传失败: %w", err)
 	}
 
-	logs.Info(logs.ModuleCloud, "OSS分片上传完成", "file", fileName, "大小", fileSize,
-		"分片数", totalParts, "耗时", time.Since(t0))
+	// 上传类型与耗时已由 UploadFile 结束统一打印，这里不再重复打
 	return completeResult.CallbackResult, nil
 }

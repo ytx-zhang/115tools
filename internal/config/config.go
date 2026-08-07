@@ -168,12 +168,12 @@ func (c *Config) SaveToken(access, refresh string, expiresIn int64) {
 	c.token.ExpireAt = expireAt
 
 	if err := c.persistLocked(); err != nil {
-		logs.Error(logs.ModuleWeb, "Token 写盘失败，内存已更新但未落盘，重启后可能读到旧 Token", "错误信息", err)
+		logs.Error(logs.ModuleSystem, "Token 写盘失败，内存已更新但未落盘，重启后可能读到旧 Token", "错误", err)
 		return
 	}
 
 	// 显示直观的到期时间日志
-	logs.Info(logs.ModuleWeb, "Token 已更新", "到期时间", expireAt.Format("2006-01-02 15:04:05"))
+	logs.Info(logs.ModuleSystem, "Token 已更新", "到期时间", expireAt.Format("2006-01-02 15:04:05"))
 }
 
 // persistLocked 序列化并写盘，调用方必须已持有 c.mu 写锁。

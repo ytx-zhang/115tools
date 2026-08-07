@@ -40,7 +40,7 @@ func (l *instance) alreadyUploaded(fPath string, fileInfo os.FileInfo) bool {
 			return false // ≥10MB → 替换旧视频
 		}
 		logs.Warn(logs.ModuleSync, "同名 strm 已存在但该视频文件未达体积阈值，跳过上传",
-			"文件", fPath, "strm", dbKey)
+			"路径", fPath, "strm", dbKey)
 		return true
 	}
 	return fileInfo.Size() == dbSize
@@ -54,7 +54,7 @@ func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 	}
 	fileInfo, err := os.Stat(fPath)
 	if err != nil {
-		logs.Warn(logs.ModuleSync, "同步的文件不存在", "文件", fPath)
+		logs.Warn(logs.ModuleSync, "同步的文件不存在", "路径", fPath)
 		return
 	}
 
@@ -72,12 +72,12 @@ func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 	if err != nil {
 		// 上传前文件被外部修改导致大小变化的错误属可自愈（后续扫描会重传），降级为 Warn 减少日志噪音。
 		if errors.Is(err, drive.ErrUploadSizeChanged) {
-			logs.Warn(logs.ModuleSync, "同步跳过（文件上传前被修改，待下次扫描重传）", "文件", fPath, "错误", err, "耗时", time.Since(upStart))
+			logs.Warn(logs.ModuleSync, "同步跳过（文件上传前被修改，待下次扫描重传）", "路径", fPath, "错误", err, "耗时", time.Since(upStart))
 		} else {
-			logs.Error(logs.ModuleSync, "同步失败", "文件", fPath, "错误", err, "耗时", time.Since(upStart))
+			logs.Error(logs.ModuleSync, "同步失败", "路径", fPath, "错误", err, "耗时", time.Since(upStart))
 		}
 	} else {
-		logs.Info(logs.ModuleSync, "上传文件完成", "文件", fPath, "耗时", time.Since(upStart))
+		logs.Info(logs.ModuleSync, "上传文件完成", "路径", fPath, "耗时", time.Since(upStart))
 	}
 }
 

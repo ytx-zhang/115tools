@@ -67,7 +67,7 @@ func (e *Env) WalkCloud(ctx context.Context, rootPath, rootFid string, v Visitor
 		}
 
 		// 第二步：拉文件列表。API 并发由 drive 的 resty 限流（3/s + burst 5）兜底。
-		items, err := e.API.GetFileList(ctx, fid)
+		items, err := e.API.GetFileList(ctx, fid, path)
 		if err != nil {
 			if onFatal != nil {
 				onFatal(fmt.Errorf("获取列表失败[%s]: %w", path, err))
