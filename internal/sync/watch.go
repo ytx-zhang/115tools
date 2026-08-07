@@ -132,11 +132,13 @@ func (l *instance) processFolders(ctx context.Context, folders []string) []strin
 		logs.Info(logs.ModuleSync, "云端同步正在进行，本地变更稍后处理", "数量", len(folders))
 		return folders
 	}
-	// 监听触发的同步是关键提醒：即使每批触发也保持 Info，让用户看到入库在进行
+	// 监听触发的同步是关键提醒：只在确实处理了文件（有上传）时才打日志，空批次静默不刷屏
 	t0 := time.Now()
 	processed := 0
 	defer func() {
-		logs.Info(logs.ModuleSync, "处理变更目录完成", "数量", len(folders), "处理", processed, "耗时", time.Since(t0))
+		if processed > 0 {
+			logs.Info(logs.ModuleSync, "处理变更目录完成", "数量", len(folders), "处理", processed, "耗时", time.Since(t0))
+		}
 	}()
 	var retryParents []string
 	for _, f := range folders {
@@ -158,10 +160,11 @@ func (l *instance) processFolders(ctx context.Context, folders []string) []strin
 				continue
 			}
 		}
-		// watcher 触发的单目录处理是任务入口，用户要求开始/完成都显示 → Info
-		logs.Info(logs.ModuleSync, "处理变更目录", "路径", f)
-		l.syncDir(ctx, f, false)
-		processed++
+		// watcher 触发的单目录处理：仅当该目录实际上传了文件才打 Info，空批次静默不刷屏
+		if up := l.syncDir(ctx, f, false); up > 0 {
+			logs.Info(logs.ModuleSync, "处理变更目录", "路径", f, "上传文件", up)
+			processed++
+		}
 	}
 	return retryParents
 }

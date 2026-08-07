@@ -41,24 +41,26 @@ func (l *instance) FullScan(ctx context.Context) {
 // 遍历一批目录）因此自然「传完一个目录再扫下一个」。recursive=true 时整棵子树视为一个目录。
 // ⚠️ dirMu 全局互斥：FullScan 与 watcher 并发时同一时刻只跑一个 syncDir（避免跨目录双传，
 // 无需 inFlight）。代价：FullScan 持锁等整树传完期间 watcher 实时入库停摆（有 cron FullScan 兜底）。
-// 目录级变更触发频繁 → 完成日志用 Debug。
-func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bool) {
+// 目录级变更触发频繁 → 完成日志用 Debug；watcher 触发且无实际上传时静默。
+// 返回值 = 本次实际上传的文件数（调用方据此判断是否有实际工作，避免空批次刷日志）。
+func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bool) int {
 	l.dirMu.Lock()
 	defer l.dirMu.Unlock()
 
 	start := time.Now()
 	uploaded := 0
 	defer func() {
-		// 递归扫描（FullScan 整树）逐目录打 → Debug 防刷屏；非递归（watcher 单目录）→ Info
+		// 递归扫描（FullScan 整树）逐目录打 → Debug 防刷屏；
+		// 非递归（watcher 单目录）仅在真正上传了文件 → Info；空批次静默不刷屏。
 		if recursive {
 			logs.Debug(logs.ModuleSync, "同步本地目录", "路径", currentPath, "上传文件", uploaded, "耗时", time.Since(start))
-		} else {
+		} else if uploaded > 0 {
 			logs.Info(logs.ModuleSync, "同步本地目录", "路径", currentPath, "上传文件", uploaded, "耗时", time.Since(start))
 		}
 	}()
 	uploadPaths := l.scanDir(ctx, currentPath, recursive)
 	if len(uploadPaths) == 0 {
-		return
+		return 0
 	}
 	// 信号量（uploadSem）限并发：与实例共享，全局上传并发上限保持 uploadWorkerCount。
 	// ctx 取消时不再占槽位，doUpload 也因 ctx.Err() 快速退出，wg.Wait 不会拖住关闭流程。
@@ -85,6 +87,7 @@ func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bo
 		}(fPath, cid)
 	}
 	wg.Wait()
+	return uploaded
 }
 
 // scanDir 对比数据库记录与本地实际内容，返回待上传文件列表。
