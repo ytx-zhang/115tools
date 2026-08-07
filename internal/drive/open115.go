@@ -128,7 +128,7 @@ func doAPI[T any](ctx context.Context, d *Open115, method, path string, opts ...
 	return
 }
 
-// doRawAPI 与 doAPI 同骨架，但返回原始响应体，供调用方用 gjson 按路径取值
+// doRawAPI 与 doAPI 同骨架，但返回原始响应体，供调用方自行解析
 // （适用于 115 响应字段多而只需少数字段的场景，如 upload/init、get_token）。
 func doRawAPI(ctx context.Context, d *Open115, method, path string, opts ...reqOption) ([]byte, error) {
 	if err := context.Cause(ctx); err != nil {

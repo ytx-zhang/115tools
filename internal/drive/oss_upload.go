@@ -3,12 +3,12 @@ package drive
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -25,26 +25,51 @@ type ossTarget struct {
 	cbVarBase64 string
 }
 
+// ossTokenData 是 /open/upload/get_token 响应 data 段的 OSS 凭证字段。
+type ossTokenData struct {
+	AccessKeyID     string `json:"AccessKeyId"`
+	AccessKeySecret string `json:"AccessKeySecret"`
+	SecurityToken   string `json:"SecurityToken"`
+	Endpoint        string `json:"endpoint"`
+}
+
+// ossInitData 是 /open/upload/init 响应 data 段的 OSS 上传目标字段。
+type ossInitData struct {
+	Bucket   string `json:"bucket"`
+	Object   string `json:"object"`
+	Callback struct {
+		Callback    string `json:"callback"`
+		CallbackVar string `json:"callback_var"`
+	} `json:"callback"`
+}
+
 // newOSSTarget 从 115 get_token / upload/init 的原始响应体提取凭证与上传目标
-// （bucket/object/回调），构造 OSS 客户端。
+// （bucket/object/回调），构造 OSS 客户端。字段缺失/解析失败按空值处理：
+// 空值直接流入 OSS 调用，由 SDK 报错兜底。
 func newOSSTarget(tokenBody, initBody []byte) *ossTarget {
-	token := gjson.ParseBytes(tokenBody)
-	init := gjson.ParseBytes(initBody)
+	var token struct {
+		Data ossTokenData `json:"data"`
+	}
+	_ = json.Unmarshal(tokenBody, &token)
+	var init struct {
+		Data ossInitData `json:"data"`
+	}
+	_ = json.Unmarshal(initBody, &init)
 
 	cfg := oss.LoadDefaultConfig().
 		WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			token.Get("data.AccessKeyId").String(),
-			token.Get("data.AccessKeySecret").String(),
-			token.Get("data.SecurityToken").String())).
+			token.Data.AccessKeyID,
+			token.Data.AccessKeySecret,
+			token.Data.SecurityToken)).
 		WithRegion("cn-shenzhen").
-		WithEndpoint(token.Get("data.endpoint").String())
+		WithEndpoint(token.Data.Endpoint)
 
 	return &ossTarget{
 		client:      oss.NewClient(cfg),
-		bucket:      init.Get("data.bucket").String(),
-		object:      init.Get("data.object").String(),
-		cbBase64:    base64.StdEncoding.EncodeToString([]byte(init.Get("data.callback.callback").String())),
-		cbVarBase64: base64.StdEncoding.EncodeToString([]byte(init.Get("data.callback.callback_var").String())),
+		bucket:      init.Data.Bucket,
+		object:      init.Data.Object,
+		cbBase64:    base64.StdEncoding.EncodeToString([]byte(init.Data.Callback.Callback)),
+		cbVarBase64: base64.StdEncoding.EncodeToString([]byte(init.Data.Callback.CallbackVar)),
 	}
 }
 

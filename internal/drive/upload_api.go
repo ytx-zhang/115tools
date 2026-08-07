@@ -1,6 +1,7 @@
 package drive
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/json"
@@ -13,14 +14,40 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tidwall/gjson"
-
 	"github.com/ytx-zhang/115tools/internal/logs"
 )
 
 // ErrUploadSizeChanged 表示上传前复核发现文件大小相对 init 阶段已变化（被外部重写/截断）。
 // 属可自愈的瞬时状态，调用方应降级为警告并交由后续扫描重传，不应视为致命错误。
 var ErrUploadSizeChanged = errors.New("上传前文件大小已变化")
+
+// uploadInitData 是 /open/upload/init 响应 data 段的字段（115 返回字段多，只取需要的几个）。
+type uploadInitData struct {
+	Status    int    `json:"status"`
+	FileID    string `json:"file_id"`
+	PickCode  string `json:"pick_code"`
+	SignKey   string `json:"sign_key"`
+	SignCheck string `json:"sign_check"`
+}
+
+// parseUploadInit 解析 /open/upload/init 响应体中的 data 对象（缺失/非对象报错）。
+func parseUploadInit(body []byte) (uploadInitData, error) {
+	var res struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		return uploadInitData{}, fmt.Errorf("解析初始化响应失败: %w, 响应体: %s", err, truncateBody(body))
+	}
+	trimmed := bytes.TrimSpace(res.Data)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return uploadInitData{}, fmt.Errorf("解析初始化响应失败: data 字段缺失, 响应体: %s", truncateBody(body))
+	}
+	var data uploadInitData
+	if err := json.Unmarshal(trimmed, &data); err != nil {
+		return uploadInitData{}, fmt.Errorf("解析初始化响应失败: %w, 响应体: %s", err, truncateBody(body))
+	}
+	return data, nil
+}
 
 // 本文件是 115 上传 API：普通文件上传（UploadFile）。
 //
@@ -79,29 +106,28 @@ func (d *Open115) UploadFile(ctx context.Context, pathStr, cid, signKey, signVal
 	if err != nil {
 		return nil, err
 	}
-	data := gjson.GetBytes(body, "data")
-	if !data.IsObject() {
-		return nil, fmt.Errorf("解析初始化响应失败: data 字段缺失, 响应体: %s", truncateBody(body))
+	data, err := parseUploadInit(body)
+	if err != nil {
+		return nil, err
 	}
 
-	switch data.Get("status").Int() {
+	switch data.Status {
 	case 2:
 		upType = "秒传"
 		return &UploadFileInfo{
-			Fid:      data.Get("file_id").String(),
-			PickCode: data.Get("pick_code").String(),
+			Fid:      data.FileID,
+			PickCode: data.PickCode,
 		}, nil
 
 	case 7:
 		// 二次校验：按指定字节区间重新计算 SHA1 后重提。
-		signCheck := data.Get("sign_check").String()
-		parts := strings.Split(signCheck, "-")
+		parts := strings.Split(data.SignCheck, "-")
 		if len(parts) != 2 {
-			return nil, fmt.Errorf("签名检查格式错误: %s", signCheck)
+			return nil, fmt.Errorf("签名检查格式错误: %s", data.SignCheck)
 		}
 		start, _ := strconv.ParseInt(parts[0], 10, 64)
 		end, _ := strconv.ParseInt(parts[1], 10, 64)
-		info, upType, err = d.UploadFileWithSign(ctx, pathStr, cid, data.Get("sign_key").String(),
+		info, upType, err = d.UploadFileWithSign(ctx, pathStr, cid, data.SignKey,
 			fileSHA1Partial(pathStr, start, end))
 		return info, err
 
@@ -139,21 +165,21 @@ func (d *Open115) UploadFileWithSign(ctx context.Context, pathStr, cid, signKey,
 	if err != nil {
 		return nil, "", err
 	}
-	data := gjson.GetBytes(body, "data")
-	if !data.IsObject() {
-		return nil, "", fmt.Errorf("解析初始化响应失败: data 字段缺失, 响应体: %s", truncateBody(body))
+	data, err := parseUploadInit(body)
+	if err != nil {
+		return nil, "", err
 	}
-	if data.Get("status").Int() == 2 {
+	if data.Status == 2 {
 		return &UploadFileInfo{
-			Fid:      data.Get("file_id").String(),
-			PickCode: data.Get("pick_code").String(),
+			Fid:      data.FileID,
+			PickCode: data.PickCode,
 		}, "秒传", nil
 	}
 	return d.uploadReal(ctx, pathStr, fi.Size(), body)
 }
 
 // uploadReal 处理 status=1（云端无此文件）：取 OSS 凭证走真实内容上传。
-// initBody 为 upload/init 的原始响应体，OSS 目标参数由 gjson 按路径提取。
+// initBody 为 upload/init 的原始响应体，OSS 目标参数由 newOSSTarget 结构体解析。
 // 返回上传类型（OSS单文件上传 / OSS切片上传）供 UploadFile 结束统一打印。
 func (d *Open115) uploadReal(ctx context.Context, pathStr string, size int64, initBody []byte) (*UploadFileInfo, string, error) {
 	tokenBody, err := doRawAPI(ctx, d, "GET", "/open/upload/get_token")
@@ -176,8 +202,16 @@ func (d *Open115) uploadReal(ctx context.Context, pathStr string, size int64, in
 		return nil, "", fmt.Errorf("OSS上传失败: %w", err)
 	}
 	raw, _ := json.Marshal(cbResp)
-	cb := gjson.GetBytes(raw, "data")
-	fid, pc := cb.Get("file_id").String(), cb.Get("pick_code").String()
+	var cb struct {
+		Data struct {
+			FileID   string `json:"file_id"`
+			PickCode string `json:"pick_code"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &cb); err != nil {
+		return nil, "", fmt.Errorf("OSS上传回调解析失败: %w, cbResp=%s", err, truncateBody(raw))
+	}
+	fid, pc := cb.Data.FileID, cb.Data.PickCode
 	if fid == "" || pc == "" {
 		return nil, "", fmt.Errorf("OSS上传返回信息缺失: cbResp=%s", truncateBody(raw))
 	}
