@@ -1,6 +1,6 @@
 // offline.js —— 离线下载：添加任务、任务列表轮询、删除/清空、配额。
-// 任务表格用 petite-vue v-for 声明式渲染（见 index.html v-scope="off"），自动转义文本；
-// 表单提交/删除/清空的事件绑定仍走 bindOnce（离线下载无 SSE，命令式更直接）。
+// 任务表格用 <template id="offline-row"> 克隆重建 tbody（5s 轮询低频，整表重建开销可接受）；
+// 表单提交/删除/清空走命令式事件绑定（离线下载无 SSE，命令式更直接）。
 import { api, toast, toastError, fmtSize } from './api.js';
 
 let timer = null;
@@ -16,14 +16,13 @@ const statusMap = {
   '2': ['完成', 'ok'],
 };
 
-// off 是 petite-vue 托管的响应式状态（reactive 包裹，导出即代理，refresh 写入即刷新表格）。
-export const off = window.PetiteVue.reactive({
+// off 是普通状态对象，数据变化后显式调用 render 函数刷新 DOM。
+export const off = {
   tasks: [],
   page: 1,
   pageCount: 1,
   count: 0,
   quota: '',
-  get pageInfo() { return `${off.page} / ${off.pageCount} 页 · 共 ${off.count} 个任务`; },
 
   prev() { if (off.page > 1) { off.page--; off.refresh(); } },
   next() { if (off.page < off.pageCount) { off.page++; off.refresh(); } },
@@ -33,7 +32,7 @@ export const off = window.PetiteVue.reactive({
       const data = await api(`/api/offline/tasks?page=${off.page}`);
       off.pageCount = Math.max(1, data.page_count || 1);
       off.count = data.count || 0;
-      this.tasks = (data.tasks || []).map(t => {
+      off.tasks = (data.tasks || []).map(t => {
         const [text, cls] = statusMap[String(t.status)] || [`状态${t.status}`, ''];
         return {
           info_hash: t.info_hash,
@@ -44,6 +43,8 @@ export const off = window.PetiteVue.reactive({
           statusCls: cls,
         };
       });
+      renderTasks();
+      renderPager();
     } catch (err) {
       // 401 表示会话失效需重新登录，停止轮询；其余错误（网络抖动 / 服务端临时异常）
       // 仅提示，保留轮询，避免一次失败就彻底停掉任务列表。
@@ -54,7 +55,7 @@ export const off = window.PetiteVue.reactive({
       toastError(err);
     }
   },
-});
+};
 
 export function initOffline() {
   bindOnce();
@@ -76,6 +77,57 @@ export function stopOffline() {
   timer = null;
 }
 
+// ──── 渲染 ────
+
+const rowTpl = document.getElementById('offline-row');
+
+function renderTasks() {
+  const tbody = document.getElementById('offline-tbody');
+  if (!tbody) return;
+  tbody.textContent = '';
+  if (!off.tasks.length) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="5" class="muted center">暂无任务</td>';
+    tbody.appendChild(tr);
+    return;
+  }
+  for (const t of off.tasks) {
+    const frag = rowTpl.content.cloneNode(true);
+    const cells = {};
+    frag.querySelectorAll('[data-cell]').forEach(el => { cells[el.dataset.cell] = el; });
+    cells.name.textContent = t.name;
+    cells.name.title = t.name;
+    cells.size.textContent = t.sizeText;
+    cells.bar.style.width = t.pct + '%';
+    cells.pct.textContent = t.pct + '%';
+    cells.status.textContent = t.statusText;
+    cells.status.className = `badge ${t.statusCls}`;
+    cells.del.textContent = '删任务';
+    cells.del.dataset.hash = t.info_hash;
+    cells.del.dataset.del = '0';
+    cells.delFiles.textContent = '删任务+文件';
+    cells.delFiles.dataset.hash = t.info_hash;
+    cells.delFiles.dataset.del = '1';
+    tbody.appendChild(frag);
+  }
+}
+
+function renderPager() {
+  const info = document.getElementById('page-info');
+  if (info) info.textContent = `${off.page} / ${off.pageCount} 页 · 共 ${off.count} 个任务`;
+  const prev = document.getElementById('page-prev');
+  const next = document.getElementById('page-next');
+  if (prev) prev.disabled = off.page <= 1;
+  if (next) next.disabled = off.page >= off.pageCount;
+}
+
+function renderQuota() {
+  const el = document.getElementById('offline-quota');
+  if (el) el.textContent = off.quota;
+}
+
+// ──── 事件绑定（一次性，stop/init 生命周期不重复绑定）────
+
 let bound = false;
 function bindOnce() {
   if (bound) return;
@@ -83,6 +135,8 @@ function bindOnce() {
 
   document.getElementById('offline-add-form').addEventListener('submit', addTasks);
   document.getElementById('offline-refresh').onclick = () => { off.refresh(); loadQuota(); };
+  document.getElementById('page-prev').onclick = () => off.prev();
+  document.getElementById('page-next').onclick = () => off.next();
 
   document.querySelectorAll('[data-clear]').forEach(btn => {
     btn.onclick = async () => {
@@ -182,5 +236,6 @@ async function loadQuota() {
   try {
     const q = await api('/api/offline/quota');
     off.quota = `配额：剩余 ${q.surplus} / 共 ${q.count}`;
+    renderQuota();
   } catch { /* 配额非关键信息，失败不打扰 */ }
 }

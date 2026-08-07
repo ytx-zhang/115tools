@@ -1,7 +1,7 @@
-// main.js —— 应用入口：登录探活、视图路由（hash 显隐）、petite-vue 挂载、菜单切换。
+// main.js —— 应用入口：登录探活、视图路由（hash 显隐）、视图 init/stop 生命周期、菜单切换。
 import { api, toast, toastError } from './api.js';
-import { dash, initDashboard, stopDashboard } from './dashboard.js';
-import { off, initOffline, stopOffline } from './offline.js';
+import { initDashboard, stopDashboard } from './dashboard.js';
+import { initOffline, stopOffline } from './offline.js';
 import { cfg } from './settings.js';
 
 function _viewEl(name) { return document.getElementById(`view-${name}`); }
@@ -74,9 +74,6 @@ async function boot() {
   // 仅启用登录验证时显示「退出登录」按钮（auth_required 为 true）。
   const lb = document.getElementById('logout-btn');
   if (lb) lb.hidden = !res.authRequired;
-
-  // 托管三视图的声明式绑定（v-scope），命令式 SSE/轮询仍由各 view 模块驱动。
-  PetiteVue.createApp({ dash, off, cfg }).mount('#app-view');
 
   // 导航按钮点击改 hash，由 hashchange 单一归口路由（不直接调 showView，避免双路径）。
   document.querySelectorAll('[data-view]').forEach(b => {

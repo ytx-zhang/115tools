@@ -1,11 +1,11 @@
 // dashboard.js —— 任务状态与日志统一走 /api/logs SSE。
-// 状态卡用 petite-vue 声明式绑定（见 index.html v-scope="dash"）；日志流走批量渲染队列。
+// 状态卡用「普通状态对象 + 命令式 render 函数」更新 DOM；日志流走批量渲染队列。
 import { api, toast, connectSSE } from './api.js';
 
 const startText = { sync: '开始同步', strm: '开始生成' };
 
-// dash 是 petite-vue 托管的响应式状态对象（reactive 包裹，导出即代理，SSE 写入即刷新 DOM）。
-export const dash = window.PetiteVue.reactive({
+// dash 是普通状态对象（无响应式代理），数据变化后显式调用 renderStatus 刷新 DOM。
+export const dash = {
   configReady: true,
   missing: [],
   initError: '',
@@ -35,14 +35,67 @@ export const dash = window.PetiteVue.reactive({
       toast('任务已启动', 'ok');
     }
   },
-});
+};
 
 export function initDashboard() {
+  bindTaskButtons();
+  renderStatus();
   initLogs();
 }
 
 export function stopDashboard() {
   stopLogs();
+}
+
+// ──── 状态渲染（banner + 任务卡）────
+
+function renderStatus() {
+  renderBanners();
+  renderTaskCard('sync');
+  renderTaskCard('strm');
+}
+
+function renderBanners() {
+  const cb = document.getElementById('config-banner');
+  if (cb) {
+    cb.hidden = dash.configReady;
+    const miss = document.getElementById('config-banner-missing');
+    if (miss) miss.textContent = dash.missing.join('、');
+  }
+  const eb = document.getElementById('init-error-banner');
+  if (eb) {
+    eb.hidden = !dash.initError;
+    const txt = document.getElementById('init-error-text');
+    if (txt) txt.textContent = dash.initError;
+  }
+}
+
+function renderTaskCard(name) {
+  const s = dash[name];
+  const badge = document.getElementById(`${name}-badge`);
+  if (badge) {
+    badge.textContent = s.badgeText;
+    badge.className = s.badgeCls;
+  }
+  const done = document.getElementById(`${name}-done`);
+  if (done) done.textContent = s.done;
+  const total = document.getElementById(`${name}-total`);
+  if (total) total.textContent = s.total;
+  const bar = document.getElementById(`${name}-bar`);
+  if (bar) bar.style.width = s.barWidth;
+  const btn = document.getElementById(`${name}-btn`);
+  if (btn) {
+    btn.textContent = s.btnText;
+    btn.className = s.btnCls;
+    btn.disabled = !s.ready;
+  }
+}
+
+function bindTaskButtons() {
+  const sync = document.getElementById('sync-btn');
+  if (sync) sync.addEventListener('click', () => dash.toggle('sync'));
+  const strm = document.getElementById('strm-btn');
+  if (strm) strm.addEventListener('click', () => dash.toggle('strm'));
 }
 
 // ──── 日志流（批量渲染：事件入队 → rAF 调度 → Fragment 一次插入）────
@@ -110,15 +163,15 @@ export function initLogs() {
   const clear = document.getElementById('log-clear');
   if (clear) clear.onclick = clearLogs;
 
-  document.querySelectorAll('#log-filter .chip').forEach(btn => {
-    btn.onclick = () => {
-      logFilter = btn.dataset.lv || btn.dataset.mod;
-      document.querySelectorAll('#log-filter .chip')
-        .forEach(b => b.classList.toggle('active', b === btn));
-      applyFilter();
-      // 切换分类时强制滚到底显示最新日志
-      if (logBox) logBox.scrollTop = logBox.scrollHeight;
-    };
+  // chip 过滤：容器事件委托，同一行互斥选中；切换分类时强制滚到底显示最新日志
+  const filter = document.getElementById('log-filter');
+  if (filter) filter.addEventListener('click', e => {
+    const btn = e.target.closest('.chip');
+    if (!btn) return;
+    logFilter = btn.dataset.lv || btn.dataset.mod;
+    filter.querySelectorAll('.chip').forEach(b => b.classList.toggle('active', b === btn));
+    applyFilter();
+    if (logBox) logBox.scrollTop = logBox.scrollHeight;
   });
 }
 
@@ -175,7 +228,7 @@ function flush() {
   const wasAtBottom = !!box &&
     box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
 
-  // status 条目即时更新卡片（petite-vue 响应式天然帧末批量）；日志累计计数。
+  // status 条目更新任务卡与 banner；日志累计计数。
   let domCount = 0;
   for (const en of batch) {
     if (en.status) { handleStatus(en); continue; }
@@ -209,9 +262,10 @@ function handleStatus(en) {
   dash.initError = en.status.init_error || '';
   dash.setStatus('sync', en.status.sync);
   dash.setStatus('strm', en.status.strm);
+  renderStatus();
 }
 
-// 构建单行日志 DOM（原 renderLog 的节点构造部分）
+// 构建单行日志 DOM（纯 textContent 写入，天然防 XSS）
 function buildLine(en) {
   const level = String(en.level || 'INFO').toUpperCase();
   const mod = String(en.module || 'system');

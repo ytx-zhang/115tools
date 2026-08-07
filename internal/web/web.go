@@ -4,8 +4,11 @@
 package web
 
 import (
+	"compress/gzip"
 	"context"
+	"crypto/sha1"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/ytx-zhang/115tools/internal/init"
@@ -75,11 +78,138 @@ func (s *Server) registerStatic(mux *http.ServeMux) {
 		logs.Error(logs.ModuleSystem, "读取 index.html 失败", "错误", err)
 		indexData = []byte("<h1>index.html missing</h1>")
 	}
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
+	// 前端资源缓存策略：入口 HTML 与静态文件统一 no-cache（允许缓存但强制每次回源验证）。
+	// ⚠️ embed.FS 的 ModTime() 恒为零值（src/embed/embed.go），标准库 FileServer/ServeContent
+	// 因此不生成 Last-Modified、If-Modified-Since 验证永不触发。必须自己基于内容指纹生成 ETag：
+	// 预先遍历全部静态文件算 SHA1；go build 重新嵌入后内容变化 → ETag 全变 → 浏览器必然拉新，
+	// 天然解决「发布新版后用户仍看到旧页面/旧 JS」的缓存陈旧问题（无构建步骤，无法用内容指纹文件名+immutable）。
+	// FileServer 的 checkPreconditions 会用预设的 ETag 头处理 If-None-Match → 304。
+	etags := make(map[string]string, 16)
+	_ = fs.WalkDir(sub, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := fs.ReadFile(sub, path)
+		if err != nil {
+			return err
+		}
+		h := sha1.Sum(data)
+		etags[path] = `"` + hex.EncodeToString(h[:]) + `"`
+		return nil
+	})
+
+	indexHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		etag := staticETag(etags["index.html"], r)
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 		_, _ = w.Write(indexData)
 	})
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(sub)))
+	mux.Handle("GET /{$}", gzipMiddleware(indexHandler))
+
+	fileServer := http.StripPrefix("/static/", http.FileServerFS(sub))
+	staticHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		if etag, ok := etags[strings.TrimPrefix(r.URL.Path, "/static/")]; ok {
+			w.Header().Set("ETag", staticETag(etag, r)) // FileServer 据此处理 If-None-Match → 304
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+	mux.Handle("GET /static/", gzipMiddleware(staticHandler))
+}
+
+// ──── 静态资源 gzip 压缩 ────
+
+// staticETag 按请求协商结果给 ETag 加编码后缀：gzip 请求在引号内追加 -gzip。
+// ⚠️ 后缀必须加在引号内部（"hex-gzip"）：若加在引号外（"hex"-gzip）是非法 ETag 格式，
+// FileServer 的 scanETag 只会解析到第一个引号，304 校验永不命中。
+// 强 ETag 语义要求同一 ETag 对应字节完全一致的表示，不同编码必须用不同 ETag，
+// 否则浏览器可能把 gzip 版缓存回放给不支持 gzip 的请求（配合 Vary 双层保险）。
+func staticETag(base string, r *http.Request) string {
+	if !acceptsGzip(r) {
+		return base
+	}
+	return `"` + strings.Trim(base, `"`) + `-gzip"`
+}
+
+// acceptsGzip 判断是否用 gzip 响应：请求声明支持 gzip 且非 Range 请求。
+// Range 请求跳过压缩：压缩改变字节流，Content-Range 的偏移基于原始字节会错乱。
+// 管理面板静态资源（HTML/CSS/JS）浏览器不会发 Range，此判断是防御性兜底。
+func acceptsGzip(r *http.Request) bool {
+	return r.Header.Get("Range") == "" && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
+}
+
+// gzipResponseWriter 透明 gzip 包装：仅在实际写 body 时压缩，304/204 无 body 原样透传。
+// ⚠️ 必须删 Content-Length（长度随压缩改变，由 net/http 回退 chunked）。
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz     *gzip.Writer
+	wrote  bool
+	status int
+}
+
+func (g *gzipResponseWriter) WriteHeader(code int) {
+	if g.wrote {
+		return
+	}
+	g.wrote = true
+	g.status = code
+	if code != http.StatusNotModified && code != http.StatusNoContent {
+		g.Header().Set("Content-Encoding", "gzip")
+		g.Header().Del("Content-Length")
+		g.gz = gzip.NewWriter(g.ResponseWriter)
+	}
+	g.ResponseWriter.WriteHeader(code)
+}
+
+func (g *gzipResponseWriter) Write(b []byte) (int, error) {
+	if !g.wrote {
+		g.WriteHeader(http.StatusOK)
+	}
+	if g.gz != nil {
+		return g.gz.Write(b)
+	}
+	return g.ResponseWriter.Write(b)
+}
+
+// Close 收尾 gzip 流（写 footer）。无压缩时直接透传。
+func (g *gzipResponseWriter) Close() error {
+	if g.gz != nil {
+		return g.gz.Close()
+	}
+	return nil
+}
+
+// Unwrap 供 http.ResponseController 访问底层 ResponseWriter。
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
+
+// Flush 透传刷新，同时冲刷 gzip 缓冲（FileServer 对小文件不会主动 flush，保留以兼容）。
+func (g *gzipResponseWriter) Flush() {
+	if g.gz != nil {
+		_ = g.gz.Flush()
+	}
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// gzipMiddleware 按 Accept-Encoding 协商压缩，补 Vary 头后包 gzipResponseWriter。
+// Vary: Accept-Encoding 必须带，否则反代缓存/浏览器会按编码混淆缓存条目。
+func gzipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !acceptsGzip(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Add("Vary", "Accept-Encoding")
+		gw := &gzipResponseWriter{ResponseWriter: w}
+		defer gw.Close()
+		next.ServeHTTP(gw, r)
+	})
 }
 
 // ──── HTTP 辅助 ────
