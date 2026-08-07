@@ -166,6 +166,6 @@ func (e *Env) Init(ctx context.Context) (walked bool, err error) {
 		walkCancel(scanErr)
 		return true, scanErr
 	}
-	logs.Info(logs.ModuleSync, "云端数据库索引构建完成", "耗时", time.Since(walkStart).String())
+	logs.Info(logs.ModuleSync, "云端数据库索引构建完成", "路径", e.Paths.SyncPath, "耗时", time.Since(walkStart).String())
 	return true, nil
 }

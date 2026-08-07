@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -157,7 +158,7 @@ func (d *Open115) uploadReal(ctx context.Context, pathStr string, size int64, in
 	if fi, statErr := f.Stat(); statErr == nil && fi.Size() != size {
 		return nil, fmt.Errorf("%w: 期望=%d 实际=%d", ErrUploadSizeChanged, size, fi.Size())
 	}
-	cbResp, err := d.ossUpload(ctx, tokenBody, initBody, size, f)
+	cbResp, err := d.ossUpload(ctx, tokenBody, initBody, size, f, filepath.Base(pathStr))
 	if err != nil {
 		return nil, fmt.Errorf("OSS上传失败: %w", err)
 	}

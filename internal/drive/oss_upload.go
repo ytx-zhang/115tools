@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
@@ -54,15 +55,15 @@ func newOSSTarget(tokenBody, initBody []byte) *ossTarget {
 // tokenBody/initBody 为 115 响应原始体；readerAt 提供内容（*os.File 或 bytes.Reader
 // 均实现 io.ReaderAt，单传/分片通用）；size 为内容总字节数。小于等于阈值走单次 PUT，
 // 超过则走分片上传。
-func (d *Open115) ossUpload(ctx context.Context, tokenBody, initBody []byte, size int64, readerAt io.ReaderAt) (map[string]any, error) {
+func (d *Open115) ossUpload(ctx context.Context, tokenBody, initBody []byte, size int64, readerAt io.ReaderAt, fileName string) (map[string]any, error) {
 	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
 	if size > ossMultipartThreshold {
-		logs.Info(logs.ModuleCloud, "OSS分片上传", "size", size)
-		return d.ossUploadMultipart(ctx, tokenBody, initBody, size, readerAt)
+		logs.Info(logs.ModuleCloud, "OSS分片上传", "file", fileName, "size", size)
+		return d.ossUploadMultipart(ctx, tokenBody, initBody, size, readerAt, fileName)
 	}
-	logs.Info(logs.ModuleCloud, "OSS单次上传", "size", size)
+	logs.Info(logs.ModuleCloud, "OSS单次上传", "file", fileName, "size", size)
 	t := newOSSTarget(tokenBody, initBody)
 	result, err := t.client.PutObject(ctx, &oss.PutObjectRequest{
 		Bucket:      &t.bucket,
@@ -83,7 +84,8 @@ func (d *Open115) ossUpload(ctx context.Context, tokenBody, initBody []byte, siz
 // ⚠️ 不要换成 SDK 自带的 oss.Uploader：其 UploadResult 不暴露 CallbackResult
 // （uploader.go 两条路径都丢弃回调体），而回调体是 115 返回 data.file_id /
 // data.pick_code 的唯一通道，拿不到 FID 上传链路就断了（2026-07 评估后保留手写）。
-func (d *Open115) ossUploadMultipart(ctx context.Context, tokenBody, initBody []byte, fileSize int64, readerAt io.ReaderAt) (map[string]any, error) {
+func (d *Open115) ossUploadMultipart(ctx context.Context, tokenBody, initBody []byte, fileSize int64, readerAt io.ReaderAt, fileName string) (map[string]any, error) {
+	t0 := time.Now()
 	t := newOSSTarget(tokenBody, initBody)
 
 	// Step 1: 初始化分片上传，加 sequential 参数使 OSS 返回不带 -N 后缀的 ETag
@@ -141,5 +143,7 @@ func (d *Open115) ossUploadMultipart(ctx context.Context, tokenBody, initBody []
 		return nil, fmt.Errorf("完成分片上传失败: %w", err)
 	}
 
+	logs.Info(logs.ModuleCloud, "OSS分片上传完成", "file", fileName, "大小", fileSize,
+		"分片数", totalParts, "耗时", time.Since(t0))
 	return completeResult.CallbackResult, nil
 }

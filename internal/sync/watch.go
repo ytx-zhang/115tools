@@ -137,11 +137,8 @@ func (l *instance) processFolders(ctx context.Context, folders []string) []strin
 			}
 			continue
 		}
-		fid := l.env.DB.GetFid(f)
-		if fid == "" {
-			var err error
-			fid, err = AddCloudFolder(ctx, l.env, f)
-			if err != nil {
+		if l.env.DB.GetFid(f) == "" {
+			if _, err := AddCloudFolder(ctx, l.env, f); err != nil {
 				logs.Error(logs.ModuleSync, "自动创建云端目录失败，跳过", "路径", f, "错误", err)
 				continue
 			}

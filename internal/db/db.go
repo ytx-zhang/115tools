@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"go.etcd.io/bbolt"
 )
@@ -121,10 +122,12 @@ func (d *DB) GetFid(localPath string) (fid string) {
 func (d *DB) SaveRecord(localPath string, fid string, size int64) {
 	logs.Debug(logs.ModuleDB, "保存记录", "路径", localPath, "FID", fid)
 	val := encodeValue(fid, size)
-	d.boltDB.Update(func(tx *bbolt.Tx) error {
+	if err := d.boltDB.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		return b.Put([]byte(localPath), val)
-	})
+	}); err != nil {
+		logs.Error(logs.ModuleDB, "保存记录失败", "路径", localPath, "FID", fid, "错误信息", err)
+	}
 }
 
 // deleteTree 在单个写事务内删除前缀为 prefix 的全部记录（含 prefix 自身与所有后代）。
@@ -153,6 +156,7 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 	if len(fPaths) == 0 {
 		return
 	}
+	t0 := time.Now()
 	logs.Info(logs.ModuleDB, "批量清理路径开始", "数量", len(fPaths))
 	err := d.boltDB.Update(func(tx *bbolt.Tx) error {
 		for _, fPath := range fPaths {
@@ -163,13 +167,19 @@ func (d *DB) BatchClearPaths(fPaths []string) {
 		return nil
 	})
 	if err != nil {
-		logs.Error(logs.ModuleDB, "批量清理失败", "数量", len(fPaths), "错误信息", err)
+		logs.Error(logs.ModuleDB, "批量清理失败", "数量", len(fPaths), "错误信息", err, "耗时", time.Since(t0))
+		return
 	}
+	logs.Info(logs.ModuleDB, "批量清理路径完成", "数量", len(fPaths), "耗时", time.Since(t0))
 }
 
 // FindOrphanSubdirs 扫描 currentPath 下所有条目，返回「子项仍在但目录 entry 已丢失」的子目录完整路径。
 // 用于检测深层孤儿：子目录被删后其目录 DB entry 未同步清理，导致子文件（Fonts.7z 等）永久残留。
 func (d *DB) FindOrphanSubdirs(currentPath string) []string {
+	t0 := time.Now()
+	defer func() {
+		logs.Info(logs.ModuleDB, "查找孤儿子目录完成", "路径", currentPath, "耗时", time.Since(t0))
+	}()
 	logs.Info(logs.ModuleDB, "查找孤儿子目录", "路径", currentPath)
 	prefix := currentPath
 	if !strings.HasSuffix(prefix, "/") {
@@ -289,7 +299,11 @@ func (d *DB) ScanChildren(ctx context.Context, workPath string) []Child {
 // 用于「删除目录」时先把有价值的视频挪到临时目录，再让目录进回收站。
 // 实现：bbolt 前缀扫描 dirPath/ 下全部后代 key，按 .strm 后缀过滤并解出 fid；
 // 不跳过深层目录（要的是整棵子树），故不用 ScanChildren 的 0xFF 跳转。
-func (d *DB) ListStrmFids(dirPath string) []string {
+func (d *DB) ListStrmFids(dirPath string) (fids []string) {
+	t0 := time.Now()
+	defer func() {
+		logs.Info(logs.ModuleDB, "列出Strm链接完成", "路径", dirPath, "数量", len(fids), "耗时", time.Since(t0))
+	}()
 	logs.Info(logs.ModuleDB, "列出Strm链接", "路径", dirPath)
 	prefix := dirPath
 	if !strings.HasSuffix(prefix, "/") {
@@ -297,7 +311,6 @@ func (d *DB) ListStrmFids(dirPath string) []string {
 	}
 	prefixBytes := []byte(prefix)
 
-	var fids []string
 	d.boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		if b == nil {

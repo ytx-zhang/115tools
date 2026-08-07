@@ -8,6 +8,7 @@ import (
 	"github.com/ytx-zhang/115tools/internal/logs"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // 离线下载（云下载）相关接口封装。
@@ -25,7 +26,8 @@ type OfflineAddResult struct {
 // AddOfflineTasks 批量添加离线下载链接（http/https/magnet/ed2k），
 // 保存到 saveDirID 对应的云端目录（"0" 表示根目录）。
 func (d *Open115) AddOfflineTasks(ctx context.Context, urls []string, saveDirID string) ([]OfflineAddResult, error) {
-	logs.Info(logs.ModuleCloud, "添加离线下载任务", "count", len(urls), "save_dir", saveDirID)
+	t0 := time.Now()
+	logs.Info(logs.ModuleCloud, "添加离线下载任务", "数量", len(urls), "目标目录", saveDirID)
 	res, err := doAPI[[]OfflineAddResult](ctx, d, "POST", "/open/offline/add_task_urls",
 		withForm(map[string]string{
 			"urls":       strings.Join(urls, "\n"),
@@ -33,9 +35,10 @@ func (d *Open115) AddOfflineTasks(ctx context.Context, urls []string, saveDirID 
 		}),
 	)
 	if err != nil {
-		logs.Error(logs.ModuleCloud, "添加离线下载任务失败", "count", len(urls), "err", err)
+		logs.Error(logs.ModuleCloud, "添加离线下载任务失败", "数量", len(urls), "err", err, "耗时", time.Since(t0))
 		return nil, err
 	}
+	logs.Info(logs.ModuleCloud, "添加离线下载任务完成", "数量", len(urls), "目标目录", saveDirID, "耗时", time.Since(t0))
 	return res.Data, nil
 }
 
@@ -76,7 +79,8 @@ func (d *Open115) OfflineTaskList(ctx context.Context, page int) (*OfflineTaskPa
 
 // DeleteOfflineTask 删除单个云下载任务；deleteFiles 为 true 时同时删除已下载的源文件。
 func (d *Open115) DeleteOfflineTask(ctx context.Context, infoHash string, deleteFiles bool) error {
-	logs.Info(logs.ModuleCloud, "删除离线任务", "info_hash", infoHash, "delete_files", deleteFiles)
+	t0 := time.Now()
+	logs.Info(logs.ModuleCloud, "删除离线任务", "info_hash", infoHash, "删除源文件", deleteFiles)
 	form := map[string]string{
 		"info_hash":       infoHash,
 		"del_source_file": "0",
@@ -88,22 +92,27 @@ func (d *Open115) DeleteOfflineTask(ctx context.Context, infoHash string, delete
 		withForm(form),
 	)
 	if err != nil {
-		logs.Error(logs.ModuleCloud, "删除离线任务失败", "info_hash", infoHash, "err", err)
+		logs.Error(logs.ModuleCloud, "删除离线任务失败", "info_hash", infoHash, "err", err, "耗时", time.Since(t0))
+		return err
 	}
-	return err
+	logs.Info(logs.ModuleCloud, "删除离线任务完成", "info_hash", infoHash, "耗时", time.Since(t0))
+	return nil
 }
 
 // ClearOfflineTasks 批量清除任务。
 // flag：0 已完成，1 全部，2 失败，3 进行中，4 已完成且删源文件，5 全部且删源文件。
 func (d *Open115) ClearOfflineTasks(ctx context.Context, flag int) error {
+	t0 := time.Now()
 	logs.Info(logs.ModuleCloud, "批量清除离线任务", "flag", flag)
 	_, err := doAPI[any](ctx, d, "POST", "/open/offline/clear_task",
 		withForm(map[string]string{"flag": strconv.Itoa(flag)}),
 	)
 	if err != nil {
-		logs.Error(logs.ModuleCloud, "批量清除离线任务失败", "flag", flag, "err", err)
+		logs.Error(logs.ModuleCloud, "批量清除离线任务失败", "flag", flag, "err", err, "耗时", time.Since(t0))
+		return err
 	}
-	return err
+	logs.Info(logs.ModuleCloud, "批量清除离线任务完成", "flag", flag, "耗时", time.Since(t0))
+	return nil
 }
 
 // OfflineQuota 云下载配额信息。

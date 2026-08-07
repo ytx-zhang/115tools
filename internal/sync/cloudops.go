@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/ytx-zhang/115tools/internal/db"
 	"github.com/ytx-zhang/115tools/internal/logs"
@@ -47,6 +48,7 @@ func (l *instance) cloudCleanTask(ctx context.Context, fPaths []string, workPath
 	if len(fPaths) == 0 {
 		return nil
 	}
+	t0 := time.Now()
 
 	var moveFids []string
 	var deleteFids []string
@@ -76,8 +78,6 @@ func (l *instance) cloudCleanTask(ctx context.Context, fPaths []string, workPath
 		}
 	}
 
-	joined := strings.Join(fPaths, ",")
-
 	if len(moveFids) > 0 {
 		for start := 0; start < len(moveFids); start += moveChunk {
 			end := min(start+moveChunk, len(moveFids))
@@ -94,7 +94,8 @@ func (l *instance) cloudCleanTask(ctx context.Context, fPaths []string, workPath
 		}
 	}
 
-	logs.Info(logs.ModuleSync, "清理数据库索引", "路径", joined, "数量", len(fPaths))
+	// 目标太多（批量清理）只显示父目录与数量，避免逗号路径串刷屏
+	logs.Info(logs.ModuleSync, "清理数据库索引", "目标目录", workPath, "数量", len(fPaths), "耗时", time.Since(t0))
 	l.env.DB.BatchClearPaths(fPaths)
 
 	return nil
@@ -106,11 +107,11 @@ func (l *instance) cloudCleanTask(ctx context.Context, fPaths []string, workPath
 func runCloudSync(ctx context.Context, env *Env, task *Task) {
 	start := time.Now()
 	defer func() {
-		logs.Info(logs.ModuleSync, "云端同步任务结束", "总数", task.Total(), "耗时", time.Since(start))
+		logs.Info(logs.ModuleSync, "云端同步任务结束", "路径", env.Paths.SyncPath, "总数", task.Total(), "耗时", time.Since(start))
 	}()
-	logs.Info(logs.ModuleSync, "开始同步云端文件...")
+	logs.Info(logs.ModuleSync, "开始同步云端文件", "路径", env.Paths.SyncPath)
 
-	_ = env.WalkCloud(ctx, env.Paths.SyncPath, env.Paths.SyncFid, Visitor{
+	err := env.WalkCloud(ctx, env.Paths.SyncPath, env.Paths.SyncFid, Visitor{
 		SkipByCount: true,
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			if env.DB.GetFid(path) == "" {
@@ -119,7 +120,8 @@ func runCloudSync(ctx context.Context, env *Env, task *Task) {
 					return false, nil
 				}
 				env.DB.SaveRecord(path, fid, db.SizeDir)
-				logs.Info(logs.ModuleSync, "创建本地目录", "路径", path)
+				// 云端遍历期间逐目录创建 → 高频，Debug
+				logs.Debug(logs.ModuleSync, "创建本地目录", "路径", path)
 			}
 			return true, nil
 		},
@@ -147,4 +149,8 @@ func runCloudSync(ctx context.Context, env *Env, task *Task) {
 			return nil
 		},
 	}, nil)
+	// WalkCloud 返回的错误仅来自致命失败（拉列表失败/上下文取消），取消不算错误
+	if err != nil && context.Cause(ctx) != nil && !errors.Is(context.Cause(ctx), context.Canceled) {
+		logs.Error(logs.ModuleSync, "云端同步遍历失败", "路径", env.Paths.SyncPath, "错误", err)
+	}
 }

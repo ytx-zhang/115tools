@@ -52,7 +52,7 @@ func (b *Broker) Initialize() error {
 		msg := "配置不完整：" + strings.Join(status.Missing, "、")
 		b.setInitErr(msg)
 		b.publishStatus()
-		logs.Info(logs.ModuleSystem, "初始化失败", "原因", msg)
+		logs.Error(logs.ModuleSystem, "初始化失败", "原因", msg)
 		return fmt.Errorf("配置不完整: %v", status.Missing)
 	}
 
@@ -63,7 +63,7 @@ func (b *Broker) Initialize() error {
 		msg := "登录凭证验证失败: " + err.Error()
 		b.setInitErr(msg)
 		b.publishStatus()
-		logs.Info(logs.ModuleSystem, "初始化失败", "原因", msg)
+		logs.Error(logs.ModuleSystem, "初始化失败", "原因", msg)
 		return fmt.Errorf("%s", msg)
 	}
 	logs.Info(logs.ModuleSystem, "登录凭证验证通过", "耗时", time.Since(start).String())
@@ -97,7 +97,9 @@ func (b *Broker) ApplyConfig(ctx context.Context, req config.Editable) error {
 			return fmt.Errorf("凭证验证失败: %w", err)
 		}
 	}
-	b.cfg.Update(req)
+	if err := b.cfg.Update(req); err != nil {
+		return fmt.Errorf("保存配置失败: %w", err)
+	}
 
 	// 路径变更 → Broker 清理旧 DB 记录
 	if oldSyncPath != "" && oldSyncPath != b.cfg.SyncPath {

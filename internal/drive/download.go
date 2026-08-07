@@ -101,6 +101,7 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 
 	// 单飞：同一 key 的并发请求合并为一次 115 调用，所有等待者共享同一份结果。
 	ch := s.sf.DoChan(cacheKey, func() (any, error) {
+		t0 := time.Now()
 		info, err := s.api.GetDownloadUrl(r.Context(), pickCode, ua)
 		if err != nil {
 			logs.Error(logs.ModuleDrive, "获取直链失败", "err", err)
@@ -123,7 +124,8 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 		}
 
 		s.storeCache(cacheKey, info.Url, info.Name, expiration)
-		logs.Info(logs.ModuleDrive, "获取新地址", "名称", info.Name, "UA", ua, "缓存时长", expiration.Round(time.Second).String())
+		logs.Info(logs.ModuleDrive, "获取新地址", "名称", info.Name, "UA", ua,
+			"缓存时长", expiration.Round(time.Second).String(), "耗时", time.Since(t0))
 		return &cacheItem{url: info.Url, name: info.Name}, nil
 	})
 	select {
@@ -258,17 +260,19 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 		}
 
 		w.WriteHeader(resp.StatusCode) // 原样透传 200 / 206
+		streamStart := time.Now()
 		written, copyErr := io.Copy(w, resp.Body)
 		resp.Body.Close()
 		if copyErr != nil {
 			if r.Context().Err() != nil {
 				return // 客户端断开，正常
 			}
-			logs.Debug(logs.ModuleDrive, "透传中断", "名称", item.name, "err", copyErr)
+			logs.Debug(logs.ModuleDrive, "透传中断", "名称", item.name, "err", copyErr, "耗时", time.Since(streamStart))
 			return
 		}
-		logs.Info(logs.ModuleDrive, "透传完成", "名称", item.name,
-			"status", resp.StatusCode, "字节数", written, "range", rng)
+		// 每个分片一条 → 高频，Debug 即可（nginx 切片下几十上百条/视频）
+		logs.Debug(logs.ModuleDrive, "透传完成", "名称", item.name,
+			"status", resp.StatusCode, "字节数", written, "range", rng, "耗时", time.Since(streamStart))
 		return
 	}
 

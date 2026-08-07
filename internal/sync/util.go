@@ -66,11 +66,13 @@ func IsVideoExt(path string) bool {
 func ExtractPickcode(strmPath string) (pickcode string, fid string) {
 	data, err := os.ReadFile(strmPath)
 	if err != nil {
+		logs.Debug(logs.ModuleSync, "读取strm文件失败", "文件", strmPath, "错误", err)
 		return "", ""
 	}
 	raw := strings.TrimSpace(strings.TrimPrefix(string(data), "\xEF\xBB\xBF"))
 	u, err := url.Parse(raw)
 	if err != nil {
+		logs.Debug(logs.ModuleSync, "strm内容解析失败", "文件", strmPath, "错误", err)
 		return "", ""
 	}
 	return u.Query().Get("pickcode"), u.Query().Get("fid")
@@ -117,6 +119,7 @@ func ProcessCloudFile(path string, e Entry) (savePath string, saveSize int64) {
 }
 
 // FetchAndSave 按文件类型把云端文件落地：视频写 .strm 索引文件，普通文件真实下载。
+// 下载文件/生成 strm 是核心任务，即使逐文件高频也保持 Info（重要操作必须可见）。
 func (e *Env) FetchAndSave(ctx context.Context, pickCode, fid, savePath string, isVideo bool) error {
 	if isVideo {
 		t0 := time.Now()
@@ -171,7 +174,9 @@ func (e *Env) DownloadFile(ctx context.Context, pickcode, localPath string) erro
 	defer out.Close()
 
 	if _, copyErr := io.Copy(out, resp.Body); copyErr != nil {
-		os.Remove(localPath)
+		if rmErr := os.Remove(localPath); rmErr != nil {
+			logs.Debug(logs.ModuleSync, "清理下载失败的残留文件失败", "文件", localPath, "错误", rmErr)
+		}
 		return copyErr
 	}
 	return nil

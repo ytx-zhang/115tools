@@ -5,6 +5,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"github.com/ytx-zhang/115tools/internal/logs"
 	"os"
 	"path/filepath"
@@ -16,7 +17,7 @@ import (
 
 // runStrmGen 执行一轮 STRM 生成任务（在 Task 的协程中运行）。
 func runStrmGen(ctx context.Context, env *Env, task *Task) {
-	logs.Info(logs.ModuleStrm, "开始生成strm文件...")
+	logs.Info(logs.ModuleStrm, "开始生成strm文件", "路径", env.Paths.StrmPath)
 	start := time.Now()
 	defer func() {
 		logs.Info(logs.ModuleStrm, "生成strm任务结束", "总数", task.Total(), "耗时", time.Since(start))
@@ -45,7 +46,7 @@ func runStrmGen(ctx context.Context, env *Env, task *Task) {
 		return
 	}
 
-	_ = env.WalkCloud(ctx, env.Paths.StrmPath, env.Paths.StrmFid, Visitor{
+	if err := env.WalkCloud(ctx, env.Paths.StrmPath, env.Paths.StrmFid, Visitor{
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			appendMoveFid(path, fid)
 			if err := os.MkdirAll(path, 0755); err != nil {
@@ -69,7 +70,9 @@ func runStrmGen(ctx context.Context, env *Env, task *Task) {
 			task.AddCompleted(1)
 			return nil
 		},
-	}, nil)
+	}, nil); err != nil && !errors.Is(err, context.Canceled) {
+		logs.Error(logs.ModuleStrm, "云端遍历失败", "路径", env.Paths.StrmPath, "错误", err)
+	}
 
 	if err := context.Cause(ctx); err != nil {
 		logs.Error(logs.ModuleStrm, "生成strm任务被取消", "取消信息", err)
@@ -94,7 +97,8 @@ func moveStrmPathFiles(ctx context.Context, env *Env, fids []string) {
 // regenerateStrmTree 重写某棵本地同步树下的所有 .strm 索引（StrmUrl 变更后调用，
 // 纯本地 IO，ExtractPickcode 反向解析旧的 pickcode/fid）。两棵树（SyncPath+StrmPath）并发。
 func regenerateStrmTree(ctx context.Context, env *Env, root string) {
-	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+	t0 := time.Now()
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil || ctx.Err() != nil {
 			return nil
 		}
@@ -114,4 +118,9 @@ func regenerateStrmTree(ctx context.Context, env *Env, root string) {
 		env.DB.SaveRecord(p, fid, time.Now().Unix())
 		return nil
 	})
+	if err != nil && ctx.Err() == nil {
+		logs.Error(logs.ModuleStrm, "重写strm遍历失败", "路径", root, "错误", err)
+		return
+	}
+	logs.Info(logs.ModuleStrm, "重写strm完成", "路径", root, "耗时", time.Since(t0))
 }

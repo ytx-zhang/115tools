@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/ytx-zhang/115tools/internal/logs"
 )
@@ -31,6 +33,7 @@ type downloadItem struct {
 // ⚠️ 115 在 pickcode 无效/文件不可用时可能返回 {"state":true,"data":[]}（空数组），
 // 而非常规的 {"fid":{...}} 对象，故先用 json.RawMessage 承接再手动解析。
 func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*DownloadUrlInfo, error) {
+	t0 := time.Now()
 	logs.Info(logs.ModuleCloud, "获取下载直链", "pickcode", pickCode)
 	res, err := doAPI[json.RawMessage](ctx, d, "POST", "/open/ufile/downurl",
 		withHeader("User-Agent", ua),
@@ -48,6 +51,8 @@ func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*Dow
 		return nil, fmt.Errorf("未提取到下载信息, 原始数据: %s", truncateBody(res.Data))
 	}
 	for fid, item := range data {
+		logs.Info(logs.ModuleCloud, "获取下载直链完成", "pickcode", pickCode,
+			"名称", item.FileName, "耗时", time.Since(t0))
 		return &DownloadUrlInfo{
 			Fid:  fid,
 			Url:  item.Url.Url,
@@ -59,6 +64,7 @@ func (d *Open115) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*Dow
 
 // AddFolder 在云端目录 pid 下创建子目录 name，返回新目录的 FID。
 func (d *Open115) AddFolder(ctx context.Context, pid, name string) (fid string, err error) {
+	t0 := time.Now()
 	logs.Info(logs.ModuleCloud, "云端创建目录", "name", name, "pid", pid)
 	res, err := doAPI[struct {
 		FileId string `json:"file_id"`
@@ -66,41 +72,59 @@ func (d *Open115) AddFolder(ctx context.Context, pid, name string) (fid string, 
 		withForm(map[string]string{"pid": pid, "file_name": name}),
 	)
 	if err != nil {
-		logs.Error(logs.ModuleCloud, "云端创建目录失败", "name", name, "err", err)
+		logs.Error(logs.ModuleCloud, "云端创建目录失败", "name", name, "err", err, "耗时", time.Since(t0))
 		return
 	}
 	fid = res.Data.FileId
+	logs.Info(logs.ModuleCloud, "云端创建目录完成", "name", name, "fid", fid, "耗时", time.Since(t0))
 	return
 }
 
 // MoveFile 把云端文件/目录移动到目标目录 cid。
 // fid 支持逗号分隔的多个 ID（批量移动）。
 func (d *Open115) MoveFile(ctx context.Context, fid, cid string) error {
-	logs.Info(logs.ModuleCloud, "云端移动文件", "fid", fid, "cid", cid)
+	t0 := time.Now()
+	if n := strings.Count(fid, ",") + 1; n > 1 {
+		// 目标太多：只显示目标目录与数量，避免逗号串刷屏
+		logs.Info(logs.ModuleCloud, "云端批量移动", "数量", n, "目标目录", cid)
+	} else {
+		logs.Info(logs.ModuleCloud, "云端移动文件", "fid", fid, "目标目录", cid)
+	}
 	_, err := doAPI[any](ctx, d, "POST", "/open/ufile/move",
 		withForm(map[string]string{"file_ids": fid, "to_cid": cid}),
 	)
 	if err != nil {
-		logs.Error(logs.ModuleCloud, "云端移动文件失败", "fid", fid, "err", err)
+		logs.Error(logs.ModuleCloud, "云端移动文件失败", "数量", strings.Count(fid, ",")+1, "目标目录", cid, "err", err, "耗时", time.Since(t0))
+		return err
 	}
-	return err
+	logs.Info(logs.ModuleCloud, "云端移动完成", "数量", strings.Count(fid, ",")+1, "目标目录", cid, "耗时", time.Since(t0))
+	return nil
 }
 
 // DeleteFile 删除云端文件/目录。fid 支持逗号分隔的多个 ID（批量删除）。
 func (d *Open115) DeleteFile(ctx context.Context, fid string) error {
-	logs.Info(logs.ModuleCloud, "云端删除文件", "fid", fid)
+	t0 := time.Now()
+	if n := strings.Count(fid, ",") + 1; n > 1 {
+		// 目标太多：只显示数量，避免逗号串刷屏
+		logs.Info(logs.ModuleCloud, "云端批量删除", "数量", n)
+	} else {
+		logs.Info(logs.ModuleCloud, "云端删除文件", "fid", fid)
+	}
 	_, err := doAPI[any](ctx, d, "POST", "/open/ufile/delete",
 		withForm(map[string]string{"file_ids": fid}),
 	)
 	if err != nil {
-		logs.Error(logs.ModuleCloud, "云端删除文件失败", "fid", fid, "err", err)
+		logs.Error(logs.ModuleCloud, "云端删除文件失败", "数量", strings.Count(fid, ",")+1, "err", err, "耗时", time.Since(t0))
+		return err
 	}
-	return err
+	logs.Info(logs.ModuleCloud, "云端删除完成", "数量", strings.Count(fid, ",")+1, "耗时", time.Since(t0))
+	return nil
 }
 
 // UpdateFile 重命名云端文件/目录，返回改名后的实际文件名
 // （115 可能只改主名不动扩展名，调用方需按需二次修正）。
 func (d *Open115) UpdateFile(ctx context.Context, fid, name string) (newName string, err error) {
+	t0 := time.Now()
 	logs.Info(logs.ModuleCloud, "云端重命名", "fid", fid, "name", name)
 	res, err := doAPI[struct {
 		FileName string `json:"file_name"`
@@ -108,10 +132,11 @@ func (d *Open115) UpdateFile(ctx context.Context, fid, name string) (newName str
 		withForm(map[string]string{"file_id": fid, "file_name": name}),
 	)
 	if err != nil {
-		logs.Error(logs.ModuleCloud, "云端重命名失败", "fid", fid, "err", err)
+		logs.Error(logs.ModuleCloud, "云端重命名失败", "fid", fid, "name", name, "err", err, "耗时", time.Since(t0))
 		return
 	}
 	newName = res.Data.FileName
+	logs.Info(logs.ModuleCloud, "云端重命名完成", "fid", fid, "name", newName, "耗时", time.Since(t0))
 	return
 }
 
@@ -123,14 +148,20 @@ type DirInfo struct {
 }
 
 // GetDirInfo 按路径查询云端目录信息。
+// 遍历云端时每目录调用一次（SkipByCount 优化），属高频 → Debug。
 func (d *Open115) GetDirInfo(ctx context.Context, path string) (*DirInfo, error) {
-	logs.Info(logs.ModuleCloud, "查询云端目录信息", "path", path)
+	t0 := time.Now()
+	logs.Debug(logs.ModuleCloud, "查询云端目录信息", "path", path)
 	res, err := doAPI[DirInfo](ctx, d, "GET", "/open/folder/get_info",
 		withQuery(map[string]string{"path": path}),
 	)
 	if err != nil {
+		// 失败常由调用方回退全量同步（walk.go）或终止初始化（env.go），故只打 Warn
+		logs.Warn(logs.ModuleCloud, "查询云端目录信息失败", "path", path, "err", err, "耗时", time.Since(t0))
 		return nil, err
 	}
+	logs.Debug(logs.ModuleCloud, "查询云端目录信息完成", "path", path,
+		"FID", res.Data.Fid, "文件数", res.Data.FileCount, "目录数", res.Data.FolderCount, "耗时", time.Since(t0))
 	return &res.Data, nil
 }
 
@@ -146,8 +177,10 @@ type FileInfo struct {
 
 // GetFileList 拉取云端目录 cid 下的全部子项（自动处理分页，每页 1150 条）。
 // 注意：仅返回 Aid == "1" 的条目（过滤掉非常规挂载项）。
+// 遍历云端时每目录调用一次，属高频 → Debug。
 func (d *Open115) GetFileList(ctx context.Context, cid string) ([]FileInfo, error) {
-	logs.Info(logs.ModuleCloud, "拉取云端文件列表", "cid", cid)
+	t0 := time.Now()
+	logs.Debug(logs.ModuleCloud, "拉取云端文件列表", "cid", cid)
 	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
@@ -181,6 +214,7 @@ func (d *Open115) GetFileList(ctx context.Context, cid string) ([]FileInfo, erro
 		req.SetResult(&res)
 
 		if _, err := req.Get("/open/ufile/files"); err != nil {
+			logs.Error(logs.ModuleCloud, "拉取云端文件列表失败", "cid", cid, "err", err, "耗时", time.Since(t0))
 			return nil, err
 		}
 		if offset == 0 && res.Count > 0 {
@@ -213,5 +247,6 @@ func (d *Open115) GetFileList(ctx context.Context, cid string) ([]FileInfo, erro
 			return nil, err
 		}
 	}
+	logs.Debug(logs.ModuleCloud, "拉取云端文件列表完成", "cid", cid, "数量", len(allFiles), "耗时", time.Since(t0))
 	return allFiles, nil
 }

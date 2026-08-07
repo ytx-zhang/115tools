@@ -24,7 +24,7 @@ func (l *instance) FullScan(ctx context.Context) {
 		return
 	}
 	start := time.Now()
-	logs.Info(logs.ModuleSync, "开始全量本地扫描...")
+	logs.Info(logs.ModuleSync, "开始全量本地扫描", "路径", l.env.Paths.SyncPath)
 	// 深层孤儿检测：递归扫描前一次性清理（每个全量扫描周期只跑一次，不在 scanDir 递归体内重复）。
 	// 孤儿记录对应的云端文件已在父目录删除时清理过，这里仅清除 DB 脏记录无需再调云端 API。
 	if orphans := l.env.DB.FindOrphanSubdirs(l.env.Paths.SyncPath); len(orphans) > 0 {
@@ -32,17 +32,22 @@ func (l *instance) FullScan(ctx context.Context) {
 		l.env.DB.BatchClearPaths(orphans)
 	}
 	l.syncDir(ctx, l.env.Paths.SyncPath, true)
-	logs.Info(logs.ModuleSync, "全量本地扫描完成", "耗时", time.Since(start).String())
+	logs.Info(logs.ModuleSync, "全量本地扫描完成", "路径", l.env.Paths.SyncPath, "耗时", time.Since(start).String())
 }
 
 // syncDir 同步一个目录：扫描差异 → 投递待上传文件到队列（异步）。幂等。
 // recursive=true 递归子树（全量）；false 只扫直属子项（监控）。
+// 目录级变更触发频繁 → 完成日志用 Debug。
 func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bool) {
+	start := time.Now()
+	uploaded := 0
+	defer func() {
+		logs.Debug(logs.ModuleSync, "同步本地目录", "目录", currentPath, "上传文件", uploaded, "耗时", time.Since(start))
+	}()
 	uploadPaths := l.scanDir(ctx, currentPath, recursive)
 	if len(uploadPaths) == 0 {
 		return
 	}
-	uploaded := 0
 	for _, fPath := range uploadPaths {
 		if err := ctx.Err(); err != nil {
 			break
@@ -55,7 +60,6 @@ func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bo
 		l.uploadOneFile(ctx, cid, fPath)
 		uploaded++
 	}
-	logs.Info(logs.ModuleSync, "同步本地目录", "目录", currentPath, "上传文件", uploaded)
 }
 
 // scanDir 对比数据库记录与本地实际内容，返回待上传文件列表。

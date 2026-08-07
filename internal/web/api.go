@@ -304,6 +304,7 @@ func (s *Server) handleOfflineQuota(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
+	t0 := time.Now()
 	var req struct {
 		Urls     string `json:"urls"`
 		SavePath string `json:"save_path"`
@@ -341,11 +342,12 @@ func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 			added++
 		}
 	}
-	logs.Info(logs.ModuleWeb, "添加离线任务", "提交", len(urls), "成功", added, "目录ID", dirID)
+	logs.Info(logs.ModuleWeb, "添加离线任务", "提交", len(urls), "成功", added, "目标目录", dirID, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "results": results})
 }
 
 func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
+	t0 := time.Now()
 	if err := r.ParseMultipartForm(_torrentMaxSize); err != nil {
 		writeErr(w, http.StatusBadRequest, "解析上传数据失败: %v", err)
 		return
@@ -394,7 +396,7 @@ func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 
 	logs.Info(logs.ModuleWeb, "添加种子任务",
 		"文件名", hdr.Filename, "大小", len(data),
-		"info_hash", result.InfoHash, "保存路径", savePath, "成功", result.State)
+		"info_hash", result.InfoHash, "保存路径", savePath, "成功", result.State, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"added":   boolToInt(result.State),
 		"results": []drive.OfflineAddResult{*result},
@@ -409,6 +411,7 @@ func boolToInt(b bool) int {
 }
 
 func (s *Server) handleOfflineDelete(w http.ResponseWriter, r *http.Request) {
+	t0 := time.Now()
 	var req struct {
 		InfoHash    string `json:"info_hash"`
 		DeleteFiles bool   `json:"delete_files"`
@@ -425,11 +428,12 @@ func (s *Server) handleOfflineDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "删除任务失败: %v", err)
 		return
 	}
-	logs.Info(logs.ModuleWeb, "删除离线任务", "info_hash", req.InfoHash, "删除源文件", req.DeleteFiles)
+	logs.Info(logs.ModuleWeb, "删除离线任务", "info_hash", req.InfoHash, "删除源文件", req.DeleteFiles, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleOfflineClear(w http.ResponseWriter, r *http.Request) {
+	t0 := time.Now()
 	var req struct {
 		Flag int `json:"flag"`
 	}
@@ -445,6 +449,6 @@ func (s *Server) handleOfflineClear(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "清除任务失败: %v", err)
 		return
 	}
-	logs.Info(logs.ModuleWeb, "批量清除任务", "flag", req.Flag)
+	logs.Info(logs.ModuleWeb, "批量清除任务", "flag", req.Flag, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

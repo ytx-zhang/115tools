@@ -65,8 +65,8 @@ func main() {
 
 	// 5. 统一初始化（配置校验 → Token 验证 → 同步器重建）
 	if err := br.Initialize(); err != nil {
-		logs.Warn(logs.ModuleSystem, "初始化未完成", "原因", err)
-		// 不退出——管理面板仍可用，初始化错误经 SSE 推前端展示
+		// 具体错误 broker 已打 Error；这里仅提示程序不退出、面板仍可用
+		logs.Info(logs.ModuleSystem, "初始化未完成，管理面板仍可用", "原因", err)
 	}
 
 	// 6. 优雅关闭
