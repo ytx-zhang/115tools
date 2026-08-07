@@ -7,8 +7,9 @@
 - **本地文件自动同步** — 监听本地目录变化，自动上传新增/修改的文件到 115 网盘，视频文件上传后自动转为 `.strm` 直链
 - **云端文件同步** — 检测云端新增文件，下载到本地或生成 `.strm` 直链
 - **STRM 批量生成** — 从指定 115 目录批量生成 `.strm` 文件，配合 Emby 实现网盘视频直链播放
+- **离线下载** — 添加 http/magnet/ed2k 链接或上传种子文件，直接下载到 115 网盘指定目录
 - **Web 管理面板** — 实时进度展示、一键触发同步/生成任务
-- **定时全量同步** — 每 12 小时自动执行本地 + 云端全量同步
+- **定时全量同步** — 定时自动执行本地 + 云端全量同步（默认 12 小时，可在设置页调整间隔或关闭）
 
 ## 架构
 
@@ -26,19 +27,20 @@
 模块路径：`github.com/ytx-zhang/115tools`。采用主流 `cmd/` + `internal/` 布局：可执行入口收敛到 `cmd/115tools`，应用私有包全部收进 `internal/`（收紧封装边界，避免被外部模块引用）。
 
 ```
-cmd/115tools/main.go        # 纯装配：日志管道、HTTP 服务、DB、Runner、面板注册、优雅退出
+cmd/115tools/main.go        # 纯装配：日志管道、HTTP 服务、DB、Broker 编排、优雅退出
 internal/
 ├── config/                 # 配置文件读写（缺失自动生成模板、必填项校验、就绪判定）
 ├── db/                     # bbolt 本地索引（路径→云端FID+大小）与批量写入器
 ├── drive/                  # 115 API 客户端（open115/token/file_api/upload_api/offline/oss_upload/download）
-├── event/                  # 泛型事件流原语 + 日志广播特化层（slog 捕获进内存缓冲供面板 SSE）
-├── sync/                   # 同步系统根包（Syncer 门面 + 单次运行态 + 本地/云端/strm 三模块合一）
+├── init/                   # Broker 中间件：聚合 config/db/sync/logs，统一初始化编排与前后端交互
+├── logs/                   # 结构化日志管道（slog 分流 stdout/stderr + 环形缓冲供面板 SSE）
+├── sync/                   # 同步系统根包（Syncer + 本地/云端/strm 三模块 + 文件监听器）
 └── web/                    # 管理面板 HTTP 层（鉴权/配置/任务触发/SSE 推送/静态资源）
 ```
 
 本地构建：`go build ./cmd/115tools`（产物可 `-o server`，与 Dockerfile 一致）。
 
-依赖方向单向：`web` → `sync`/`drive`/`config`；`sync` → `drive`/`config`/`db`/`event`；`drive` 不反向依赖 sync；`config` 不可 import sync（否则成环）。
+依赖方向单向：`web` → `init` → `sync` → `config`/`drive`/`db`/`logs`；`drive` 不反向依赖 `sync`；`config` 不可 import `sync`（否则成环）。
 
 ## 目录命名规则（重要）
 
@@ -158,31 +160,27 @@ temp_path: /Temp
 # STRM 文件中的直链地址（Emby 可访问的地址）
 strm_url: http://your-server:8080
 
+# 离线下载上传种子的云端临时目录（可选，留空则用 temp_path）
+torrent_path: /Temp
+
+# 定时全量同步（cron 段）：enabled 是否启用（默认开启），interval_hours 间隔小时（0 表示默认 12）
+cron:
+  enabled: true
+  interval_hours: 12
+
 # 本地同步静默窗口（秒）：监听事件后等待该时长内无新事件才执行同步，
-# 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 15 秒。
+# 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 5 秒（上限 10 秒）。
 debounce_seconds: 5
 
-# 视频文件扩展名白名单（命中且体积达阈值按视频处理，上传后本地替换为 .strm；
-# 仅影响本地上传识别，云端/STRM 用 115 自身的视频标记）。留空则用内置默认；亦可在 Web 设置页修改。
+# 视频文件扩展名白名单（命中且体积达 10MB 阈值按视频处理，上传后本地替换为 .strm；
+# 仅影响本地上传识别，云端/STRM 用 115 自身的视频标记）。留空则用内置默认 .mp4/.mkv；亦可在 Web 设置页修改。
 video_exts:
   - .mp4
   - .mkv
-  - .avi
-  - .mov
-  - .ts
-  - .flv
-  - .wmv
-  - .m4v
-  - .mpg
-  - .mpeg
-  - .webm
-  - .rmvb
-  - .3gp
-  - .vob
 
 # 上传排除名单（下载器/系统临时文件后缀；整名如 .DS_Store / Thumbs.db 也支持）。
 # 这些文件不上传，且云端已存在的同名项会在同步时被联动清理（进 115 回收站）。
-# 留空则用内置默认；亦可在 Web 设置页修改。
+# 留空则不排除任何文件；亦可在 Web 设置页修改。
 upload_exclude:
   - .part
   - .partial
@@ -210,7 +208,7 @@ token:
 
 ### 上传排除
 
-- **上传排除（`upload_exclude`）**：在本地扫描上传的入口统一拦截，名单里的后缀（或整名，如 `.DS_Store` / `Thumbs.db`）文件不会上传；已误传到云端的同名项会在下次同步（保存该配置后自动触发一次全量扫描，或重启/定时周期）被判定为「本地已删」并清理（进 115 回收站，可恢复）。默认已覆盖常见下载器/系统临时文件：`.part` `.partial` `.aria2` `.crdownload` `.download` `.tmp` `.!qB` `.DS_Store` `Thumbs.db`。
+- **上传排除（`upload_exclude`）**：在本地扫描上传的入口统一拦截，名单里的后缀（或整名，如 `.DS_Store` / `Thumbs.db`）文件不会上传；已误传到云端的同名项会在下次同步（保存该配置后自动触发一次全量扫描，或重启/定时周期）被判定为「本地已删」并清理（进 115 回收站，可恢复）。建议覆盖常见下载器/系统临时文件，如 `.part` `.partial` `.aria2` `.crdownload` `.download` `.tmp` `.!qB` `.DS_Store` `Thumbs.db`；名单留空则不排除任何文件。
 
 ### 启动
 
@@ -230,8 +228,8 @@ docker compose up -d
 |------|------|
 | **登录验证** | 配置 `auth` 后需账号密码登录（Cookie 会话 7 天）；`/download` 始终免验证 |
 | **仪表盘** | 云端同步 / STRM 生成的启停与实时进度；统一日志卡片（全部/信息/警告/错误级别过滤，SSE 推送） |
-| **离线下载** | 添加 http/magnet/ed2k 离线任务、查看进度/配额、删除与批量清除 |
-| **设置** | 在线修改路径、STRM URL、静默窗口、登录凭据、**视频扩展名白名单**、**上传排除名单** 等；保存后实时生效（路径类改动热重载同步器，其余即时生效）；配置不完整时不会启动同步并在面板提示缺失项 |
+| **离线下载** | 添加 http/magnet/ed2k 链接任务、上传种子文件、查看进度/配额、删除与批量清除 |
+| **设置** | 在线修改路径、STRM URL、静默窗口、定时全量同步、登录凭据、**视频扩展名白名单**、**上传排除名单** 等；保存后实时生效（路径类改动热重载同步器，其余即时生效）；配置不完整时不会启动同步并在面板提示缺失项 |
 
 启动后所有路由：
 
@@ -240,12 +238,12 @@ docker compose up -d
 | `GET /` | 管理面板（原生 JS SPA，零框架） |
 | `GET /download` | 内部 302 重定向，供 Emby 播放（**不做登录验证**） |
 | `POST /api/login` · `POST /api/logout` · `GET /api/me` | 会话管理 |
-| `GET /api/status` | SSE 实时任务状态推送 |
-| `GET /api/logs` · `POST /api/logs/clear` | SSE 实时日志推送 / 清空日志缓冲 |
-| `POST /api/task/{sync\|strm}` | 触发任务；`DELETE` 同路由为停止 |
+| `GET /api/logs` · `POST /api/logs/clear` | SSE 实时日志 + 任务状态推送 / 清空日志缓冲 |
+| `POST /api/task/{sync\|strm}` · `DELETE /api/task/{sync\|strm}` | 触发任务 / 停止任务 |
 | `GET /api/config` · `PUT /api/config` | 查看 / 修改配置（改动实时生效） |
-| `GET /api/offline/tasks` · `quota` | 离线任务列表 / 配额 |
-| `POST /api/offline/add` · `delete` · `clear` | 添加 / 删除 / 批量清除离线任务 |
+| `GET /api/offline/tasks` · `GET /api/offline/quota` | 离线任务列表 / 配额 |
+| `POST /api/offline/add` · `POST /api/offline/torrent` | 添加链接任务 / 上传种子任务 |
+| `POST /api/offline/delete` · `POST /api/offline/clear` | 删除任务 / 批量清除任务 |
 
 除 `/`、`/download`、`/api/login`、`/api/me` 与静态资源外，其余接口均需登录（未配置 `auth` 时不校验）。
 
