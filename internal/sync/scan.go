@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,8 +36,9 @@ func (l *instance) FullScan(ctx context.Context) {
 	logs.Info(logs.ModuleSync, "全量本地扫描完成", "路径", l.env.Paths.SyncPath, "耗时", time.Since(start).String())
 }
 
-// syncDir 同步一个目录：扫描差异 → 投递待上传文件到队列（异步）。幂等。
-// recursive=true 递归子树（全量）；false 只扫直属子项（监控）。
+// syncDir 同步一个目录：扫描差异 → 并发上传（信号量限并发）→ 全部完成才返回。幂等。
+// 目录内并发、目录间串行：wg.Wait 保证本目录上传完才返回，调用方（processFolders 串行
+// 遍历一批目录）因此自然「传完一个目录再扫下一个」。recursive=true 时整棵子树视为一个目录。
 // 目录级变更触发频繁 → 完成日志用 Debug。
 func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bool) {
 	start := time.Now()
@@ -48,6 +50,9 @@ func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bo
 	if len(uploadPaths) == 0 {
 		return
 	}
+	// 信号量（uploadSem）限并发：与实例共享，全局上传并发上限保持 uploadWorkerCount。
+	// ctx 取消时不再占槽位，doUpload 也因 ctx.Err() 快速退出，wg.Wait 不会拖住关闭流程。
+	var wg sync.WaitGroup
 	for _, fPath := range uploadPaths {
 		if err := ctx.Err(); err != nil {
 			break
@@ -57,9 +62,19 @@ func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bo
 			logs.Warn(logs.ModuleSync, "无法获取父目录FID", "文件", fPath)
 			continue
 		}
-		l.uploadOneFile(ctx, cid, fPath)
+		wg.Add(1)
 		uploaded++
+		go func(fPath, cid string) {
+			defer wg.Done()
+			select {
+			case l.uploadSem <- struct{}{}:
+				defer func() { <-l.uploadSem }()
+				l.doUpload(ctx, cid, fPath)
+			case <-ctx.Done():
+			}
+		}(fPath, cid)
 	}
+	wg.Wait()
 }
 
 // scanDir 对比数据库记录与本地实际内容，返回待上传文件列表。

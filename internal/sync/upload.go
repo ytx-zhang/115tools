@@ -13,41 +13,8 @@ import (
 	"github.com/ytx-zhang/115tools/internal/drive"
 )
 
-// 本文件实现上传执行层：固定大小的 worker 池 + 两种上传任务（普通文件 / .strm）。
-
-// uploadJob 描述一次上传任务：把本地文件 fPath 上传到云端目录 cid 下。
-type uploadJob struct {
-	cid   string
-	fPath string
-}
-
-// startUploadWorkers 启动 n 个常驻上传 worker，从 uploadJobs 队列消费任务。
-// ctx 取消时所有 worker 退出（挂在实例的 WaitGroup 上）。
-func (l *instance) startUploadWorkers(ctx context.Context, n int) {
-	for range n {
-		go func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case job, ok := <-l.uploadJobs:
-					if !ok {
-						return
-					}
-					l.doUpload(ctx, job.cid, job.fPath)
-				}
-			}
-		}()
-	}
-}
-
-// uploadOneFile 把本地文件加入上传队列，由 worker 池异步执行。ctx 取消时直接丢弃任务。
-func (l *instance) uploadOneFile(ctx context.Context, cid, fPath string) {
-	select {
-	case <-ctx.Done():
-	case l.uploadJobs <- uploadJob{cid: cid, fPath: fPath}:
-	}
-}
+// 本文件实现上传执行层：doUpload（含查重/拦截/分发）与两种上传任务（普通文件 / .strm）。
+// 并发由 syncDir 的信号量（uploadSem）控制，无独立 worker 池。
 
 // alreadyUploaded 查数据库判断是否已上传过（防重复上传产生云端副本）。
 // .strm 存在即完成；普通文件比字节数；视频（IsVideoExt 命中）查同名 .strm：

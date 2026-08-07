@@ -65,10 +65,10 @@ func (s *Syncer) Initialize() (walked bool, err error) {
 	}
 
 	inst := &instance{
-		env:        env,
-		uploadJobs: make(chan uploadJob, 64),
-		cloudTask:  NewTask("云端同步", s.onChange),
-		strmTask:   NewTask("STRM生成", s.onChange),
+		env:       env,
+		uploadSem: make(chan struct{}, uploadWorkerCount),
+		cloudTask: NewTask("云端同步", s.onChange),
+		strmTask:  NewTask("STRM生成", s.onChange),
 	}
 	inst.Start(ctx, wg)
 	wg.Go(func() { inst.cronSync(ctx) })
@@ -85,10 +85,10 @@ func (s *Syncer) Initialize() (walked bool, err error) {
 	return walked, nil
 }
 
-// shutdownLocked 取消旧实例 ctx、清空上传队列、等待所有协程安全退出。
+// shutdownLocked 取消旧实例 ctx 并等待所有协程安全退出。
+// 上传由 syncDir 直接执行（无独立 worker 队列），ctx 取消后 doUpload 会因 ctx.Err() 快速退出。
 func (s *Syncer) shutdownLocked() {
 	s.mu.Lock()
-	oldInst := s.cur
 	cancel := s.cancel
 	oldWg := s.wg
 	s.cur = nil
@@ -103,11 +103,6 @@ func (s *Syncer) shutdownLocked() {
 
 	logs.Info(logs.ModuleSync, "停止旧同步器实例...")
 	cancel()
-
-	// 清空上传任务队列：cancel 后不再有新任务入队，仅清残留避免工人白跑队列。
-	if oldInst != nil {
-		oldInst.drainUploadQueue()
-	}
 
 	if oldWg != nil {
 		done := make(chan struct{})
@@ -210,32 +205,20 @@ func (s *Syncer) current() *instance {
 
 // ──── 运行实例 ────
 
-// instance 是单次运行的同步实例：持有运行环境、上传队列、并发去重与两个一次性任务。
+// instance 是单次运行的同步实例：持有运行环境、上传并发信号量、并发去重与两个一次性任务。
+// 上传执行模型：syncDir 扫描后直接并发 doUpload（uploadSem 限并发），无独立 worker 池。
 type instance struct {
-	env        *Env
-	uploadJobs chan uploadJob
-	inFlight   sync.Map
-	cloudTask  *Task
-	strmTask   *Task
+	env       *Env
+	uploadSem chan struct{} // 上传并发信号量：目录内并发上限，目录间串行由 syncDir 的 wg.Wait 保证
+	inFlight  sync.Map
+	cloudTask *Task
+	strmTask  *Task
 }
 
-// Start 启动后台协程。⚠️ worker 必须先于 FullScan 启动；FullScan 必须异步。
+// Start 启动后台协程。⚠️ FullScan 必须异步（否则阻塞 Init，前端卡"重载中"）。
 func (l *instance) Start(ctx context.Context, wg *sync.WaitGroup) {
-	wg.Go(func() { l.startUploadWorkers(ctx, uploadWorkerCount) })
 	wg.Go(func() { l.watchPump(ctx) })
 	wg.Go(func() { l.FullScan(ctx) })
-}
-
-// drainUploadQueue 清空上传任务队列（ctx cancel 后调用，仅保留工人当前处理中的任务）。
-func (l *instance) drainUploadQueue() {
-	for {
-		select {
-		case <-l.uploadJobs:
-		default:
-			close(l.uploadJobs)
-			return
-		}
-	}
 }
 
 // Status 返回本实例两个任务的进度快照。

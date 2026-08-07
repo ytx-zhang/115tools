@@ -123,6 +123,12 @@ func (l *instance) watchPump(ctx context.Context) {
 // 不自行中断：syncDir 幂等跑到底。os.Stat 复活检查必须保留（解耦后处理延迟更长，本地目录被删窗口更大）。
 // 返回需重新登记的父目录：子目录已删时其父目录需扫描才能发现子项缺失并清理 DB 孤儿记录。
 func (l *instance) processFolders(ctx context.Context, folders []string) []string {
+	// 监听触发的同步是关键提醒：即使每批触发也保持 Info，让用户看到入库在进行
+	t0 := time.Now()
+	processed := 0
+	defer func() {
+		logs.Info(logs.ModuleSync, "处理变更目录完成", "数量", len(folders), "处理", processed, "耗时", time.Since(t0))
+	}()
 	var retryParents []string
 	for _, f := range folders {
 		// 本地已不存在的目录不要据此重建云端：嵌套目录整体删除时，子目录删除事件会把每一层
@@ -143,7 +149,9 @@ func (l *instance) processFolders(ctx context.Context, folders []string) []strin
 				continue
 			}
 		}
+		logs.Info(logs.ModuleSync, "处理变更目录", "路径", f)
 		l.syncDir(ctx, f, false)
+		processed++
 	}
 	return retryParents
 }
