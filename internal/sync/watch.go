@@ -123,6 +123,13 @@ func (l *instance) watchPump(ctx context.Context) {
 // 不自行中断：syncDir 幂等跑到底。os.Stat 复活检查必须保留（解耦后处理延迟更长，本地目录被删窗口更大）。
 // 返回需重新登记的父目录：子目录已删时其父目录需扫描才能发现子项缺失并清理 DB 孤儿记录。
 func (l *instance) processFolders(ctx context.Context, folders []string) []string {
+	// 云端同步（runCloudSync）进行中时跳过，避免 cloudCleanTask 删除/移动云端文件与
+	// WalkCloud 遍历并发冲突；目录原样返回由 executor re-arm（登记+续命防抖），
+	// 云端同步结束后自动补处理，不丢变更。
+	if l.cloudTask.Status().Running {
+		logs.Info(logs.ModuleSync, "云端同步正在进行，本地变更稍后处理", "数量", len(folders))
+		return folders
+	}
 	// 监听触发的同步是关键提醒：即使每批触发也保持 Info，让用户看到入库在进行
 	t0 := time.Now()
 	processed := 0

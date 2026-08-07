@@ -46,8 +46,8 @@ func (l *instance) alreadyUploaded(fPath string, fileInfo os.FileInfo) bool {
 	return fileInfo.Size() == dbSize
 }
 
-// doUpload 真正执行一次上传（由 worker 调用）：Stat 确认文件还在 → 查重 →
-// 阈值片段拦截 → inFlight 并发去重 → upStrm/upFile 分派 → 记录日志。
+// doUpload 真正执行一次上传（由 syncDir 的并发 goroutine 调用）：Stat 确认文件还在 →
+// 查重 → 阈值片段拦截 → inFlight 并发去重 → upStrm/upFile 分派 → 记录日志。
 func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 	if err := ctx.Err(); err != nil {
 		return
@@ -61,12 +61,6 @@ func (l *instance) doUpload(ctx context.Context, cid, fPath string) {
 	if l.alreadyUploaded(fPath, fileInfo) {
 		return
 	}
-
-	// 并发去重：替换场景下同名视频不再因 .strm 已存在而跳过，靠 inFlight 防重复上传。
-	if _, loaded := l.inFlight.LoadOrStore(fPath, struct{}{}); loaded {
-		return
-	}
-	defer l.inFlight.Delete(fPath)
 
 	upStart := time.Now()
 	isStrm := strings.EqualFold(filepath.Ext(fPath), ".strm")

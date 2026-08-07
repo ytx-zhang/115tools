@@ -39,8 +39,13 @@ func (l *instance) FullScan(ctx context.Context) {
 // syncDir 同步一个目录：扫描差异 → 并发上传（信号量限并发）→ 全部完成才返回。幂等。
 // 目录内并发、目录间串行：wg.Wait 保证本目录上传完才返回，调用方（processFolders 串行
 // 遍历一批目录）因此自然「传完一个目录再扫下一个」。recursive=true 时整棵子树视为一个目录。
+// ⚠️ dirMu 全局互斥：FullScan 与 watcher 并发时同一时刻只跑一个 syncDir（避免跨目录双传，
+// 无需 inFlight）。代价：FullScan 持锁等整树传完期间 watcher 实时入库停摆（有 cron FullScan 兜底）。
 // 目录级变更触发频繁 → 完成日志用 Debug。
 func (l *instance) syncDir(ctx context.Context, currentPath string, recursive bool) {
+	l.dirMu.Lock()
+	defer l.dirMu.Unlock()
+
 	start := time.Now()
 	uploaded := 0
 	defer func() {

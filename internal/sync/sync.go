@@ -205,12 +205,13 @@ func (s *Syncer) current() *instance {
 
 // ──── 运行实例 ────
 
-// instance 是单次运行的同步实例：持有运行环境、上传并发信号量、并发去重与两个一次性任务。
+// instance 是单次运行的同步实例：持有运行环境、上传并发信号量、全局扫描互斥锁与两个一次性任务。
 // 上传执行模型：syncDir 扫描后直接并发 doUpload（uploadSem 限并发），无独立 worker 池。
+// 全局 dirMu 互斥保证同一时刻只有一个 syncDir 执行，跨 syncDir 并发双传从源头消除（无需 inFlight）。
 type instance struct {
 	env       *Env
-	uploadSem chan struct{} // 上传并发信号量：目录内并发上限，目录间串行由 syncDir 的 wg.Wait 保证
-	inFlight  sync.Map
+	uploadSem chan struct{} // 上传并发信号量：目录内并发上限
+	dirMu     sync.Mutex    // 全局扫描互斥：同一时刻只允许一个 syncDir（扫描+上传）执行
 	cloudTask *Task
 	strmTask  *Task
 }
