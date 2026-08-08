@@ -260,6 +260,8 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 				dst.Add(k, v)
 			}
 		}
+		// 附加原始文件名头，UTF-8 原样写入，供客户端（ffprobe/下载器）直接读取
+		dst.Set("X-Origin-Filename", item.name)
 
 		w.WriteHeader(resp.StatusCode) // 原样透传 200 / 206
 		streamStart := time.Now()
