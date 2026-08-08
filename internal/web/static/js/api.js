@@ -55,12 +55,6 @@ export function fmtSize(bytes) {
   return `${n.toFixed(n >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-// HTML 转义
-export function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g,
-    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
 // connectSSE 打开一条 SSE 连接，内聚重连/会话/守卫逻辑，消除重复的 EventSource 样板。
 // 调用方仅需提供 onMessage（必须）与 onOpen（可选）渲染回调；返回 close 函数，离开视图时调用。
 // shouldReconnect 可选：返回 true 才在断线后重连（解耦对具体视图元素的硬编码，默认始终重连）。

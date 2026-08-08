@@ -2,7 +2,7 @@
    app.css —— 115 Tools 管理面板样式
    分层：@layer theme < reset < base < layout < components < utilities
    现代特性：CSS 嵌套、color-mix()、:has()、@layer
-   兼容性：自用内网面板，接受近两年浏览器（Chrome 112+ / Safari 16.5+ / Firefox 117+）
+   兼容性：自用内网面板，接受近两年浏览器（Chrome 114+ / Safari 17.4+ / Firefox 121+）
    ============================================================ */
 
 /* ── 1. 主题令牌（亮/暗 + 模块色） ── */
@@ -68,6 +68,8 @@
   h3 {
     margin: 0 0 .5em;
     font-weight: 600;
+    /* 短标题自动平衡换行（标题用 balance，正文用 pretty 系浏览器自动回退普通换行） */
+    text-wrap: balance;
   }
 
   h2 {
@@ -99,7 +101,7 @@
     display: flex;
     min-height: 100vh;
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       flex-direction: column;
     }
   }
@@ -116,8 +118,10 @@
     position: sticky;
     top: 0;
     height: 100vh;
+    /* 不参与视图切换动画：侧栏/顶栏保持静止 */
+    view-transition-name: none;
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       width: 100%;
       height: auto;
       position: static;
@@ -138,7 +142,7 @@
     font-weight: 700;
     padding: 6px 12px 18px;
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       padding: 0 10px;
 
       & span {
@@ -175,7 +179,7 @@
       margin-top: auto;
     }
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       width: auto;
       flex-shrink: 0;
 
@@ -192,7 +196,7 @@
   }
 
   #nav {
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       display: flex;
       gap: 4px;
     }
@@ -201,13 +205,47 @@
   .content {
     flex: 1;
     padding: 24px 28px;
-    max-width: 1080px;
+    display: flex;
+    justify-content: center;
+    /* 内容区固定视口高度，内部滚动（侧栏 sticky 不滚） */
+    height: 100vh;
+    overflow-y: auto;
+    /* 视图切换动画只作用于内容区 */
+    view-transition-name: content;
 
-    @media (max-width: 720px) {
-      padding: 16px;
+    /* 内容区自身撑满剩余宽度，内部内容居中限宽显示 */
+    & > .view {
+      width: 100%;
+      max-width: 1080px;
     }
 
-    @media (max-width: 480px) {
+    /* 仪表盘视图：flex 列布局，让日志区吃掉剩余高度 */
+    #view-dashboard {
+      display: flex;
+      flex-direction: column;
+      min-height: 100%;
+
+      /* 日志卡片吃满剩余高度 */
+      & > .card:last-child {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+
+        & .log-box {
+          flex: 1;
+          min-height: 0;
+        }
+      }
+    }
+
+    @media (width <= 720px) {
+      padding: 16px;
+      height: auto;
+      overflow-y: visible;
+    }
+
+    @media (width <= 480px) {
       padding: 10px;
     }
   }
@@ -253,14 +291,14 @@
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 18px 20px;
-    margin-bottom: 16px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       padding: 12px 14px;
     }
 
-    @media (max-width: 480px) {
+    @media (width <= 480px) {
       padding: 10px 12px;
     }
   }
@@ -271,13 +309,18 @@
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 8px;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
 
     & h3 {
       margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text);
     }
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       gap: 8px;
     }
   }
@@ -289,15 +332,62 @@
     gap: 10px;
     flex-wrap: wrap;
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       gap: 8px;
       min-width: 0;
       overflow: hidden;
     }
 
-    @media (max-width: 480px) {
+    @media (width <= 480px) {
       gap: 6px;
     }
+  }
+
+  /* 表单分组与网格 */
+  fieldset {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px 18px;
+    margin: 0 0 14px;
+    background: var(--bg2);
+
+    legend {
+      padding: 0 8px;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text);
+    }
+  }
+
+  .form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px 18px;
+
+    .col-2 {
+      grid-column: 1 / -1;
+    }
+
+    /* 复选框标签保持行内，不被 column 布局影响 */
+    .chk {
+      flex-direction: row;
+      align-items: center;
+    }
+
+    @media (width <= 720px) {
+      grid-template-columns: 1fr;
+
+      .col-2 {
+        grid-column: auto;
+      }
+    }
+  }
+
+  .form-actions {
+    margin-top: 4px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
   }
 
   /* 按钮 */
@@ -370,8 +460,19 @@
     font-size: 13px;
   }
 
+  /* 字段名后的精简说明：与字段名同行、稍拉开距离 */
+  .form-grid label > small {
+    margin-left: 6px;
+  }
+
+  /* legend 里的精简说明：紧随标题 */
+  legend small {
+    margin-left: 8px;
+  }
+
   input,
-  textarea {
+  textarea,
+  select {
     width: 100%;
     background: var(--bg);
     border: 1px solid var(--border);
@@ -381,19 +482,17 @@
     font-size: 14px;
     font-family: inherit;
 
-    &:focus {
-      outline: none;
+    /* 鼠标点击聚焦：仅高亮边框，不出现焦点环 */
+    &:focus:not(:focus-visible) {
       border-color: var(--accent);
     }
-  }
 
-  .row input {
-    flex: 1;
-    width: auto;
-  }
-
-  form .btn[type=submit] {
-    margin-top: 14px;
+    /* 键盘导航聚焦：可见焦点环（可访问性） */
+    &:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+      outline-offset: 1px;
+      border-color: var(--accent);
+    }
   }
 
   /* 任务卡片 */
@@ -481,11 +580,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       max-width: 180px;
     }
 
-    @media (max-width: 480px) {
+    @media (width <= 480px) {
       max-width: 140px;
     }
   }
@@ -508,7 +607,7 @@
     flex-wrap: nowrap;
     min-width: 0;
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       flex-wrap: nowrap;
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
@@ -542,13 +641,13 @@
       color: #fff;
     }
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       flex-shrink: 0;
       font-size: 11px;
       padding: 2px 8px;
     }
 
-    @media (max-width: 480px) {
+    @media (width <= 480px) {
       font-size: 10px;
       padding: 1px 7px;
     }
@@ -568,9 +667,8 @@
     color: inherit;
   }
 
-  /* 运行日志 */
+  /* 运行日志：桌面端由仪表盘 flex 布局撑满剩余高度；移动端固定压缩 */
   .log-box {
-    max-height: 320px;
     overflow-y: auto;
     background: var(--bg);
     border: 1px solid var(--border);
@@ -584,13 +682,13 @@
       padding: 6px 0;
     }
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       max-height: 260px;
       padding: 6px 8px;
       font-size: 11px;
     }
 
-    @media (max-width: 480px) {
+    @media (width <= 480px) {
       max-height: 220px;
       font-size: 10px;
     }
@@ -608,7 +706,7 @@
       border-bottom: none;
     }
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       gap: 4px;
     }
 
@@ -649,13 +747,13 @@
     border-radius: 4px;
     padding: 0 4px;
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       flex: 0 0 38px;
       font-size: 11px;
       padding: 0 2px;
     }
 
-    @media (max-width: 480px) {
+    @media (width <= 480px) {
       flex: 0 0 34px;
       font-size: 10px;
     }
@@ -705,13 +803,13 @@
       background: color-mix(in srgb, var(--mod-db) 14%, transparent);
     }
 
-    @media (max-width: 720px) {
+    @media (width <= 720px) {
       flex: 0 0 34px;
       font-size: 10px;
       padding: 0 2px;
     }
 
-    @media (max-width: 480px) {
+    @media (width <= 480px) {
       flex: 0 0 28px;
       font-size: 9px;
     }
@@ -763,6 +861,29 @@
     to {
       transform: none;
       opacity: 1;
+    }
+  }
+
+  /* 视图切换过渡（View Transition API；不支持的浏览器自动跳过动画） */
+  ::view-transition-old(content) {
+    animation: view-fade-out .18s ease both;
+  }
+
+  ::view-transition-new(content) {
+    animation: view-fade-in .22s ease both;
+  }
+
+  @keyframes view-fade-out {
+    to {
+      opacity: 0;
+      transform: translateX(-8px);
+    }
+  }
+
+  @keyframes view-fade-in {
+    from {
+      opacity: 0;
+      transform: translateX(8px);
     }
   }
 }

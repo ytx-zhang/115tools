@@ -5,31 +5,49 @@ import { initOffline, stopOffline } from './offline.js';
 import { cfg } from './settings.js';
 
 function _viewEl(name) { return document.getElementById(`view-${name}`); }
+// init/stop 均可选；stop 缺省则离开视图时不做事。
 function makeView(name, init, stop) {
   const el = _viewEl(name);
-  return { show: () => { el.hidden = false; }, hide: () => { el.hidden = true; }, init, stop };
+  return {
+    show: () => { el.hidden = false; },
+    hide: () => { el.hidden = true; },
+    init,
+    stop: stop || null,
+  };
 }
 
 const ALLOWED = ['dashboard', 'offline', 'settings'];
 const VIEWS = {
   dashboard: makeView('dashboard', initDashboard, stopDashboard),
   offline: makeView('offline', initOffline, stopOffline),
-  settings: makeView('settings', () => cfg.load(), () => {}),
+  settings: makeView('settings', () => cfg.load()),
 };
 
 let current = null;
 
+// 视图切换：优先用 View Transition 做平滑过渡（不支持的浏览器直接瞬时切换）。
 function showView(name) {
-  if (current && VIEWS[current] && current !== name) VIEWS[current].stop();
-  for (const v in VIEWS) {
-    if (v === name) VIEWS[v].show();
-    else VIEWS[v].hide();
+  const prev = current && VIEWS[current];
+  if (prev && current !== name && prev.stop) prev.stop();
+
+  const apply = () => {
+    for (const v in VIEWS) {
+      if (v === name) VIEWS[v].show();
+      else VIEWS[v].hide();
+    }
+    // 菜单高亮
+    document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
+    if (VIEWS[name]?.init) VIEWS[name].init();
+    if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+    current = name;
+  };
+
+  // 只在真正切换视图时才播放过渡；重复点击同视图直接应用。
+  if (current !== name && document.startViewTransition) {
+    document.startViewTransition(apply);
+  } else {
+    apply();
   }
-  // 菜单高亮
-  document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
-  if (VIEWS[name] && VIEWS[name].init) VIEWS[name].init();
-  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
-  current = name;
 }
 
 function handleRoute() {

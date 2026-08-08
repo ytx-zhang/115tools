@@ -7,7 +7,6 @@ let timer = null;
 
 const POLL_INTERVAL = 5000;
 const FAIL_URL_LEN = 60;
-const TORRENT_SIZE_THRESHOLD = 0;
 
 const statusMap = {
   '-1': ['失败', 'err'],
@@ -176,7 +175,7 @@ async function addTasks(e) {
 
   // 优先处理种子文件上传
   const torrentFile = fd.get('torrent');
-  if (torrentFile instanceof File && torrentFile.size > TORRENT_SIZE_THRESHOLD) {
+  if (torrentFile instanceof File && torrentFile.size > 0) {
     try {
       const upfd = new FormData();
       upfd.set('torrent', torrentFile);
