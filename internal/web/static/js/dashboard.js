@@ -37,8 +37,16 @@ export const dash = {
   },
 };
 
+// 按任务维度的启停请求去重：请求返回前忽略重复点击，避免连点产生多条通知
+const toggling = {};
+export async function toggleTask(name) {
+  if (toggling[name]) return;
+  toggling[name] = true;
+  try { await dash.toggle(name); } finally { toggling[name] = false; }
+}
+
 export function initDashboard() {
-  bindTaskButtons();
+  bindOnce();
   renderStatus();
   initLogs();
 }
@@ -91,11 +99,30 @@ function renderTaskCard(name) {
   }
 }
 
-function bindTaskButtons() {
+// ──── 事件绑定（一次性，stop/init 生命周期不重复绑定）────
+let bound = false;
+function bindOnce() {
+  if (bound) return;
+  bound = true;
+
   const sync = document.getElementById('sync-btn');
-  if (sync) sync.addEventListener('click', () => dash.toggle('sync'));
+  if (sync) sync.addEventListener('click', () => toggleTask('sync'));
   const strm = document.getElementById('strm-btn');
-  if (strm) strm.addEventListener('click', () => dash.toggle('strm'));
+  if (strm) strm.addEventListener('click', () => toggleTask('strm'));
+
+  const clear = document.getElementById('log-clear');
+  if (clear) clear.addEventListener('click', clearLogs);
+
+  // chip 过滤：容器事件委托，同一行互斥选中；切换分类时强制滚到底显示最新日志
+  const filter = document.getElementById('log-filter');
+  if (filter) filter.addEventListener('click', e => {
+    const btn = e.target.closest('.chip');
+    if (!btn) return;
+    logFilter = btn.dataset.lv || btn.dataset.mod;
+    filter.querySelectorAll('.chip').forEach(b => b.classList.toggle('active', b === btn));
+    applyFilter();
+    if (logBox) logBox.scrollTop = logBox.scrollHeight;
+  });
 }
 
 // ──── 日志流（批量渲染：事件入队 → rAF 调度 → Fragment 一次插入）────
@@ -158,20 +185,6 @@ export function initLogs() {
       resetCounts();
     },
     shouldReconnect: () => !document.getElementById('view-dashboard').hidden,
-  });
-
-  const clear = document.getElementById('log-clear');
-  if (clear) clear.onclick = clearLogs;
-
-  // chip 过滤：容器事件委托，同一行互斥选中；切换分类时强制滚到底显示最新日志
-  const filter = document.getElementById('log-filter');
-  if (filter) filter.addEventListener('click', e => {
-    const btn = e.target.closest('.chip');
-    if (!btn) return;
-    logFilter = btn.dataset.lv || btn.dataset.mod;
-    filter.querySelectorAll('.chip').forEach(b => b.classList.toggle('active', b === btn));
-    applyFilter();
-    if (logBox) logBox.scrollTop = logBox.scrollHeight;
   });
 }
 
