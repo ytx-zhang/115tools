@@ -166,7 +166,12 @@ func (sc *Scanner) HandleFile(ctx context.Context, batch *sync.WaitGroup, fullPa
 	isVideo := sc.rules.IsVideoExt(ext)
 
 	if fileInfo == nil {
-		// 本地不可用/已删 → 直接删云端（DB 由 CloudCleanTask 末尾清）
+		// 本地已删但 DB 也无记录（如上传视频转 .strm 时 os.Remove 触发的删除事件）：
+		// 无事可做，直接返回，避免无意义的清理日志。
+		if dbFid == "" {
+			return
+		}
+		// 本地不可用/已删且有 DB 记录 → 直接删云端（DB 由 CloudCleanTask 末尾清）
 		if cerr := sc.co.CloudCleanTask(ctx, fullPath); cerr != nil {
 			logs.Error(logs.ModuleSync, "云端删除失败", "路径", fullPath, "错误", cerr)
 		}

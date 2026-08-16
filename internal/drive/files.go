@@ -2,7 +2,6 @@ package drive
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -36,36 +35,18 @@ func (c *Client) GetFileList(ctx context.Context, cid, name string) ([]FileInfo,
 	var all []FileInfo
 	offset := 0
 	for {
-		// ⚠️ 115 的 ufile/files 返回：data 段是数组、count 在外壳平铺（非 data 内），
-		// 需用 CallRaw 一次拿完整响应，内嵌 Resp 取 data 段、平铺 Count 字段取总数
-		//（对齐 OpenList 的 GetFilesResp：内嵌 Resp[[]File] + 平铺 count）。
-		var res struct {
-			Resp[json.RawMessage]
-			Count int64 `json:"count"`
-		}
-		if err := c.CallRaw(ctx, "/open/ufile/files", "GET", &res,
-			ReqWithQuery(Form{
-				"cid":      cid,
-				"show_dir": "1",
-				"limit":    "1150",
-				"offset":   strconv.Itoa(offset),
-			})); err != nil {
+		files, err := Get[[]fileListResponse](ctx, c, "/open/ufile/files", Form{
+			"cid":      cid,
+			"show_dir": "1",
+			"limit":    "1150",
+			"offset":   strconv.Itoa(offset),
+		})
+		if err != nil {
 			logs.Error(logs.ModuleCloud, "拉取云端文件列表失败", "路径", name, "错误", err, "耗时", time.Since(t0))
-			return nil, err
-		}
-		if !res.State {
-			return nil, fmt.Errorf("拉取云端文件列表失败: %s (code: %d)", res.Message, res.Code)
-		}
-		var files []fileListResponse
-		if err := json.Unmarshal(res.Data, &files); err != nil {
-			logs.Error(logs.ModuleCloud, "解析云端文件列表失败", "路径", name, "错误", err, "耗时", time.Since(t0))
 			return nil, err
 		}
 		if len(files) == 0 {
 			break
-		}
-		if all == nil && res.Count > 0 {
-			all = make([]FileInfo, 0, res.Count)
 		}
 		for _, item := range files {
 			if item.Aid != "1" {
@@ -81,8 +62,8 @@ func (c *Client) GetFileList(ctx context.Context, cid, name string) ([]FileInfo,
 			})
 		}
 		offset += len(files) // 以原始返回条数推进（含被过滤项）
-		if int64(offset) >= res.Count {
-			break
+		if len(files) < 1150 {
+			break // 返回不足一页说明已是最后一页
 		}
 		if err := context.Cause(ctx); err != nil {
 			return nil, err
@@ -96,9 +77,9 @@ func (c *Client) GetFileList(ctx context.Context, cid, name string) ([]FileInfo,
 func (c *Client) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*DownloadUrlInfo, error) {
 	t0 := time.Now()
 	// ⚠️ pickcode 无效/文件不可用时 115 返回 [] 而非 {fid:{...}}，用 StructOrArray 按空结果放行
-	var items StructOrArray[map[string]downItem]
-	if err := c.Call(ctx, "/open/ufile/downurl", "POST", &items,
-		ReqWithForm(Form{"pick_code": pickCode}), ReqWithUA(ua)); err != nil {
+	items, err := Post[StructOrArray[map[string]downItem]](ctx, c, "/open/ufile/downurl",
+		Form{"pick_code": pickCode}, ReqWithUA(ua))
+	if err != nil {
 		return nil, err
 	}
 	if items.Value == nil || len(*items.Value) == 0 {
@@ -121,29 +102,39 @@ func (c *Client) GetDownloadUrl(ctx context.Context, pickCode, ua string) (*Down
 // ──── 文件 / 目录操作 ────
 
 // CreateFolder 在云端目录 pid 下创建子目录 name，返回新目录的 FID。
-func (c *Client) CreateFolder(ctx context.Context, pid, name string) (string, error) {
+// path 是目标完整路径（用于同名冲突时回查）；115 创建同名目录返回「该目录名称已存在」，
+// 此时改用 GetDirInfo(path) 复用已存在目录的 FID 而非报错（幂等创建）。
+// ⚠️ 用 message 判断而非 code：115 错误码不是稳定契约（20004 可能对应其他含义），
+// message 是明确的语义信号。
+func (c *Client) CreateFolder(ctx context.Context, pid, name, path string) (string, error) {
 	t0 := time.Now()
-	var res struct {
+	res, err := Post[struct {
 		FileID string `json:"file_id"`
+	}](ctx, c, "/open/folder/add", Form{"pid": pid, "file_name": name})
+	if err == nil {
+		return res.FileID, FinishLog(t0, "云端创建目录", nil, "文件名", name)
 	}
-	err := c.Call(ctx, "/open/folder/add", "POST", &res,
-		ReqWithForm(Form{"pid": pid, "file_name": name}))
-	return res.FileID, FinishLog(t0, "云端创建目录", err, "文件名", name)
+	// 同名目录已存在：复用现有 FID，幂等创建
+	if strings.Contains(err.Error(), "该目录名称已存在") {
+		if info, gErr := c.GetDirInfo(ctx, path); gErr == nil && info != nil {
+			logs.Info(logs.ModuleCloud, "云端目录已存在，复用", "路径", path, "FID", info.Fid, "耗时", time.Since(t0))
+			return info.Fid, nil
+		}
+	}
+	return "", FinishLog(t0, "云端创建目录", err, "文件名", name)
 }
 
 // MoveFile 把云端文件/目录移动到目标目录 cid。fid 支持逗号分隔批量。
 func (c *Client) MoveFile(ctx context.Context, fid, cid string) error {
 	t0 := time.Now()
-	err := c.Call(ctx, "/open/ufile/move", "POST", nil,
-		ReqWithForm(Form{"file_ids": fid, "to_cid": cid}))
+	_, err := Post[struct{}](ctx, c, "/open/ufile/move", Form{"file_ids": fid, "to_cid": cid})
 	return FinishLog(t0, "云端移动文件", err, "数量", fidCount(fid))
 }
 
 // DeleteFile 删除云端文件/目录。fid 支持逗号分隔批量。
 func (c *Client) DeleteFile(ctx context.Context, fid string) error {
 	t0 := time.Now()
-	err := c.Call(ctx, "/open/ufile/delete", "POST", nil,
-		ReqWithForm(Form{"file_ids": fid}))
+	_, err := Post[struct{}](ctx, c, "/open/ufile/delete", Form{"file_ids": fid})
 	return FinishLog(t0, "云端删除文件", err, "数量", fidCount(fid))
 }
 
@@ -155,11 +146,9 @@ func fidCount(fid string) int {
 // RenameFile 重命名云端文件/目录，返回改名后的实际文件名。
 func (c *Client) RenameFile(ctx context.Context, fid, name string) (string, error) {
 	t0 := time.Now()
-	var res struct {
+	res, err := Post[struct {
 		FileName string `json:"file_name"`
-	}
-	err := c.Call(ctx, "/open/ufile/update", "POST", &res,
-		ReqWithForm(Form{"file_id": fid, "file_name": name}))
+	}](ctx, c, "/open/ufile/update", Form{"file_id": fid, "file_name": name})
 	return res.FileName, FinishLog(t0, "云端重命名", err, "fid", fid, "文件名", name)
 }
 
@@ -175,9 +164,8 @@ func (c *Client) GetDirInfo(ctx context.Context, path string) (*DirInfo, error) 
 	}
 	path = "/" + strings.Trim(path, "/")
 	// data 段可能是对象或数组（115 两种形态都出现过），用 StructOrArray 兼容
-	var info StructOrArray[DirInfo]
-	if err := c.Call(ctx, "/open/folder/get_info", "POST", &info,
-		ReqWithForm(Form{"path": path})); err != nil {
+	info, err := Post[StructOrArray[DirInfo]](ctx, c, "/open/folder/get_info", Form{"path": path})
+	if err != nil {
 		logs.Error(logs.ModuleCloud, "查询云端目录信息失败", "路径", path, "错误", err, "耗时", time.Since(t0))
 		return nil, err
 	}

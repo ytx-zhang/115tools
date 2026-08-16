@@ -9,8 +9,8 @@ import (
 // 返回用户名、空间占用，用于验证成功后打印账户概况。
 // 鉴权头由 Client 的 resty 中间件在请求前自动注入（Bearer access_token）。
 func (c *Client) GetUserInfo(ctx context.Context) (*UserInfo, error) {
-	var data userInfoData
-	if err := c.Call(ctx, "/open/user/info", "GET", &data); err != nil {
+	data, err := Get[userInfoData](ctx, c, "/open/user/info", nil)
+	if err != nil {
 		return nil, err
 	}
 	return &UserInfo{

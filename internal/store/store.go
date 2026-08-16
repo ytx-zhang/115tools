@@ -146,11 +146,16 @@ func (d *Store) GetFid(localPath string) (fid string) {
 	return
 }
 
-// SaveRecord 写入单条记录（bbolt 原生短事务，无需额外 Batch 缓冲）。
+// SaveRecord 写入单条记录。
+// 用 bbolt Batch 而非 Update：Batch 是「同步等待 + 自动聚合」——同一 MaxBatchDelay
+// （默认 10ms）窗口内的并发调用合并为单次 commit（云端初始化/目录扫描的高频写大幅减少
+// fsync），且调用方阻塞到自己的写入落盘才返回（写后立即可见，无时序问题）。
+// 单条低频写入固定多等 ≤10ms（聚合窗口），相对业务秒级操作可忽略。
+// bbolt Batch 语义：fn 幂等（Put 覆盖）、错误通过 trySolo 退化为 Update 仍可靠返回。
 func (d *Store) SaveRecord(localPath string, fid string, size int64) {
 	logs.Debug(logs.ModuleDB, "保存记录", "路径", localPath, "FID", fid)
 	val := encodeValue(fid, size)
-	if err := d.boltDB.Update(func(tx *bbolt.Tx) error {
+	if err := d.boltDB.Batch(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		return b.Put([]byte(localPath), val)
 	}); err != nil {

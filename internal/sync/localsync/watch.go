@@ -111,7 +111,9 @@ func (w *Watcher) dispatch(ctx context.Context, p string) {
 // 不判断事件类型：删除事件会让文件在此处 os.Stat 时已经不存在，自然跳过（一次 stat 开销极小）。
 func (w *Watcher) uploadVideo(ctx context.Context, fPath string) {
 	// 云同步进行中让路：避免与云同步并发改同一目录的云端状态（Watcher.running 由 Runner 注入）。
+	// ⚠️ 不能丢弃：登记父目录进防抖合集，等云同步结束后随父目录扫描统一处理（视频事件收集而非丢）。
 	if w.running() {
+		w.arm(filepath.Dir(fPath))
 		return
 	}
 	// 执行前确认文件仍在：删除/移动走的事件到达时文件已消失，则本地已不存在 →
@@ -140,7 +142,12 @@ func (w *Watcher) uploadVideo(ctx context.Context, fPath string) {
 // ⚠️ 此处不再直接调 ScanDir：所有扫描都走目录池→工作循环，保证统一 running + 串行。
 func (w *Watcher) flushDirs(folders []string, rearm func(string)) {
 	// 云同步进行中让路：避免与云同步并发改同一目录的云端状态（Watcher.running 由 Runner 注入）。
+	// ⚠️ 不能丢弃：把整批重新 Arm 回防抖合集（重置定时器），云同步结束后统一处理——
+	// 已 Take 清空的是防抖合集，但这里的 folders 是消费者刚取走的批次，rearm 回填即不丢。
 	if w.running() {
+		for _, f := range folders {
+			rearm(f)
+		}
 		return
 	}
 	if len(folders) == 0 {

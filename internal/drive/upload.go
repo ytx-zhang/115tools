@@ -213,20 +213,17 @@ func (c *Client) initUpload(ctx context.Context, req UploadInitReq) (*UploadInit
 		formData["sign_key"] = req.SignKey
 		formData["sign_val"] = req.SignVal
 	}
-	var res Resp[json.RawMessage]
-	if err := c.CallRaw(ctx, "/open/upload/init", "POST", &res, ReqWithForm(formData)); err != nil {
+	trimmed, err := Post[json.RawMessage](ctx, c, "/open/upload/init", formData)
+	if err != nil {
 		return nil, err
 	}
-	if !res.State {
-		return nil, fmt.Errorf("[115报错] 上传初始化失败: %s (code: %d)", res.Message, res.Code)
-	}
-	trimmed := bytes.TrimSpace(res.Data)
+	trimmed = bytes.TrimSpace(trimmed)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return nil, fmt.Errorf("上传初始化失败: data 字段缺失, 响应体: %s", TruncateBody(trimmed))
+		return nil, fmt.Errorf("上传初始化失败: data 字段缺失, 响应体: %s", prettyJSON(trimmed))
 	}
 	var data uploadInitResp
 	if err := json.Unmarshal(trimmed, &data); err != nil {
-		return nil, fmt.Errorf("解析初始化响应失败: %w, 响应体: %s", err, TruncateBody(trimmed))
+		return nil, fmt.Errorf("解析初始化响应失败: %w, 响应体: %s", err, prettyJSON(trimmed))
 	}
 	var cb OssCallback
 	if data.Callback.Value != nil {
@@ -246,14 +243,7 @@ func (c *Client) initUpload(ctx context.Context, req UploadInitReq) (*UploadInit
 
 // getUploadToken 获取 OSS 真实内容上传凭证（实际传输分支用）。
 func (c *Client) getUploadToken(ctx context.Context) (OssTokenData, error) {
-	var res Resp[OssTokenData]
-	if err := c.CallRaw(ctx, "/open/upload/get_token", "GET", &res); err != nil {
-		return OssTokenData{}, err
-	}
-	if !res.State {
-		return OssTokenData{}, fmt.Errorf("[115报错] 获取OSS凭证失败: %s (code: %d)", res.Message, res.Code)
-	}
-	return res.Data, nil
+	return Get[OssTokenData](ctx, c, "/open/upload/get_token", nil)
 }
 
 // ──── 上传编排 ────
@@ -351,11 +341,11 @@ func uploadByOSS(ctx context.Context, c *Client, pathStr string, fileSize int64,
 		Data UploadCallbackData `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &cb); err != nil {
-		return nil, "", fmt.Errorf("OSS上传回调解析失败: %w, cbResp=%s", err, TruncateBody(raw))
+		return nil, "", fmt.Errorf("OSS上传回调解析失败: %w, cbResp=%s", err, prettyJSON(raw))
 	}
 	fid, pc := cb.Data.FileID, cb.Data.PickCode
 	if fid == "" || pc == "" {
-		return nil, "", fmt.Errorf("OSS上传返回信息缺失: cbResp=%s", TruncateBody(raw))
+		return nil, "", fmt.Errorf("OSS上传返回信息缺失: cbResp=%s", prettyJSON(raw))
 	}
 	upType := "OSS单文件上传"
 	if fileSize > ossMultipartThreshold {

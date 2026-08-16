@@ -50,7 +50,7 @@ func (co *CloudOps) AddCloudFolder(ctx context.Context, path string) (string, er
 			co.db.SaveRecord(cur, info.Fid, store.SizeDir)
 			continue
 		}
-		fid, err := co.api.CreateFolder(ctx, parentFid, seg)
+		fid, err := co.api.CreateFolder(ctx, parentFid, seg, cur)
 		if err != nil {
 			return "", fmt.Errorf("创建云端目录 %s 失败: %w", cur, err)
 		}

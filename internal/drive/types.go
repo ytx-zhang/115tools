@@ -1,12 +1,12 @@
 // Package drive 提供 115 开放平台（refresh_token）驱动的完整实现。
-// 架构借鉴 OpenList/115-sdk-go：resty v3 + 函数式请求选项（RestyOption）+
-// 统一响应外壳（Resp[T]）+ 401 自动刷新重试 + StructOrArray[T] 泛型容错。
+// 架构借鉴 OpenList/115-sdk-go：resty v2 + 泛型请求入口（Get/Post）+
+// 统一响应外壳（Resp[T]）+ 请求前 token 保活刷新 + StructOrArray[T] 泛型容错。
 //
 // 【代码划分】
-//   - client.go：Client 装配（resty v3：限流/鉴权/重试中间件 + 全局 HTTP client）与请求执行
-//     （Call/CallRaw + doRequest + RestyOption 选项 + Resp[T] 外壳）；
+//   - client.go：Client 装配（resty v2：限流/鉴权/重试中间件 + 全局 HTTP client）与泛型请求执行
+//     （Get/Post 统一入口：自动解包 data 段 + state=false 自动报错）；
 //   - types.go：数据结构与工具（文件/目录/上传/离线类型、StructOrArray 容错、IntString、
-//     SHA1、TruncateBody、ErrRateLimited sentinel、私有响应结构）；
+//     SHA1、私有响应结构）；
 //   - token.go：访问令牌自动刷新（RefreshDaemon）与凭证验证（Verify）；
 //   - files.go：文件/目录操作（下载直链、分页合并列表、增删移改）；
 //   - upload.go：上传（秒传 init → get_token → singleUpload/multipartUpload + calPartSize 动态分片）；
@@ -19,7 +19,6 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -27,20 +26,17 @@ import (
 	"sync"
 )
 
-// ErrRateLimited 表示 115 明确返回「稍后再试」的限流类错误。
-// 客户端重试判定与错误分类都依赖它（errors.Is 匹配，替代脆弱的字符串 contains）。
-var ErrRateLimited = errors.New("115 限流，稍后再试")
-
 // DownloadUrlInfo 下载直链查询结果。
 type DownloadUrlInfo struct {
 	Url  string // 真实下载地址（带时效）
 	Name string // 云端文件名
 }
 
-// DirInfo 目录信息：FID 与直属子项计数（用于云端遍历的「计数跳过」优化）。
+// DirInfo 目录信息：FID、目录名与直属子项计数（用于云端遍历的「计数跳过」优化）。
 // ⚠️ count/folder_count 官方为 string 类型（115 偶发数字形态），用 IntString 双兼容。
 type DirInfo struct {
 	Fid         string    `json:"file_id"`
+	Name        string    `json:"file_name"` // 目录名（同名文件夹场景用 GetDirInfo 回查时返回）
 	FileCount   IntString `json:"count"`
 	FolderCount IntString `json:"folder_count"`
 }
@@ -163,15 +159,7 @@ type OfflineQuota struct {
 	Used    int `json:"used"`    // 已用
 }
 
-// TruncateBody 截断响应体用于错误提示，避免超长 HTML/二进制刷屏。
-func TruncateBody(b []byte) string {
-	s := string(b)
-	const maxLen = 512
-	if len(s) > maxLen {
-		s = s[:maxLen] + "...(截断)"
-	}
-	return s
-}
+
 
 // IntString 兼容 115 响应中「数字或字符串」两种形态的整数字段
 // （aid/iv/status/fileid/count 等字段偶发返回字符串，普通 int 解析会失败）。
@@ -200,6 +188,18 @@ func (v *IntString) UnmarshalJSON(b []byte) error {
 	}
 	*v = IntString(n)
 	return nil
+}
+
+// prettyJSON 把响应体转成可读文本：先按 any 解析（自动解码 \uXXXX 转义为中文明文），
+// 再缩进重序列化。非 JSON 时原样返回（错误日志/调试用，绝不截断）。
+func prettyJSON(b []byte) string {
+	var v any
+	if err := json.Unmarshal(b, &v); err == nil {
+		if out, err := json.MarshalIndent(v, "", "  "); err == nil {
+			return string(out)
+		}
+	}
+	return string(b)
 }
 
 // ──── SHA1 工具（全部输出【大写】十六进制，115 服务端强制要求）────
@@ -263,7 +263,7 @@ func FileSHA1Partial(filePath string, start, end int64) string {
 // ──── 开放平台私有响应结构（云端原始返回的 JSON 承载）────
 
 // fileListResponse 是 /open/ufile/files 响应 data 段的单条文件项。
-// ⚠️ data 段是纯数组，count 在外壳平铺（GetFileList 用 CallRaw 一次拿完整响应再拆）。
+// ⚠️ 该接口 count 在外壳平铺；分页终止用「返回条数不足一页」判定，不依赖 count。
 type fileListResponse struct {
 	Fid      string    `json:"fid"`
 	Name     string    `json:"fn"`

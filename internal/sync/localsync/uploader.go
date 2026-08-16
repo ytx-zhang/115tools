@@ -130,7 +130,7 @@ func (u *Uploader) upFileTask(ctx context.Context, parentFid, fPath string, file
 	savePath := fPath
 	ext := filepath.Ext(fPath)
 	if u.rules.CheckVideo(ext, size) {
-		savePath, size = common.VideoStrmMeta(fPath)
+		savePath = common.VideoToStrmPath(fPath)
 		if dbFid := u.db.GetFid(savePath); dbFid != "" {
 			if err := u.api.MoveFile(ctx, dbFid, u.paths.TempFid); err != nil {
 				return fmt.Errorf("[%s]: 清理旧视频失败: %w", savePath, err)
@@ -138,6 +138,11 @@ func (u *Uploader) upFileTask(ctx context.Context, parentFid, fPath string, file
 		}
 		if err := common.WriteStrmFile(u.paths.StrmUrl, info.PickCode, savePath); err != nil {
 			return fmt.Errorf("[%s]: 写入strm文件失败: %w", savePath, err)
+		}
+		// DB 记录 .strm 的 size 用写盘后文件实际 mtime（与 HandleFile 的 mtime 比对口径一致），
+		// 避免 time.Now() 与落盘跨秒导致下次扫描误判修改 → 删云端重传震荡。
+		if st, err := os.Stat(savePath); err == nil {
+			size = st.ModTime().Unix()
 		}
 		if err := os.Remove(fPath); err != nil {
 			return fmt.Errorf("[%s]: 删除视频文件失败: %w", fPath, err)
@@ -179,6 +184,11 @@ func (u *Uploader) upStrmTask(ctx context.Context, parentFid, fPath string) erro
 	if err := common.WriteStrmFile(u.paths.StrmUrl, pickcode, fPath); err != nil {
 		return fmt.Errorf("[%s]: 文件写入失败: %w", fPath, err)
 	}
-	u.db.SaveRecord(fPath, fid, time.Now().Unix())
+	// 用写盘后文件实际 mtime 作为 size（与 HandleFile 的 mtime 比对口径一致）。
+	size := time.Now().Unix()
+	if st, err := os.Stat(fPath); err == nil {
+		size = st.ModTime().Unix()
+	}
+	u.db.SaveRecord(fPath, fid, size)
 	return nil
 }

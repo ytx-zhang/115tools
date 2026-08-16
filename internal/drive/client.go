@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-resty/resty/v2"
 	"github.com/ytx-zhang/115tools/internal/config"
-	"resty.dev/v3"
+	"golang.org/x/time/rate"
 )
 
 // Resp 是 115 开放平台统一响应外壳：state 为 false 时 code/message 是错误信息。
@@ -21,26 +21,11 @@ type Resp[T any] struct {
 	Data    T      `json:"data"`
 }
 
-// Form 是表单/查询参数的键值集合（ReqWithForm/ReqWithQuery 使用）。
+// Form 是表单/查询参数的键值集合（Get/Post/Raw 的参数入口，GET 走 query、POST 走 form）。
 type Form map[string]string
 
-// RestyOption 是单次请求的函数式装配选项（复用 OpenList/115-sdk-go 模式）。
+// RestyOption 是单次请求的函数式装配选项（仅 ReqWithUA 使用；表单/查询参数由 Get/Post 直接传入）。
 type RestyOption func(*resty.Request)
-
-// ReqWithForm 设置表单参数并过滤空值（115 空串字段直接省略）。
-func ReqWithForm(form Form) RestyOption {
-	return func(r *resty.Request) { r.SetFormData(removeEmpty(form)) }
-}
-
-// ReqWithQuery 设置查询参数并过滤空值。
-func ReqWithQuery(query Form) RestyOption {
-	return func(r *resty.Request) { r.SetQueryParams(removeEmpty(query)) }
-}
-
-// ReqWithResp 注册响应解析目标（doRequest 内部使用，把统一外壳解析进 resp）。
-func ReqWithResp(v any) RestyOption {
-	return func(r *resty.Request) { r.SetResult(v) }
-}
 
 // ReqWithUA 设置 User-Agent（下载直链取链用，直链绑定 UA）。
 func ReqWithUA(ua string) RestyOption {
@@ -58,11 +43,6 @@ func removeEmpty(m Form) Form {
 	return out
 }
 
-// is401Code 判断错误码是否为 401 系列（115 用 4010/40100 表示 access_token 失效）。
-func is401Code(code int64) bool {
-	return strings.HasPrefix(strconv.FormatInt(code, 10), "401")
-}
-
 // sharedHTTPClient 供全项目各模块复用（连接池），30s 超时防挂死。
 // 下载大文件时若需更长超时，调用方应使用 http.Transport 自建。
 var sharedHTTPClient = &http.Client{
@@ -74,8 +54,13 @@ func HTTPClient() *http.Client {
 	return sharedHTTPClient
 }
 
+// apiLimiter 全局 API 限流：2/s 恢复 + burst 3（突发 3 个瞬时并发，之后每 0.5s 补 1 个令牌）。
+// resty v2 无内置限流器，用 x/time/rate 手写（与 v3 的 NewRateLimitTokenBucket 语义一致）。
+// ⚠️ 必须包级而非实例字段：ApplyConfig 热切换会重建 Client，实例字段会让限流器随旧实例失效。
+var apiLimiter = rate.NewLimiter(rate.Limit(2), 3)
+
 // Client 是 115 开放平台 API 客户端（refresh_token 登录）。
-// 请求经 resty v3 装配统一限流（内置令牌桶 burst 3 + 2/s）+ 30s 超时 + Bearer 鉴权。
+// 请求经 resty v2 装配统一限流（2/s burst 3）+ 30s 超时 + Bearer 鉴权。
 // token 自动刷新由独立守护 RefreshDaemon 负责（见 token.go），请求前同步保活。
 type Client struct {
 	rc  *resty.Client  // 底层 HTTP 客户端（已装配好限流/鉴权中间件）
@@ -84,19 +69,38 @@ type Client struct {
 
 // NewClient 创建 115 开放平台客户端（纯装配，无网络请求）。
 // 固定 baseURL 为 proapi.115.com。
-// ⚠️ resty v3 默认 SetResult 会消费 body，中间件里 Bytes() 将为空；
-// 开启无限读取后 body 常驻内存，CallRaw 与 401 判定才可靠。
+// 重试交给 resty 内置机制：识别「稍后再试」（115 业务限流）后指数退避重试最多 3 次。
+// 用 resty 而非手写循环的原因：AddRetryCondition 用 body 通用反序列化判断
+// state=false + message「稍后再试」（与泛型 Result 类型解耦），退避/次数由
+// SetRetryWaitTime/SetRetryCount 统一管理。
 func NewClient(cfg *config.Config) *Client {
 	c := &Client{cfg: cfg}
 	c.rc = resty.NewWithClient(HTTPClient()).
 		SetBaseURL("https://proapi.115.com").
 		SetTimeout(30 * time.Second).
-		SetResponseBodyUnlimitedReads(true).
-		// 内置令牌桶限流：burst 3 允许突发 3 个瞬时并发，之后每 0.5s 补 1 个
-		// 令牌（2/s），排队的请求按此速率逐个放行；空闲后桶回满又突发 3 个。
-		SetRateLimiter(resty.NewRateLimitTokenBucket(2, 3)).
-		AddRequestMiddleware(func(_ *resty.Client, r *resty.Request) error {
-			// 请求发出前：确保 token 有效（保活刷新）并注入 Bearer
+		SetRetryCount(3).
+		SetRetryWaitTime(time.Second).
+		SetRetryMaxWaitTime(4 * time.Second).
+		AddRetryCondition(func(resp *resty.Response, err error) bool {
+			// 仅对 115 业务限流重试：HTTP 200 + state=false + message「稍后再试」。
+			// 用通用外壳判断（与泛型 Result 类型解耦）；网络错误（err != nil）不重试。
+			if err != nil || resp == nil || resp.StatusCode() != http.StatusOK {
+				return false
+			}
+			var shell struct {
+				State   bool   `json:"state"`
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(resp.Body(), &shell) != nil {
+				return false
+			}
+			return !shell.State && strings.Contains(shell.Message, "稍后再试")
+		}).
+		OnBeforeRequest(func(_ *resty.Client, r *resty.Request) error {
+			// 请求发出前：限流（2/s burst 3）+ 确保 token 有效（保活刷新）并注入 Bearer
+			if err := apiLimiter.Wait(r.Context()); err != nil {
+				return err
+			}
 			if err := refreshAccessToken(r.Context(), c.cfg, ""); err != nil {
 				return err
 			}
@@ -106,88 +110,60 @@ func NewClient(cfg *config.Config) *Client {
 	return c
 }
 
-// doRequest 构造请求并执行（所有请求的最终出口，仅内部使用）。
-func (c *Client) doRequest(ctx context.Context, url, method string, opts ...RestyOption) (*resty.Response, error) {
+// Get 发送 GET 请求，把响应 data 段反序列化为 T 后返回。
+// query 是查询参数（GET 走 query 串）；opts 用于附加特殊选项（如 ReqWithUA）。
+// state=false 或网络错误时直接报错（错误含 115 code/message 或底层网络错误）。
+func Get[T any](ctx context.Context, c *Client, url string, query Form, opts ...RestyOption) (T, error) {
+	resp, err := exec[T](ctx, c, http.MethodGet, url, query, opts...)
+	return resp.Data, err
+}
+
+// Post 发送 POST 请求，把响应 data 段反序列化为 T 后返回。
+// form 是表单参数（POST 走 form body）；opts 用于附加特殊选项（如 ReqWithUA）。
+// state=false 或网络错误时直接报错。data 段为 null/空时返回零值 T。
+func Post[T any](ctx context.Context, c *Client, url string, form Form, opts ...RestyOption) (T, error) {
+	resp, err := exec[T](ctx, c, http.MethodPost, url, form, opts...)
+	return resp.Data, err
+}
+
+// exec 统一执行请求：按 method 自动决定 query/form 装配 → 解析统一外壳 Resp[T]
+// → state=false 报错 → 返回外壳（Get/Post 取 Data 段）。
+// token 保活刷新由 OnBeforeRequest 中间件负责，重试由 resty AddRetryCondition 机制负责。
+func exec[T any](ctx context.Context, c *Client, method, url string, params Form, opts ...RestyOption) (Resp[T], error) {
+	// ⚠️ 解析用 Resp[json.RawMessage] 而非 Resp[T]：115 错误场景（如创建同名目录 code 20004）
+	// data 段是 []（与 T 结构不匹配），直接 SetResult(&Resp[T]) 会在 resty 内部解析失败，
+	// 导致 state/code 读不到（报错信息丢失 115 的 code）。用 RawMessage 宽松解析外壳，
+	// data 段延后到 state=true 时再手动反序列化到 T。
+	var shell Resp[json.RawMessage]
 	req := c.rc.R().SetContext(ctx)
+	if method == http.MethodGet {
+		req.SetQueryParams(removeEmpty(params))
+	} else {
+		req.SetFormData(removeEmpty(params))
+	}
 	for _, o := range opts {
 		o(req)
 	}
-	return req.Execute(method, url)
-}
-
-// Call 调用 115 开放平台接口：解析统一外壳（Resp）后把 data 段反序列化到 respData。
-// respData 必须是 data 段的目标类型（如 *DirInfo、*StructOrArray[T]、*[]T、*struct{...}），
-// 不能传 *Resp[T]——那会导致 data 段被二次套壳解析成空。
-// token 失效（code 99 / 401 系列）时自动刷新并重试一次；respData 传 nil 表示不关心返回体。
-func (c *Client) Call(ctx context.Context, url, method string, respData any, opts ...RestyOption) error {
-	return c.call(ctx, url, method, respData, true, false, opts...)
-}
-
-// CallRaw 调用接口但不解析外壳，直接把完整响应体反序列化到 respData
-// （外壳不统一/需手动解析 data 的场景，如 upload/init、get_token、get_quota_info）。
-// respData 传 *Resp[T]（完整外壳含 state/data）即可，调用方需自行校验 State。
-func (c *Client) CallRaw(ctx context.Context, url, method string, respData any, opts ...RestyOption) error {
-	return c.call(ctx, url, method, respData, false, false, opts...)
-}
-
-// call 核心实现。retry 为 true 表示已刷新过 token（最多重试一次）。
-// 重试策略：限流类「稍后再试」自动退避重试（resty v3 的重试机制在中间件层不可靠，
-// 收敛到此处显式处理）；access_token 失效（code 99 / 401 系列）刷新后重试一次。
-func (c *Client) call(ctx context.Context, url, method string, respData any, extractData, retry bool, opts ...RestyOption) error {
-	for attempt := 0; ; attempt++ {
-		var resp Resp[json.RawMessage]
-		response, err := c.doRequest(ctx, url, method, append(opts, ReqWithResp(&resp))...)
-		if err != nil {
-			return err
+	req.SetResult(&shell)
+	response, err := req.Execute(method, url)
+	if err != nil {
+		// 网络错误或响应体解析失败（如 115 突然改返回格式）：附上完整原始响应便于调试。
+		// open 接口返回恒为 JSON，prettyJSON 解码 \uXXXX 转义，中文可读。
+		if response != nil && len(response.Body()) > 0 {
+			return Resp[T]{}, fmt.Errorf("%w (原始响应: %s)", err, prettyJSON(response.Body()))
 		}
-		if resp.State {
-			if respData == nil {
-				return nil
-			}
-			var data []byte
-			if extractData {
-				data = resp.Data
-			} else {
-				// CallRaw：不解析外壳，直接用完整响应体
-				data = response.Bytes()
-			}
-			if len(data) == 0 || string(data) == "null" {
-				return nil // data 缺失（null）按空处理，由调用方按需校验
-			}
-			return json.Unmarshal(data, respData)
-		}
-		// state=false：按错误类别分流
-		if !retry && (resp.Code == 99 || is401Code(resp.Code)) {
-			// access_token 失效：刷新后重试一次
-			if err := refreshAccessToken(ctx, c.cfg, ""); err != nil {
-				return err
-			}
-			retry = true
-			continue
-		}
-		if strings.Contains(resp.Message, "稍后再试") {
-			// 限流：退避重试最多 3 次（1s 起指数退避）
-			if attempt < 2 {
-				delay := time.Duration(1<<attempt) * time.Second
-				if err := sleepCtx(ctx, delay); err != nil {
-					return err
-				}
-				continue
-			}
-			return fmt.Errorf("%w: %s (code: %d, HTTP %d)", ErrRateLimited, resp.Message, resp.Code, response.StatusCode())
-		}
-		return fmt.Errorf("[115报错] %s (code: %d)", resp.Message, resp.Code)
+		return Resp[T]{}, err
 	}
-}
-
-// sleepCtx 可取消的等待（限流退避用）。
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
+	if !shell.State {
+		return Resp[T]{}, fmt.Errorf("[115报错] %s (code: %d, HTTP %d, 原始响应: %s)",
+			shell.Message, shell.Code, response.StatusCode(), prettyJSON(response.Body()))
 	}
+	var resp Resp[T]
+	if len(shell.Data) == 0 || string(shell.Data) == "null" {
+		return resp, nil // data 缺失（null）按空处理，由调用方按需校验
+	}
+	if err := json.Unmarshal(shell.Data, &resp.Data); err != nil {
+		return Resp[T]{}, fmt.Errorf("解析 data 段失败: %w (原始响应: %s)", err, prettyJSON(shell.Data))
+	}
+	return resp, nil
 }

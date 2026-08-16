@@ -15,20 +15,18 @@ import (
 
 // addTasks 批量添加离线下载链接（http/https/magnet/ed2k），保存到 saveDirID。
 func (c *Client) addTasks(ctx context.Context, urls []string, saveDirID string) ([]OfflineAddResult, error) {
-	var res []OfflineAddResult
-	err := c.Call(ctx, "/open/offline/add_task_urls", "POST", &res,
-		ReqWithForm(Form{
+	return Post[[]OfflineAddResult](ctx, c, "/open/offline/add_task_urls",
+		Form{
 			"urls":       strings.Join(urls, "\n"),
 			"wp_path_id": saveDirID,
-		}))
-	return res, err
+		})
 }
 
 // ListTasks 获取云下载任务列表的一页（page 从 1 开始）。
 func (c *Client) ListTasks(ctx context.Context, page int) (*OfflineTaskPage, error) {
-	var res OfflineTaskPage
-	if err := c.Call(ctx, "/open/offline/get_task_list", "GET", &res,
-		ReqWithQuery(Form{"page": strconv.Itoa(max(page, 1))})); err != nil {
+	res, err := Get[OfflineTaskPage](ctx, c, "/open/offline/get_task_list",
+		Form{"page": strconv.Itoa(max(page, 1))})
+	if err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -41,8 +39,8 @@ func (c *Client) DeleteTask(ctx context.Context, infoHash string, deleteFiles bo
 	if deleteFiles {
 		delSource = "1"
 	}
-	err := c.Call(ctx, "/open/offline/del_task", "POST", nil,
-		ReqWithForm(Form{"info_hash": infoHash, "del_source_file": delSource}))
+	_, err := Post[struct{}](ctx, c, "/open/offline/del_task",
+		Form{"info_hash": infoHash, "del_source_file": delSource})
 	return FinishLog(t0, "删除离线任务", err, "info_hash", infoHash, "删除源文件", deleteFiles)
 }
 
@@ -50,16 +48,16 @@ func (c *Client) DeleteTask(ctx context.Context, infoHash string, deleteFiles bo
 // flag：0 已完成，1 全部，2 失败，3 进行中，4 已完成且删源文件，5 全部且删源文件。
 func (c *Client) ClearTasks(ctx context.Context, flag int) error {
 	t0 := time.Now()
-	err := c.Call(ctx, "/open/offline/clear_task", "POST", nil,
-		ReqWithForm(Form{"flag": strconv.Itoa(flag)}))
+	_, err := Post[struct{}](ctx, c, "/open/offline/clear_task",
+		Form{"flag": strconv.Itoa(flag)})
 	return FinishLog(t0, "批量清除离线任务", err, "flag", flag)
 }
 
 // GetQuota 获取云下载配额信息。
 // data 段即 {count, surplus, used}（对齐 OpenList 的 OfflineQuotaInfo），用 Call 直接解析。
 func (c *Client) GetQuota(ctx context.Context) (*OfflineQuota, error) {
-	var res OfflineQuota
-	if err := c.Call(ctx, "/open/offline/get_quota_info", "GET", &res); err != nil {
+	res, err := Get[OfflineQuota](ctx, c, "/open/offline/get_quota_info", nil)
+	if err != nil {
 		return nil, err
 	}
 	return &res, nil
