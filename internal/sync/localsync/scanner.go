@@ -72,7 +72,7 @@ func (sc *Scanner) scanDirLocked(ctx context.Context, currentPath string, recurs
 	if err != nil {
 		if os.IsNotExist(err) {
 			logs.Debug(logs.ModuleSync, "本地目录已不存在，兜底清理云端残留", "路径", currentPath)
-			if cerr := sc.co.CloudCleanTask(ctx, []string{currentPath}, currentPath); cerr != nil {
+			if cerr := sc.co.CloudCleanTask(ctx, currentPath); cerr != nil {
 				logs.Debug(logs.ModuleSync, "本地目录已删除，兜底清理云端时部分项已处理", "路径", currentPath, "错误", cerr)
 			}
 			return
@@ -167,7 +167,7 @@ func (sc *Scanner) HandleFile(ctx context.Context, batch *sync.WaitGroup, fullPa
 
 	if fileInfo == nil {
 		// 本地不可用/已删 → 直接删云端（DB 由 CloudCleanTask 末尾清）
-		if cerr := sc.co.CloudCleanTask(ctx, []string{fullPath}, fullPath); cerr != nil {
+		if cerr := sc.co.CloudCleanTask(ctx, fullPath); cerr != nil {
 			logs.Error(logs.ModuleSync, "云端删除失败", "路径", fullPath, "错误", cerr)
 		}
 		return
@@ -193,7 +193,7 @@ func (sc *Scanner) HandleFile(ctx context.Context, batch *sync.WaitGroup, fullPa
 			return // mtime 未变 → 本就有记录，无需重写
 		}
 		// mtime 变 → 删旧视频 + 重传
-		if cerr := sc.co.CloudCleanTask(ctx, []string{fullPath}, fullPath); cerr != nil {
+		if cerr := sc.co.CloudCleanTask(ctx, fullPath); cerr != nil {
 			logs.Error(logs.ModuleSync, "云端删除失败", "路径", fullPath, "错误", cerr)
 		}
 		sc.enqueueUpload(ctx, batch, fullPath)
@@ -205,7 +205,7 @@ func (sc *Scanner) HandleFile(ctx context.Context, batch *sync.WaitGroup, fullPa
 	}
 	// size 变 → 先删云端旧同名文件再重传：115 允许目录内同名文件并存，
 	// 只「先传新」不清旧会残留两个同名不同大小的文件（CloudCleanTask 按类型删除）。
-	if cerr := sc.co.CloudCleanTask(ctx, []string{fullPath}, fullPath); cerr != nil {
+	if cerr := sc.co.CloudCleanTask(ctx, fullPath); cerr != nil {
 		logs.Error(logs.ModuleSync, "云端删除失败", "路径", fullPath, "错误", cerr)
 	}
 	sc.enqueueUpload(ctx, batch, fullPath) // size 变 → 上传

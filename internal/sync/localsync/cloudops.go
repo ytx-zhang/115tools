@@ -4,7 +4,6 @@ package localsync
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -61,69 +60,47 @@ func (co *CloudOps) AddCloudFolder(ctx context.Context, path string) (string, er
 	return parentFid, nil
 }
 
-// CloudCleanTask 批量清理本地已删路径对应的云端项：
-// 分类交给 classifyCleanPaths：.strm→MoveFile 到 TempFid（保留视频）；目录→先搬子 .strm 视频
+// CloudCleanTask 清理单个本地已删/已变路径对应的云端项：
+// 分类交给 classifyCleanPath：.strm→MoveFile 到 TempFid（保留视频）；目录→先搬子 .strm 视频
 // 再 DeleteFile；普通文件→DeleteFile。最后 BatchClearPaths 清库。
-func (co *CloudOps) CloudCleanTask(ctx context.Context, fPaths []string, workPath string) error {
-	if len(fPaths) == 0 {
-		return nil
-	}
+// 调用方（HandleFile）逐文件清理，无需批量路径；目录内的子 .strm 视频仍按 FID 批量移动。
+func (co *CloudOps) CloudCleanTask(ctx context.Context, fPath string) error {
 	t0 := time.Now()
 
-	moveFids, deleteFids := co.classifyCleanPaths(fPaths)
+	moveFids, deleteFids := co.classifyCleanPath(fPath)
 
 	if len(moveFids) > 0 {
 		if err := co.api.MoveFile(ctx, strings.Join(moveFids, ","), co.paths.TempFid); err != nil {
-			return fmt.Errorf("[%s]: 批量移动云端视频失败: %w", workPath, err)
+			return fmt.Errorf("[%s]: 批量移动云端视频失败: %w", fPath, err)
 		}
 	}
 
 	if len(deleteFids) > 0 {
 		if err := co.api.DeleteFile(ctx, strings.Join(deleteFids, ",")); err != nil {
-			return fmt.Errorf("[%s]: 批量删除云端项失败: %w", workPath, err)
+			return fmt.Errorf("[%s]: 批量删除云端项失败: %w", fPath, err)
 		}
 	}
 
-	if len(fPaths) == 1 {
-		logs.Info(logs.ModuleSync, "清理过时文件", "路径", fPaths[0], "耗时", time.Since(t0))
-	} else {
-		logs.Info(logs.ModuleSync, "清理过时文件", "目标目录", workPath, "文件数", len(fPaths), "耗时", time.Since(t0))
-	}
-	co.db.BatchClearPaths(fPaths)
+	logs.Info(logs.ModuleSync, "清理过时文件", "路径", fPath, "耗时", time.Since(t0))
+	co.db.BatchClearPaths([]string{fPath})
 
 	return nil
 }
 
-// classifyCleanPaths 把待清理路径按类型分为「移动（.strm 及其目录下的子 .strm）」与
-// 「删除（普通文件/目录）」两类 FID 列表。纯分类无副作用，云端执行由 CloudCleanTask 负责。
-func (co *CloudOps) classifyCleanPaths(fPaths []string) (moveFids, deleteFids []string) {
-	appendMove := func(fid string) {
-		if fid != "" {
-			moveFids = append(moveFids, fid)
-		}
+// classifyCleanPath 把单个待清理路径按类型分为「移动（.strm 及其目录下的子 .strm）」与
+// 「删除（普通文件/目录）」两类 FID。纯分类无副作用，云端执行由 CloudCleanTask 负责。
+func (co *CloudOps) classifyCleanPath(fPath string) (moveFids, deleteFids []string) {
+	fid, size := co.db.GetInfo(fPath)
+	if fid == "" {
+		return nil, nil
 	}
 
-	for _, fPath := range fPaths {
-		fid, size := co.db.GetInfo(fPath)
-		if fid == "" {
-			continue
-		}
-
-		if common.IsStrmPath(fPath) {
-			appendMove(fid)
-		} else if size == store.SizeDir {
-			for _, vf := range co.db.ListStrmFids(fPath) {
-				appendMove(vf)
-			}
-			deleteFids = append(deleteFids, fid)
-		} else {
-			deleteFids = append(deleteFids, fid)
-		}
+	if common.IsStrmPath(fPath) {
+		return []string{fid}, nil
 	}
-	// 去重：同一视频可能在 .strm 目录与其子项中被重复收集（O(n²) → O(n log n)）。
-	// 注意：本工具链 slices.Sort 返回 no value（标准库签名），不能链式传入 slices.Compact；
-	// 须分两行：先排序，再原地压缩去重。
-	slices.Sort(moveFids)
-	moveFids = slices.Compact(moveFids)
-	return moveFids, deleteFids
+	if size == store.SizeDir {
+		// 目录：先搬走子 .strm 指向的视频，再删目录本身
+		return co.db.ListStrmFids(fPath), []string{fid}
+	}
+	return nil, []string{fid}
 }

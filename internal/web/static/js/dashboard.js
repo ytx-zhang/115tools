@@ -230,6 +230,9 @@ async function clearLogs() {
   loadingHistory = false;
   historyExhausted = false;
   if (logBox) logBox.innerHTML = '<div class="muted empty">暂无日志</div>';
+  // chip 计数来自事件驱动的 counts SSE（仅新日志写入时推送），清空后若长时间无新日志
+  // 旧计数不会刷新，故本地立即归零；后续 counts SSE 会以服务端权威值校正。
+  for (const k of filterKeys) _updateChip(k, '0');
   try { await api('/api/logs/clear', { method: 'POST' }); } catch { /* 忽略 */ }
 }
 
