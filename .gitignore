@@ -30,7 +30,8 @@ count.sh
 # 旧版本文档归档（旧项目代码压缩包）
 archive/
 
-# Git 提交临时消息文件（PowerShell 中文提交用）
+# Git 提交临时消息文件（PowerShell 中文提交用，统一命名：.commitmsg.*）
+.commitmsg.*
 .gitcommit_msg
 .gitmsg_tmp
 
