@@ -1,0 +1,41 @@
+# 数据库文件（运行时生成，无需提交）
+data/files.db
+data/*.db
+
+# 配置文件（含token等敏感信息）
+config/config.yaml
+data/config.yaml
+cookie.txt
+
+# Go 编译产物
+server
+115tools
+*.exe
+*.exe~
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 本地脚本
+update-deps.ps1
+count.sh
+
+# 旧版本文档归档（旧项目代码压缩包）
+archive/
+
+# Git 提交临时消息文件（PowerShell 中文提交用）
+.gitcommit_msg
+.gitmsg_tmp
+
+# CodeBuddy 本地数据
+.codebuddy/
+
+# WorkBuddy 本地数据（内存/记忆等，勿提交）
+.workbuddy/

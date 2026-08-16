@@ -1,0 +1,25 @@
+# 版本控制
+.git
+.github
+
+# 运行时数据（容器通过 volume 挂载，无需打进镜像）
+config/
+data/
+
+# 编辑器/IDE
+.idea
+.vscode
+.codebuddy
+
+# 文档与杂项
+*.md
+LICENSE
+.dockerignore
+.golangci.yml
+
+# 旧版本文档归档
+archive/
+
+# 测试与缓存
+*_test.go
+/coverage.out

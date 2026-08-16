@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>115 Tools</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" sizes="64x64">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script type="module" src="/static/js/main.js"></script>
+</head>
+
+<body>
+  <!-- 登录页 -->
+  <div id="login" class="login-wrap" hidden>
+    <form id="login-form" name="login" class="login-card">
+      <div class="login-logo">☁️</div>
+      <h1>115 Tools</h1>
+      <p class="muted">请登录以继续</p>
+      <input name="username" placeholder="账号" autocomplete="username" required>
+      <input name="password" type="password" placeholder="密码" autocomplete="current-password" required>
+      <button type="submit" class="btn primary block">登 录</button>
+    </form>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="app-view" class="layout" hidden>
+    <aside class="sidebar">
+      <div class="brand">☁️ <span>115 Tools</span></div>
+      <nav id="nav">
+        <button class="nav-item active" data-view="dashboard">📊 <span>仪表盘</span></button>
+        <button class="nav-item" data-view="offline">⬇️ <span>离线下载</span></button>
+        <button class="nav-item" data-view="settings">⚙️ <span>设置</span></button>
+      </nav>
+      <button id="logout-btn" class="nav-item logout" hidden>🚪 <span>退出登录</span></button>
+    </aside>
+
+    <main class="content">
+      <!-- 仪表盘 -->
+      <section id="view-dashboard" class="view">
+        <h2>仪表盘</h2>
+        <div id="config-banner" class="banner" hidden>
+          ⚠️ 配置不完整，同步未启动，请到「设置」补齐：<span id="config-banner-missing"></span>
+        </div>
+        <div id="init-error-banner" class="banner error" hidden>
+          初始化失败：<span id="init-error-text"></span>
+        </div>
+        <div class="grid2">
+          <div class="card" id="card-local">
+            <div class="card-head">
+              <h3>本地同步</h3><span class="badge warn" id="local-badge">未就绪</span>
+            </div>
+            <div class="task-nums"><b id="local-done">0</b> / <span id="local-total">0</span></div>
+            <div class="progress"><i id="local-bar"></i></div>
+            <button class="btn primary" id="local-btn" disabled>开始扫描</button>
+          </div>
+          <div class="card" id="card-sync">
+            <div class="card-head">
+              <h3>云端同步</h3><span class="badge warn" id="sync-badge">未就绪</span>
+            </div>
+            <div class="task-nums"><b id="sync-done">0</b> / <span id="sync-total">0</span></div>
+            <div class="progress"><i id="sync-bar"></i></div>
+            <button class="btn primary" id="sync-btn" disabled>开始同步</button>
+          </div>
+          <div class="card" id="card-strm">
+            <div class="card-head">
+              <h3>STRM 生成</h3><span class="badge warn" id="strm-badge">未就绪</span>
+            </div>
+            <div class="task-nums"><b id="strm-done">0</b> / <span id="strm-total">0</span></div>
+            <div class="progress"><i id="strm-bar"></i></div>
+            <button class="btn primary" id="strm-btn" disabled>开始生成</button>
+          </div>
+        </div>
+        <!-- 统一日志卡片：运行日志与错误日志已合并为一条日志流，用级别过滤按钮切换视角 -->
+        <div class="card">
+          <div class="card-head">
+            <h3>日志</h3>
+            <div class="card-actions">
+              <div class="log-filter" id="log-filter">
+                <button type="button" class="chip active" data-lv="all">全部 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-lv="warn">警告 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-lv="error">错误 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-mod="sync">同步 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-mod="strm">STRM <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-mod="drive">直链 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-mod="cloud">云端 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-mod="db">数据库 <span class="chip-count">0</span></button>
+                <button type="button" class="chip" data-mod="system">系统 <span class="chip-count">0</span></button>
+              </div>
+              <button class="btn ghost" id="log-clear" type="button">清空</button>
+            </div>
+          </div>
+          <div class="log-box" id="log-box">
+            <div class="muted empty">正在连接日志流…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 离线下载 -->
+      <section id="view-offline" class="view" hidden>
+        <h2>离线下载 <small class="muted" id="offline-quota"></small></h2>
+        <form id="offline-add-form" name="offline-add">
+          <fieldset>
+            <legend>新建离线任务</legend>
+            <div class="form-grid">
+              <label class="col-2">下载链接
+                <small class="muted">每行一条，支持 http/magnet/ed2k</small>
+                <textarea id="offline-urls" name="urls" rows="4" placeholder="magnet:?xt=urn:btih:..."></textarea>
+              </label>
+              <label>种子文件（.torrent）
+                <small class="muted">上传 .torrent，与链接二选一</small>
+                <input id="offline-torrent" type="file" name="torrent" accept=".torrent">
+              </label>
+              <label>保存到云端目录
+                <small class="muted">留空默认 STRM 目录；/ 为根</small>
+                <input id="offline-save-path" name="save_path" placeholder="/影视/下载">
+              </label>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn primary">添加任务</button>
+            </div>
+          </fieldset>
+        </form>
+        <div class="card">
+          <div class="card-head">
+            <h3>任务列表</h3>
+            <div class="row">
+              <button class="btn sm" id="offline-refresh">刷新</button>
+              <button class="btn sm" data-clear="0">清除已完成</button>
+              <button class="btn sm" data-clear="2">清除失败</button>
+              <button class="btn sm danger" data-clear="1">清空全部</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>大小</th>
+                  <th>进度</th>
+                  <th>状态</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="offline-tbody"></tbody>
+            </table>
+          </div>
+          <div class="row pager">
+            <button class="btn sm" id="page-prev">上一页</button>
+            <span id="page-info" class="muted"></span>
+            <button class="btn sm" id="page-next">下一页</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section id="view-settings" class="view" hidden>
+        <h2>设置</h2>
+        <form id="config-form" name="config" class="config-form">
+          <fieldset>
+            <legend>账号凭证 <small class="muted">保存后重建同步器</small></legend>
+            <div class="form-grid">
+              <label class="col-2"><span class="req">*</span> Refresh_token
+                <small class="muted">换取访问令牌（115 开放平台）</small>
+                <input name="refresh_token" type="password" autocomplete="off">
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>同步配置</legend>
+            <div class="form-grid">
+              <label><span class="req">*</span> 同步目录
+                <input name="sync_path" placeholder="/媒体库">
+              </label>
+              <label><span class="req">*</span> STRM 生成目录
+                <input name="strm_path" placeholder="/待整理">
+              </label>
+              <label><span class="req">*</span> 云端临时目录
+                <input name="temp_path" placeholder="/Temp">
+              </label>
+              <label><span class="req">*</span> STRM 链接 URL
+                <input name="strm_url" placeholder="http://设备IP:端口号">
+              </label>
+              <label>本地同步去抖窗口
+                <small class="muted">非视频事件停写 N 分钟后批量同步；视频文件实时直传不受限；0=默认10</small>
+                <input name="debounce_minutes" type="number" min="0">
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>视频文件扩展名</legend>
+            <div class="form-grid">
+              <label class="col-2">扩展名
+                <small class="muted">逗号分隔，如 .mp4, .mkv</small>
+                <input name="video_exts" placeholder=".mp4, .mkv, ...">
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>上传排除</legend>
+            <div class="form-grid">
+              <label class="col-2">后缀
+                <small class="muted">逗号分隔，如 .part, .crdownload, .DS_Store</small>
+                <input name="upload_exclude" placeholder=".part, .crdownload, ...">
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>定时全量同步 <small class="muted">兜底监听遗漏与云端扫描</small></legend>
+            <div class="form-grid">
+              <label class="chk col-2"><input type="checkbox" name="cron_enabled"> 启用定时全量同步
+                <small class="muted">关闭后仅依赖文件监听</small>
+              </label>
+              <label>同步间隔
+                <small class="muted">小时；0=默认12</small>
+                <input name="cron_interval_hours" type="number" min="1">
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>登录验证 <small class="muted">用户名留空则关闭验证</small></legend>
+            <div class="form-grid">
+              <label>用户名
+                <input name="auth_username" autocomplete="off">
+              </label>
+              <label>密码
+                <small class="muted">设置用户名后必填</small>
+                <input name="auth_password" type="password" placeholder="留空则保持不变" autocomplete="new-password">
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="form-actions">
+            <button type="submit" class="btn primary">保存配置</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <!-- 离线任务行模板：JS 克隆渲染，文本全部用 textContent 写入避免 XSS -->
+  <template id="offline-row">
+    <tr>
+      <td class="name" data-cell="name"></td>
+      <td data-cell="size"></td>
+      <td>
+        <div class="progress" style="width:90px"><i data-cell="bar"></i></div><span data-cell="pct"></span>
+      </td>
+      <td><span class="badge" data-cell="status"></span></td>
+      <td>
+        <button class="btn sm" data-cell="del"></button>
+        <button class="btn sm danger" data-cell="delFiles"></button>
+      </td>
+    </tr>
+  </template>
+
+  <div id="toast-box"></div>
+</body>
+
+</html>
