@@ -203,6 +203,11 @@ func (sc *Scanner) HandleFile(ctx context.Context, batch *sync.WaitGroup, fullPa
 	if fileInfo.Size() == dbSize {
 		return // size 未变 → 本就有记录，无需重写
 	}
+	// size 变 → 先删云端旧同名文件再重传：115 允许目录内同名文件并存，
+	// 只「先传新」不清旧会残留两个同名不同大小的文件（CloudCleanTask 按类型删除）。
+	if cerr := sc.co.CloudCleanTask(ctx, []string{fullPath}, fullPath); cerr != nil {
+		logs.Error(logs.ModuleSync, "云端删除失败", "路径", fullPath, "错误", cerr)
+	}
 	sc.enqueueUpload(ctx, batch, fullPath) // size 变 → 上传
 }
 
