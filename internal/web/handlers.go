@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -29,19 +28,24 @@ const (
 )
 
 type sessionStore struct {
-	mu     sync.Mutex
-	tokens map[string]time.Time
+	// sync.Map：token → time.Time（过期时刻）。登录写入低频、校验读取高频，
+	// 正是 sync.Map 目标场景（读多写少、key 不相交），无需加锁。
+	tokens sync.Map
 }
 
 func (s *sessionStore) create() string {
 	buf := make([]byte, 32)
 	_, _ = rand.Read(buf)
 	token := hex.EncodeToString(buf)
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	now := time.Now()
-	maps.DeleteFunc(s.tokens, func(_ string, exp time.Time) bool { return now.After(exp) })
-	s.tokens[token] = now.Add(sessionTTL)
+	// 惰性清理过期会话（登录低频，Range 全扫成本可忽略）
+	s.tokens.Range(func(k, v any) bool {
+		if now.After(v.(time.Time)) {
+			s.tokens.Delete(k)
+		}
+		return true
+	})
+	s.tokens.Store(token, now.Add(sessionTTL))
 	return token
 }
 
@@ -49,23 +53,19 @@ func (s *sessionStore) valid(token string) bool {
 	if token == "" {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	exp, ok := s.tokens[token]
+	v, ok := s.tokens.Load(token)
 	if !ok {
 		return false
 	}
-	if time.Now().After(exp) {
-		delete(s.tokens, token)
+	if time.Now().After(v.(time.Time)) {
+		s.tokens.Delete(token)
 		return false
 	}
 	return true
 }
 
 func (s *sessionStore) remove(token string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.tokens, token)
+	s.tokens.Delete(token)
 }
 
 func (s *Server) authRequired() bool {

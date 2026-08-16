@@ -14,9 +14,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// walkSem 限制目录递归协程并发（历史教训固化的并发上限）。
-const walkSem = 64
-
 // Walker 云端递归遍历小模块。
 // 依赖：api（拉取云端列表）、db（计数跳过比对）、rules（isv 兜底判视频）。
 // 被调用方：cloudsync/strmgen 任务与顶层 Init（建索引）。
@@ -33,31 +30,21 @@ func NewWalker(deps *common.SyncDeps) *Walker {
 }
 
 // Walk 递归遍历云端目录树。流程：计数跳过（可选）→ 拉取子项 →
-// 目录交 EnterDir（递归受 walkSem 信号量限制 64 协程）→ 文件交 VisitFile。
+// 目录交 EnterDir（递归派发子协程）→ 文件交 VisitFile。
 // GetFileList 致命失败调 onFatal 并返回错误（errgroup 汇总首错并取消 gctx）；文件级错误不传播。
 //
-// ⚠️ 并发模型（勿改成 errgroup.SetLimit）：
-//   - 信号量在 walk 入口获取、在「派发完子协程后」主动释放。
-//   - errgroup 只负责：子协程生命周期管理 + 首错汇总 + 取消传播（gctx）。
+// 并发模型：errgroup 仅负责子协程生命周期管理 + 首错汇总 + 取消传播（gctx），
+// 本层不再额外限制目录并发——API 速率已由 drive 层限流兜底，目录再多也只是多派发协程排队。
 func (w *Walker) Walk(ctx context.Context, rootPath, rootFid string, v common.Visitor, onFatal func(error)) error {
-	dirSem := make(chan struct{}, walkSem)
 	g, gctx := errgroup.WithContext(ctx)
 
 	var walk func(path, fid string) error
 	walk = func(path, fid string) error {
 		logs.Debug(logs.ModuleSync, "进入目录", "路径", path)
 
-		select {
-		case dirSem <- struct{}{}:
-		case <-gctx.Done():
-			return gctx.Err()
+		if err := gctx.Err(); err != nil {
+			return err
 		}
-		done := false
-		defer func() {
-			if !done {
-				<-dirSem
-			}
-		}()
 
 		if v.SkipByCount {
 			info, err := w.api.GetDirInfo(gctx, path)
@@ -112,8 +99,6 @@ func (w *Walker) Walk(ctx context.Context, rootPath, rootFid string, v common.Vi
 			}
 		}
 
-		<-dirSem
-		done = true
 		return nil
 	}
 

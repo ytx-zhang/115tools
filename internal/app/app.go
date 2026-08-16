@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ytx-zhang/115tools/internal/config"
@@ -36,8 +37,7 @@ type App struct {
 	syncer  *synclib.Syncer
 	appCtx  context.Context
 	appWg   *sync.WaitGroup
-	mu      sync.Mutex
-	initErr string
+	initErr atomic.Pointer[string] // 初始化错误信息（单值替换，无锁）
 }
 
 // New 构造 App 并注入状态回调到同步器。
@@ -176,15 +176,14 @@ func (b *App) failInit(msg string) error {
 }
 
 func (b *App) setInitErr(msg string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.initErr = msg
+	b.initErr.Store(&msg)
 }
 
 func (b *App) getInitErr() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.initErr
+	if p := b.initErr.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // publishStatus 组装快照并通过 LogStatus 推送前端。

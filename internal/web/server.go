@@ -14,7 +14,6 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/ytx-zhang/115tools/internal/app"
 	"github.com/ytx-zhang/115tools/internal/logs"
@@ -37,7 +36,7 @@ type Server struct {
 
 // Register 注册全部管理路由到 mux。
 func Register(mux *http.ServeMux, d Deps) *Server {
-	s := &Server{Deps: d, sessions: sessionStore{tokens: make(map[string]time.Time)}}
+	s := &Server{Deps: d}
 	s.registerStatic(mux)
 
 	// /download 直链重定向器（Emby 依赖，免鉴权）：直接持有 App.API 客户端实例（类型引用，不调用 app 方法），

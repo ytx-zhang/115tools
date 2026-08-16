@@ -55,7 +55,7 @@ func PickcodeToID(pickcode string) (string, error) {
 	}
 	var sb strings.Builder
 	sb.Grow(len(cipher))
-	for i := 0; i < len(cipher); i++ {
+	for i := range cipher {
 		idx := pickcodeAlphabetIndex(cipher[i])
 		if idx < 0 {
 			return "", fmt.Errorf("pickcode 含非法字符: %q", cipher)

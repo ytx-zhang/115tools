@@ -2,7 +2,6 @@ package common
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,14 +15,15 @@ const notifyInterval = 200 * time.Millisecond
 // progress 进度计数器：原子 total/completed + 节流通知。
 // 与运行/取消机制（Task）解耦，仅负责「已处理多少 / 总共多少」的统计与上报，
 // 不含任何 running/stop 状态——那是 Task 的职责。
+// 节流无锁化：lastNotify 用原子时间戳做「立即推送」判定（CAS 去重），
+// timerPending 用原子布尔保证「延迟推送 timer 只挂一个」。
 type progress struct {
 	total     atomic.Int64
 	completed atomic.Int64
 
-	onChange    func()
-	notifyMu    sync.Mutex
-	lastNotify  time.Time
-	notifyTimer *time.Timer
+	onChange     func()
+	lastNotify   atomic.Int64 // 上次推送时刻（UnixNano）
+	timerPending atomic.Bool  // 是否已挂延迟推送 timer
 }
 
 // Reset 清零进度（run 业务体开始时调用）。
@@ -59,29 +59,27 @@ func (p *progress) Total() int64 { return p.total.Load() }
 // Completed 返回已完成数（与 Total 相等表示上一批次已结束）。
 func (p *progress) Completed() int64 { return p.completed.Load() }
 
-// emitNotify 节流推送：距上次推送 ≥notifyInterval 立即推；否则挂一个
-// notifyTimer 在间隔后推一次（合并此间全部进度变化）。onChange 在锁外调用。
+// emitNotify 节流推送：距上次推送 ≥notifyInterval 立即推（CAS 抢到一次推送权）；
+// 否则保证「延迟推送 timer 至多挂一个」，间隔后推一次合并此间全部进度变化。
+// onChange 在无锁路径下调用；多一次/早一点推送无害（节流只合并高频，不保证恰好一次）。
 func (p *progress) emitNotify() {
 	if p.onChange == nil {
 		return
 	}
-	p.notifyMu.Lock()
-	if time.Since(p.lastNotify) >= notifyInterval {
-		p.lastNotify = time.Now()
-		p.notifyMu.Unlock()
+	interval := int64(notifyInterval)
+	now := time.Now().UnixNano()
+	if last := p.lastNotify.Load(); now-last >= interval && p.lastNotify.CompareAndSwap(last, now) {
 		p.onChange()
 		return
 	}
-	if p.notifyTimer == nil {
-		p.notifyTimer = time.AfterFunc(notifyInterval, func() {
-			p.notifyMu.Lock()
-			p.notifyTimer = nil
-			p.lastNotify = time.Now()
-			p.notifyMu.Unlock()
-			p.onChange()
-		})
+	if !p.timerPending.CompareAndSwap(false, true) {
+		return
 	}
-	p.notifyMu.Unlock()
+	time.AfterFunc(notifyInterval, func() {
+		p.timerPending.Store(false)
+		p.lastNotify.Store(time.Now().UnixNano())
+		p.onChange()
+	})
 }
 
 // Task 一次性任务：防重入启动 + 可取消上下文 + running 标志。
