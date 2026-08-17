@@ -137,7 +137,7 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 		// 取链结果只打结束一条 → Info（用户关注播放取链是否成功）
 		logs.Info(logs.ModuleDrive, "获取新地址", "文件名", info.Name, "UA", ua,
 			"缓存时长", expiration.Round(time.Second).String(), "耗时", time.Since(t0))
-		return &cacheItem{url: info.Url, name: info.Name}, nil
+		return &cacheItem{url: info.Url, name: info.Name, expireAt: time.Now().Add(expiration)}, nil
 	})
 	select {
 	case <-r.Context().Done(): // 客户端断开
@@ -193,6 +193,13 @@ func (s *Redirector) serveRedirect(w http.ResponseWriter, r *http.Request, pickC
 		}
 		http.NotFound(w, r)
 		return
+	}
+	// 把真实缓存时长透传给客户端：302 默认不被浏览器缓存，显式带 max-age 后，
+	// 浏览器在直链有效期内直接复用本次跳转目标，不再回源 115tools（减少取链与单飞压力）。
+	// max-age 基于 115 直链真实过期（已含 -5min 余量），不会让客户端跑到失效直链。
+	if age := time.Until(item.expireAt); age > 0 {
+		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", int(age.Seconds())))
+		w.Header().Set("Expires", item.expireAt.UTC().Format(http.TimeFormat))
 	}
 	http.Redirect(w, r, item.url, http.StatusFound)
 }
