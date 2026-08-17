@@ -21,19 +21,9 @@
 
 ### 目录命名规则（重要）
 
-**Docker 挂载的目录名必须与 `config.json` 中的云端目录名完全一致**，因为代码根据本地文件路径直接映射云端路径。
+**Docker 挂载到容器内的目录名，必须与 `config.json` 里的云端目录名（`sync_path`/`strm_path`）完全一致**，因为代码根据本地文件路径直接映射云端路径。
 
-例如配置文件写了：
-
-```json
-{
-  "sync_path": "/strm媒体库",
-  "strm_path": "/待刮削",
-  "temp_path": "/Temp"
-}
-```
-
-则 `docker-compose.yml` 的 volumes 必须这样写：
+例如 `config.json` 中 `sync_path` 为 `/strm媒体库`、`strm_path` 为 `/待刮削`，则 `docker-compose.yml` 的 volumes 必须这样写：
 
 ```yaml
 volumes:
@@ -64,47 +54,11 @@ services:
 
 > **关键**：Docker volumes 冒号右边的容器内路径，必须与 `config.json` 中 `sync_path`、`strm_path` 的值**字符完全一致**。
 
-### config.json
+### 配置文件
 
-配置文件缺失时程序会**自动创建空白骨架文件**（字段全空，需通过 Web 管理面板填写后保存以启动同步），无需手动新建。
+本地配置文件 `<数据目录>/config.json` 由程序自动创建与维护，**所有配置项均通过 Web 管理面板填写**，无需手动编辑。
 
-```json
-{
-  "sync_path": "/strm媒体库",
-  "strm_path": "/待刮削",
-  "temp_path": "/Temp",
-  "strm_url": "http://your-server:8080",
-
-  "cron": {
-    "enabled": true,
-    "interval_hours": 12
-  },
-
-  "debounce_minutes": 10,
-
-  "video_exts": [".mp4", ".mkv"],
-
-  "upload_exclude": [
-    ".part", ".partial", ".aria2", ".crdownload",
-    ".download", ".tmp", ".!qB", ".DS_Store", "Thumbs.db"
-  ],
-
-  "auth": {
-    "username": "",
-    "password_hash": ""
-  },
-
-  "token": {
-    "access_token": "",
-    "refresh_token": "",
-    "expire_at": ""
-  }
-}
-```
-
-> 说明：以上字段除 `token` 外均可在 Web 设置页修改；`token` 由程序自动维护（仅需首次填入 `refresh_token`）。`auth.password_hash` 为 bcrypt 哈希，由面板写入，勿手填明文。
-
-**获取 Token（开放平台）**：只需填写 `refresh_token` 一项，`access_token` 和 `expire_at` 留空即可——程序启动后会自动获取并周期性刷新、回写。
+**获取 Token（开放平台）**：只需在面板填写 `refresh_token` 一项，`access_token` 和 `expire_at` 留空即可——程序启动后会自动获取并周期性刷新、回写。
 
 ### 启动
 

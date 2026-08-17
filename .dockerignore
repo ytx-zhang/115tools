@@ -3,7 +3,6 @@
 .github
 
 # 运行时数据（容器通过 volume 挂载，无需打进镜像）
-config/
 data/
 
 # 编辑器/IDE

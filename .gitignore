@@ -1,10 +1,5 @@
-# 数据库文件（运行时生成，无需提交）
-data/files.db
-data/*.db
-
-# 配置文件（含token等敏感信息）
-config/config.json
-data/config.json
+# 本地数据/配置目录（运行时生成，含 token 等敏感信息，禁止提交）
+data/
 cookie.txt
 
 # Go 编译产物（/115tools 仅忽略仓库根的可执行文件，勿误伤 cmd/115tools 源码目录）
@@ -30,13 +25,6 @@ count.sh
 # 旧版本文档归档（旧项目代码压缩包）
 archive/
 
-# Git 提交临时消息文件（PowerShell 中文提交用，统一命名：.commitmsg.*）
-.commitmsg.*
-.gitcommit_msg
-.gitmsg_tmp
-
-# CodeBuddy 本地数据
+# CodeBuddy / WorkBuddy 本地数据（内存、记忆等，勿提交）
 .codebuddy/
-
-# WorkBuddy 本地数据（内存/记忆等，勿提交）
 .workbuddy/
