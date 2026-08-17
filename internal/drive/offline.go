@@ -2,6 +2,7 @@ package drive
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -14,71 +15,86 @@ import (
 // ──── 离线下载原子方法 ────
 
 // addTasks 批量添加离线下载链接（http/https/magnet/ed2k），保存到 saveDirID。
-func (c *Client) addTasks(ctx context.Context, urls []string, saveDirID string) ([]OfflineAddResult, error) {
-	return Post[[]OfflineAddResult](ctx, c, "/open/offline/add_task_urls",
+// savePath 为日志定位用的目标目录路径（调用方传入），仅用于动作日志。
+func (c *Client) addTasks(ctx context.Context, urls []string, saveDirID, savePath string) ([]OfflineAddResult, error) {
+	res, dur, err := Post[[]OfflineAddResult](ctx, c, "/open/offline/add_task_urls",
 		Form{
 			"urls":       strings.Join(urls, "\n"),
 			"wp_path_id": saveDirID,
 		})
+	if err == nil {
+		// 成功：补充云端返回的实际添加成功条数
+		success := 0
+		for _, r := range res {
+			if r.State {
+				success++
+			}
+		}
+		logCloud("添加离线下载任务", nil, dur, "数量", len(urls), "路径", savePath, "成功", success)
+	} else {
+		logCloud("添加离线下载任务", err, dur, "数量", len(urls), "路径", savePath)
+	}
+	return res, err
 }
 
 // ListTasks 获取云下载任务列表的一页（page 从 1 开始）。
 func (c *Client) ListTasks(ctx context.Context, page int) (*OfflineTaskPage, error) {
-	res, err := Get[OfflineTaskPage](ctx, c, "/open/offline/get_task_list",
+	res, dur, err := Get[OfflineTaskPage](ctx, c, "/open/offline/get_task_list",
 		Form{"page": strconv.Itoa(max(page, 1))})
 	if err != nil {
+		logCloud("获取云端任务列表", err, dur, "页码", max(page, 1))
 		return nil, err
 	}
+	// 成功：补充云端返回的任务总数与本页条数
+	logCloud("获取云端任务列表", nil, dur, "页码", max(page, 1), "任务总数", res.Count, "本页条数", len(res.Tasks))
 	return &res, nil
 }
 
 // DeleteTask 删除单个云下载任务；deleteFiles 为 true 时同时删除已下载的源文件。
 func (c *Client) DeleteTask(ctx context.Context, infoHash string, deleteFiles bool) error {
-	t0 := time.Now()
 	delSource := "0"
 	if deleteFiles {
 		delSource = "1"
 	}
-	_, err := Post[struct{}](ctx, c, "/open/offline/del_task",
+	// 成功时 data=[]（空数组），用 RawMessage 容错（只关心 state，不消费 data）。
+	_, dur, err := Post[json.RawMessage](ctx, c, "/open/offline/del_task",
 		Form{"info_hash": infoHash, "del_source_file": delSource})
-	return FinishLog(t0, "删除离线任务", err, "info_hash", infoHash, "删除源文件", deleteFiles)
+	logCloud("删除离线任务", err, dur, "info_hash", infoHash)
+	return err
 }
 
 // ClearTasks 批量清除任务。
 // flag：0 已完成，1 全部，2 失败，3 进行中，4 已完成且删源文件，5 全部且删源文件。
 func (c *Client) ClearTasks(ctx context.Context, flag int) error {
-	t0 := time.Now()
-	_, err := Post[struct{}](ctx, c, "/open/offline/clear_task",
+	// 成功时 data=[]（空数组），用 RawMessage 容错（只关心 state，不消费 data）。
+	_, dur, err := Post[json.RawMessage](ctx, c, "/open/offline/clear_task",
 		Form{"flag": strconv.Itoa(flag)})
-	return FinishLog(t0, "批量清除离线任务", err, "flag", flag)
+	logCloud("批量清除任务", err, dur, "flag", flag)
+	return err
 }
 
 // GetQuota 获取云下载配额信息。
 // data 段即 {count, surplus, used}（对齐 OpenList 的 OfflineQuotaInfo），用 Call 直接解析。
 func (c *Client) GetQuota(ctx context.Context) (*OfflineQuota, error) {
-	res, err := Get[OfflineQuota](ctx, c, "/open/offline/get_quota_info", nil)
+	res, dur, err := Get[OfflineQuota](ctx, c, "/open/offline/get_quota_info", nil)
 	if err != nil {
+		logCloud("获取云下载配额", err, dur)
 		return nil, err
 	}
+	// 成功：补充云端返回的配额（总数/已用/剩余）
+	logCloud("获取云下载配额", nil, dur, "总数", res.Count, "已用", res.Used, "剩余", res.Surplus)
 	return &res, nil
 }
 
 // ──── 离线下载辅助函数 ────
 
-// ValidateAndAddOffline 参数校验 + 添加离线任务。
-func ValidateAndAddOffline(ctx context.Context, c *Client, urls []string, saveDirID string) ([]OfflineAddResult, error) {
-	t0 := time.Now()
+// ValidateAndAddOffline 参数校验 + 添加离线任务（请求日志由 addTasks 自打）。
+// savePath 为目标目录路径（仅日志定位用；FID 由调用方另传 saveDirID）。
+func ValidateAndAddOffline(ctx context.Context, c *Client, urls []string, saveDirID, savePath string) ([]OfflineAddResult, error) {
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("没有可添加的链接")
 	}
-	logs.Info(logs.ModuleCloud, "添加离线下载任务", "数量", len(urls), "目标目录", saveDirID)
-	results, err := c.addTasks(ctx, urls, saveDirID)
-	if err != nil {
-		logs.Error(logs.ModuleCloud, "添加离线下载任务失败", "数量", len(urls), "错误", err, "耗时", time.Since(t0))
-		return nil, err
-	}
-	logs.Info(logs.ModuleCloud, "添加离线下载任务完成", "数量", len(urls), "目标目录", saveDirID, "耗时", time.Since(t0))
-	return results, nil
+	return c.addTasks(ctx, urls, saveDirID, savePath)
 }
 
 // AddTorrentFromData 添加 BT 种子离线任务：解析 bencode→构造 magnet→提交。
@@ -100,7 +116,7 @@ func AddTorrentFromData(ctx context.Context, c *Client, torrentData []byte, torr
 		return nil, fmt.Errorf("解析保存目录失败: %w", err)
 	}
 	magnet := "magnet:?xt=urn:btih:" + infoHash + "&dn=" + url.QueryEscape(displayName)
-	results, err := ValidateAndAddOffline(ctx, c, []string{magnet}, saveDir.Fid)
+	results, err := ValidateAndAddOffline(ctx, c, []string{magnet}, saveDir.Fid, savePath)
 	if err != nil {
 		return nil, fmt.Errorf("添加磁力链接失败: %w", err)
 	}

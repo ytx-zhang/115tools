@@ -105,7 +105,7 @@ func (t *Task) Run(ctx context.Context, task *common.Task) {
 // 本项目不会一次移动大量文件，无需分片；失败返回 error 由调用方记录。
 func (t *Task) moveStrmPathFiles(ctx context.Context, fids []string) error {
 	t0 := time.Now()
-	if err := t.api.MoveFile(ctx, strings.Join(fids, ","), t.paths.TempFid); err != nil {
+	if err := t.api.MoveFile(ctx, strings.Join(fids, ","), t.paths.TempFid, t.paths.StrmPath); err != nil {
 		return fmt.Errorf("移动文件至 TempPath 失败: %w", err)
 	}
 	logs.Info(logs.ModuleStrm, "移动文件至 TempPath", "文件数量", len(fids), "耗时", time.Since(t0))

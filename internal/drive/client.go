@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-resty/resty/v2"
 	"github.com/ytx-zhang/115tools/internal/config"
+	"github.com/ytx-zhang/115tools/internal/logs"
 	"golang.org/x/time/rate"
 )
 
@@ -30,6 +31,19 @@ type RestyOption func(*resty.Request)
 // ReqWithUA 设置 User-Agent（下载直链取链用，直链绑定 UA）。
 func ReqWithUA(ua string) RestyOption {
 	return func(r *resty.Request) { r.SetHeader("User-Agent", ua) }
+}
+
+// logCloud 统一云端操作日志：请求结果（含真实耗时）由通用请求函数返回，
+// 各 API 方法自行打印——成功 Info(action+"完成")、失败 Error(action+"失败")。
+// 字段统一为 info 后接「错误」与「耗时」（耗时用 resty 网络往返时间）。
+// 调用方可在 info 中补充云端返回内容（FID/pickcode/文件名/数量等），
+// 相比原 exec 内部统一打印，日志信息可更完整。
+func logCloud(action string, err error, dur time.Duration, info ...any) {
+	if err != nil {
+		logs.Error(logs.ModuleCloud, action+"失败", append(append([]any{}, info...), "错误", err, "耗时", dur)...)
+		return
+	}
+	logs.Info(logs.ModuleCloud, action+"完成", append(append([]any{}, info...), "耗时", dur)...)
 }
 
 // removeEmpty 过滤空串字段（openlist 的 removeEmptyForm 同款语义）。
@@ -59,6 +73,13 @@ func HTTPClient() *http.Client {
 // ⚠️ 必须包级而非实例字段：ApplyConfig 热切换会重建 Client，实例字段会让限流器随旧实例失效。
 var apiLimiter = rate.NewLimiter(rate.Limit(2), 3)
 
+// restyLogger 屏蔽 resty 内部日志（默认为标准库 log 打 stderr，本项目无需，静默）。
+type restyLogger struct{}
+
+func (restyLogger) Errorf(string, ...any) {}
+func (restyLogger) Warnf(string, ...any)  {}
+func (restyLogger) Debugf(string, ...any) {}
+
 // Client 是 115 开放平台 API 客户端（refresh_token 登录）。
 // 请求经 resty v2 装配统一限流（2/s burst 3）+ 30s 超时 + Bearer 鉴权。
 // token 自动刷新由独立守护 RefreshDaemon 负责（见 token.go），请求前同步保活。
@@ -78,6 +99,7 @@ func NewClient(cfg *config.Config) *Client {
 	c.rc = resty.NewWithClient(HTTPClient()).
 		SetBaseURL("https://proapi.115.com").
 		SetTimeout(30 * time.Second).
+		SetLogger(restyLogger{}).
 		SetRetryCount(3).
 		SetRetryWaitTime(time.Second).
 		SetRetryMaxWaitTime(4 * time.Second).
@@ -113,23 +135,25 @@ func NewClient(cfg *config.Config) *Client {
 // Get 发送 GET 请求，把响应 data 段反序列化为 T 后返回。
 // query 是查询参数（GET 走 query 串）；opts 用于附加特殊选项（如 ReqWithUA）。
 // state=false 或网络错误时直接报错（错误含 115 code/message 或底层网络错误）。
-func Get[T any](ctx context.Context, c *Client, url string, query Form, opts ...RestyOption) (T, error) {
-	resp, err := exec[T](ctx, c, http.MethodGet, url, query, opts...)
-	return resp.Data, err
+// 返回真实网络耗时（resty Response.Time()，纯网络往返、不含限流排队），供调用方自打日志。
+func Get[T any](ctx context.Context, c *Client, url string, query Form, opts ...RestyOption) (T, time.Duration, error) {
+	resp, dur, err := exec[T](ctx, c, http.MethodGet, url, query, opts...)
+	return resp.Data, dur, err
 }
 
 // Post 发送 POST 请求，把响应 data 段反序列化为 T 后返回。
 // form 是表单参数（POST 走 form body）；opts 用于附加特殊选项（如 ReqWithUA）。
 // state=false 或网络错误时直接报错。data 段为 null/空时返回零值 T。
-func Post[T any](ctx context.Context, c *Client, url string, form Form, opts ...RestyOption) (T, error) {
-	resp, err := exec[T](ctx, c, http.MethodPost, url, form, opts...)
-	return resp.Data, err
+// 返回真实网络耗时（resty Response.Time()，纯网络往返、不含限流排队），供调用方自打日志。
+func Post[T any](ctx context.Context, c *Client, url string, form Form, opts ...RestyOption) (T, time.Duration, error) {
+	resp, dur, err := exec[T](ctx, c, http.MethodPost, url, form, opts...)
+	return resp.Data, dur, err
 }
 
 // exec 统一执行请求：按 method 自动决定 query/form 装配 → 解析统一外壳 Resp[T]
-// → state=false 报错 → 返回外壳（Get/Post 取 Data 段）。
-// token 保活刷新由 OnBeforeRequest 中间件负责，重试由 resty AddRetryCondition 机制负责。
-func exec[T any](ctx context.Context, c *Client, method, url string, params Form, opts ...RestyOption) (Resp[T], error) {
+// → state=false 报错 → 返回外壳与真实耗时（Get/Post 取 Data 段）。
+// ⚠️ 不打日志：日志由各 API 方法用返回的耗时自打（见 logCloud），以便补充云端返回内容。
+func exec[T any](ctx context.Context, c *Client, method, url string, params Form, opts ...RestyOption) (Resp[T], time.Duration, error) {
 	// ⚠️ 解析用 Resp[json.RawMessage] 而非 Resp[T]：115 错误场景（如创建同名目录 code 20004）
 	// data 段是 []（与 T 结构不匹配），直接 SetResult(&Resp[T]) 会在 resty 内部解析失败，
 	// 导致 state/code 读不到（报错信息丢失 115 的 code）。用 RawMessage 宽松解析外壳，
@@ -145,25 +169,32 @@ func exec[T any](ctx context.Context, c *Client, method, url string, params Form
 		o(req)
 	}
 	req.SetResult(&shell)
+	execStart := time.Now()
 	response, err := req.Execute(method, url)
+	netDur := time.Since(execStart)
+	if response != nil {
+		netDur = response.Time()
+	}
 	if err != nil {
 		// 网络错误或响应体解析失败（如 115 突然改返回格式）：附上完整原始响应便于调试。
 		// open 接口返回恒为 JSON，prettyJSON 解码 \uXXXX 转义，中文可读。
 		if response != nil && len(response.Body()) > 0 {
-			return Resp[T]{}, fmt.Errorf("%w (原始响应: %s)", err, prettyJSON(response.Body()))
+			err = fmt.Errorf("%w (原始响应: %s)", err, prettyJSON(response.Body()))
 		}
-		return Resp[T]{}, err
+		return Resp[T]{}, netDur, err
 	}
 	if !shell.State {
-		return Resp[T]{}, fmt.Errorf("[115报错] %s (code: %d, HTTP %d, 原始响应: %s)",
+		apierr := fmt.Errorf("[115报错] %s (code: %d, HTTP %d, 原始响应: %s)",
 			shell.Message, shell.Code, response.StatusCode(), prettyJSON(response.Body()))
+		return Resp[T]{}, netDur, apierr
 	}
 	var resp Resp[T]
 	if len(shell.Data) == 0 || string(shell.Data) == "null" {
-		return resp, nil // data 缺失（null）按空处理，由调用方按需校验
+		return resp, netDur, nil // data 缺失（null）按空处理，由调用方按需校验
 	}
 	if err := json.Unmarshal(shell.Data, &resp.Data); err != nil {
-		return Resp[T]{}, fmt.Errorf("解析 data 段失败: %w (原始响应: %s)", err, prettyJSON(shell.Data))
+		perr := fmt.Errorf("解析 data 段失败: %w (原始响应: %s)", err, prettyJSON(shell.Data))
+		return Resp[T]{}, netDur, perr
 	}
-	return resp, nil
+	return resp, netDur, nil
 }

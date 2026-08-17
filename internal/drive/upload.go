@@ -200,7 +200,8 @@ func ossUpload(ctx context.Context, token OssTokenData, init OssInitData, size i
 // ──── 上传原子方法 ────
 
 // initUpload 提交上传初始化（秒传签名表单）。req.SignKey/SignVal 非空时为二次校验重提。
-func (c *Client) initUpload(ctx context.Context, req UploadInitReq) (*UploadInitInfo, error) {
+// path 为日志定位用的完整路径（调用方传入），仅用于动作日志。
+func (c *Client) initUpload(ctx context.Context, req UploadInitReq, path string) (*UploadInitInfo, error) {
 	formData := Form{
 		"file_name": req.FileName,
 		"file_size": strconv.FormatInt(req.FileSize, 10),
@@ -213,18 +214,23 @@ func (c *Client) initUpload(ctx context.Context, req UploadInitReq) (*UploadInit
 		formData["sign_key"] = req.SignKey
 		formData["sign_val"] = req.SignVal
 	}
-	trimmed, err := Post[json.RawMessage](ctx, c, "/open/upload/init", formData)
+	trimmed, dur, err := Post[json.RawMessage](ctx, c, "/open/upload/init", formData)
 	if err != nil {
+		logCloud("上传初始化", err, dur, "路径", path)
 		return nil, err
 	}
 	trimmed = bytes.TrimSpace(trimmed)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
+		logCloud("上传初始化", fmt.Errorf("data 字段缺失"), dur, "路径", path)
 		return nil, fmt.Errorf("上传初始化失败: data 字段缺失, 响应体: %s", prettyJSON(trimmed))
 	}
 	var data uploadInitResp
 	if err := json.Unmarshal(trimmed, &data); err != nil {
+		logCloud("上传初始化", err, dur, "路径", path)
 		return nil, fmt.Errorf("解析初始化响应失败: %w, 响应体: %s", err, prettyJSON(trimmed))
 	}
+	// 成功：补充云端返回的 status（2 秒传/1 OSS/7 二次校验）
+	logCloud("上传初始化", nil, dur, "路径", path, "status", data.Status)
 	var cb OssCallback
 	if data.Callback.Value != nil {
 		cb = *data.Callback.Value
@@ -242,8 +248,11 @@ func (c *Client) initUpload(ctx context.Context, req UploadInitReq) (*UploadInit
 }
 
 // getUploadToken 获取 OSS 真实内容上传凭证（实际传输分支用）。
-func (c *Client) getUploadToken(ctx context.Context) (OssTokenData, error) {
-	return Get[OssTokenData](ctx, c, "/open/upload/get_token", nil)
+// path 为日志定位用的完整路径（调用方传入），仅用于动作日志。
+func (c *Client) getUploadToken(ctx context.Context, path string) (OssTokenData, error) {
+	res, dur, err := Get[OssTokenData](ctx, c, "/open/upload/get_token", nil)
+	logCloud("获取上传凭证", err, dur, "路径", path)
+	return res, err
 }
 
 // ──── 上传编排 ────
@@ -284,7 +293,7 @@ func UploadHelper(ctx context.Context, c *Client, pathStr, cid, signKey, signVal
 			PreSha1:  preSha1,
 			SignKey:  signKey,
 			SignVal:  signVal,
-		})
+		}, pathStr)
 		if err != nil {
 			return nil, err
 		}
@@ -318,7 +327,7 @@ func UploadHelper(ctx context.Context, c *Client, pathStr, cid, signKey, signVal
 }
 
 func uploadByOSS(ctx context.Context, c *Client, pathStr string, fileSize int64, init *UploadInitInfo) (*UploadFileInfo, string, error) {
-	token, err := c.getUploadToken(ctx)
+	token, err := c.getUploadToken(ctx, pathStr)
 	if err != nil {
 		return nil, "", err
 	}

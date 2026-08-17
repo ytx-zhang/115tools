@@ -163,8 +163,8 @@ function _updateChip(key, val) {
   if (el) el.textContent = val;
 }
 
-// 分类计数直接采用服务端权威值（/api/logs/counts SSE），不再本地数渲染行，
-// 因此切换分类、回放截断都不会导致计数失真。
+// 分类计数直接采用服务端 ring 可见条数（/api/logs/counts SSE），不再本地数渲染行，
+// 与回放/翻页同一数据源，切换分类、回放截断都不会导致计数失真。
 
 // 模块中文名映射（module label 显示）；web 已并入 system
 const moduleLabels = { sync: '同步', strm: 'STRM', drive: '直链', system: '系统', cloud: '云端', db: '数据库' };
@@ -183,8 +183,9 @@ export function initLogs() {
   openCounts();
 }
 
-// openCounts 建立分类权威计数 SSE（与日志流分离）。服务端累计各分类条数，
-// 仅在有新日志写入时推送（事件驱动、空闲不推），前端 chip 直接显示，精准且不受回放截断/切换分类影响。
+// openCounts 建立分类计数 SSE（与日志流分离）。服务端基于 ring 扫描给出各分类当前可见条数，
+// 仅在有新日志写入时推送（事件驱动、空闲不推），前端 chip 直接显示；与回放/翻页同一数据源，
+// 保证「chip 显示有日志 ⇔ 点进去能看到日志」。
 function openCounts() {
   closeCounts = connectSSE('/api/logs/counts', {
     onMessage: en => {

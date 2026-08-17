@@ -153,13 +153,13 @@ func (d *Store) GetFid(localPath string) (fid string) {
 // 单条低频写入固定多等 ≤10ms（聚合窗口），相对业务秒级操作可忽略。
 // bbolt Batch 语义：fn 幂等（Put 覆盖）、错误通过 trySolo 退化为 Update 仍可靠返回。
 func (d *Store) SaveRecord(localPath string, fid string, size int64) {
-	logs.Debug(logs.ModuleDB, "保存记录", "路径", localPath, "FID", fid)
+	logs.Debug(logs.ModuleDB, "保存记录", "路径", localPath)
 	val := encodeValue(fid, size)
 	if err := d.boltDB.Batch(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		return b.Put([]byte(localPath), val)
 	}); err != nil {
-		logs.Error(logs.ModuleDB, "保存记录失败", "路径", localPath, "FID", fid, "错误", err)
+		logs.Error(logs.ModuleDB, "保存记录失败", "路径", localPath, "错误", err)
 	}
 }
 

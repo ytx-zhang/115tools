@@ -16,7 +16,7 @@ func (b *App) RecentFiltered(cat string, limit int) []logs.Entry {
 	return b.hub.RecentFiltered(logs.LogFilter(cat), limit)
 }
 
-// LogCounts 返回各分类权威计数（前端 chip 用，不受 ring 淘汰影响，精准无性能代价）。
+// LogCounts 返回各分类当前可见计数（前端 chip 用，基于 ring 扫描，与回放/翻页一致）。
 func (b *App) LogCounts() map[string]int64 { return b.hub.Counts() }
 
 // LogHistory 返回某分类中 Seq<before 的最近最多 limit 条日志（升序），供前端向上滚动加载更早历史。

@@ -271,9 +271,10 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 // logReplayLimit 切换分类时 SSE 回放的最近条数：只够首屏一屏，更早的由 /api/logs/history 滚动翻页按需取。
 const logReplayLimit = 300
 
-// handleLogsCounts 分类日志权威计数流：事件驱动，仅在有新日志写入（计数可能变化）时推送，
-// 空闲不推送——替代原 300ms 定时轮询（无日志时仍高频空推的浪费）。计数在服务端累加（不受 ring 淘汰影响，
-// 精准），前端 chip 直接采用，准确且无性能代价。
+// handleLogsCounts 分类日志计数流：事件驱动，仅在有新日志写入（计数可能变化）时推送，
+// 空闲不推送——替代原 300ms 定时轮询（无日志时仍高频空推的浪费）。计数直接扫描 ring
+// （与回放/翻页同一数据源），保证「chip 显示有日志 ⇔ 点进去能看到日志」严格一致；
+// 早期日志被 ring 淘汰后计数同步回落，不会出现计数有、内容无的矛盾。
 // 与 handleLogs（按 cat 过滤的日志流）分离：计数全局、日志流按分类过滤，故需独立流；此处订阅日志流，
 // 有日志即推计数，与「日志推送即计数更新」语义一致。
 func (s *Server) handleLogsCounts(w http.ResponseWriter, r *http.Request) {
@@ -298,7 +299,7 @@ func (s *Server) handleLogsCounts(w http.ResponseWriter, r *http.Request) {
 
 	// 事件驱动：订阅日志流，任意日志写入即标记脏，150ms 内合并推送一次（突发日志不洪泛）；
 	// 空闲时不推送。与 serveSSE 对齐保留 15s 心跳，避免空闲连接被反向代理掐断。
-	// 计数始终读权威值，即使订阅丢帧也不影响准确性（只把 entry 当脏信号）。
+	// 每次推送重新扫描 ring 取最新可见计数，即使订阅丢帧也不影响准确性（只把 entry 当脏信号）。
 	debounce := time.NewTimer(time.Hour)
 	debounce.Stop()
 	select {
@@ -433,13 +434,17 @@ func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dirID, err := s.App.ResolveCloudDir(r.Context(), req.SavePath)
+	savePath := strings.TrimSpace(req.SavePath)
+	if savePath == "" {
+		savePath = strings.TrimSpace(s.App.ConfigSnapshot().StrmPath)
+	}
+	dirID, err := s.App.ResolveCloudDir(r.Context(), savePath)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "保存目录无效: %v", err)
 		return
 	}
 
-	results, err := s.App.AddOfflineTasks(r.Context(), urls, dirID)
+	results, err := s.App.AddOfflineTasks(r.Context(), urls, dirID, savePath)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "添加离线任务失败: %v", err)
 		return
@@ -450,7 +455,7 @@ func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 			added++
 		}
 	}
-	logs.Info(logs.ModuleSystem, "添加离线任务", "提交", len(urls), "成功", added, "目标目录", dirID, "耗时", time.Since(t0))
+	logs.Info(logs.ModuleSystem, "添加离线任务", "提交", len(urls), "成功", added, "保存路径", savePath, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "results": results})
 }
 

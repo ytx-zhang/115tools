@@ -148,7 +148,7 @@ type Entry struct {
 	Status *status.StatusData `json:"status,omitempty"`
 }
 
-// moduleList 全部日志模块的有序列表：顺序即 Hub.cntMod 的下标（与前端分类 chip 对齐）。
+// moduleList 全部日志模块的有序列表：与前端分类 chip 对齐，Counts 按其统计。
 var moduleList = [...]Module{ModuleSystem, ModuleSync, ModuleStrm, ModuleDrive, ModuleCloud, ModuleDB}
 
 // moduleIndex 返回模块名在 moduleList 中的下标（未知模块归零，语义安全）。
@@ -165,29 +165,12 @@ func moduleIndex(name string) int {
 type Hub struct {
 	stream *Stream[Entry]
 	seq    atomic.Int64 // 全局日志序号生成器（见 Write）
-
-	// 权威计数：每次 Write 累加，不受 ring 淘汰影响；前端分类 chip 直接采用，
-	// 计数精准（累计自进程启动/上次清空）且无性能代价（O(1) 累加）。
-	// 模块固定（moduleList），用固定原子数组替代 map+锁。
-	cntTotal atomic.Int64
-	cntWarn  atomic.Int64
-	cntError atomic.Int64
-	cntMod   [len(moduleList)]atomic.Int64
 }
 
 // Write 追加一条日志并广播给订阅者。并发安全。
 func (h *Hub) Write(e Entry) {
 	e.Seq = h.seq.Add(1)
 	h.stream.Publish(e)
-	// 权威计数：独立于 ring，累加不受淘汰影响；前端分类计数直接采用，准确且 O(1) 无性能代价。
-	h.cntTotal.Add(1)
-	switch e.Level {
-	case "WARN":
-		h.cntWarn.Add(1)
-	case "ERROR":
-		h.cntError.Add(1)
-	}
-	h.cntMod[moduleIndex(e.Module)].Add(1)
 }
 
 // Broadcast 只广播不缓存（任务状态帧用，避免占满 ring 挤出历史日志）。
@@ -223,15 +206,24 @@ func (h *Hub) RecentFiltered(cat LogFilter, limit int) []Entry {
 	return h.stream.RecentFiltered(limit, cat.Matches)
 }
 
-// Counts 返回各分类权威计数（自进程启动/上次清空累计，不受 ring 淘汰影响）。
-// 键与前端 filterKeys 对齐：all/warn/error + 各模块名。前端 chip 直接显示，精准无性能代价。
+// Counts 返回各分类当前可见计数（ring 内实际条数，与回放/翻页共用同一数据源）。
+// 直接扫描环形缓冲统计：保证「chip 显示有日志 ⇔ 点进去能看到日志」严格一致。
+// 不做自进程启动的累计——早期日志被 ring 淘汰后计数同步回落，避免「计数有、内容无」的矛盾。
+// 键与前端 filterKeys 对齐：all/warn/error + 各模块名。O(ring) 线性扫描（5000 条，微秒级），
+// 由 counts SSE 在 150ms 合并后推送，无性能压力。
 func (h *Hub) Counts() map[string]int64 {
 	m := make(map[string]int64, len(moduleList)+3)
-	m["all"] = h.cntTotal.Load()
-	m["warn"] = h.cntWarn.Load()
-	m["error"] = h.cntError.Load()
-	for i, mod := range moduleList {
-		m[string(mod)] = h.cntMod[i].Load()
+	h.stream.mu.RLock()
+	defer h.stream.mu.RUnlock()
+	for _, e := range h.stream.buf {
+		m["all"]++
+		switch e.Level {
+		case "WARN":
+			m["warn"]++
+		case "ERROR":
+			m["error"]++
+		}
+		m[string(moduleList[moduleIndex(e.Module)])]++
 	}
 	return m
 }
@@ -259,12 +251,6 @@ func (h *Hub) Unsubscribe(ch chan Entry) { h.stream.Unsubscribe(ch) }
 // Clear 清空内存中的日志缓冲（不影响实时推送）。
 func (h *Hub) Clear() {
 	h.stream.Reset()
-	h.cntTotal.Store(0)
-	h.cntWarn.Store(0)
-	h.cntError.Store(0)
-	for i := range h.cntMod {
-		h.cntMod[i].Store(0)
-	}
 }
 
 // ──── levelRouter ────

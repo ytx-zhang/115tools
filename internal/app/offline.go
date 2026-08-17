@@ -22,8 +22,9 @@ func (b *App) OfflineQuotaInfo(ctx context.Context) (*drive.OfflineQuota, error)
 }
 
 // AddOfflineTasks 添加离线下载链接（委托 drive 辅助函数：参数校验 + 提交）。
-func (b *App) AddOfflineTasks(ctx context.Context, urls []string, dirID string) ([]drive.OfflineAddResult, error) {
-	return drive.ValidateAndAddOffline(ctx, b.API, urls, dirID)
+// savePath 为目标目录路径（仅日志定位用；FID 由调用方解析后传 dirID）。
+func (b *App) AddOfflineTasks(ctx context.Context, urls []string, dirID, savePath string) ([]drive.OfflineAddResult, error) {
+	return drive.ValidateAndAddOffline(ctx, b.API, urls, dirID, savePath)
 }
 
 // AddTorrentTask 解析种子并添加 BT 任务（委托 drive 辅助函数：bencode→magnet→提交）。

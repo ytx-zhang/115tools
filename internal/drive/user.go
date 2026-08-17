@@ -9,16 +9,20 @@ import (
 // 返回用户名、空间占用，用于验证成功后打印账户概况。
 // 鉴权头由 Client 的 resty 中间件在请求前自动注入（Bearer access_token）。
 func (c *Client) GetUserInfo(ctx context.Context) (*UserInfo, error) {
-	data, err := Get[userInfoData](ctx, c, "/open/user/info", nil)
+	data, dur, err := Get[userInfoData](ctx, c, "/open/user/info", nil)
 	if err != nil {
+		logCloud("获取用户信息", err, dur)
 		return nil, err
 	}
-	return &UserInfo{
+	info := &UserInfo{
 		UserName:   data.UserName,
 		UsedSize:   data.RtSpaceInfo.AllUse.SizeFormat,
 		TotalSize:  data.RtSpaceInfo.AllTotal.SizeFormat,
 		RemainSize: data.RtSpaceInfo.AllRemain.SizeFormat,
-	}, nil
+	}
+	// 成功：补充云端返回的用户名与空间概况
+	logCloud("获取用户信息", nil, dur, "账户", info.String())
+	return info, nil
 }
 
 // UserInfo 是 /open/user/info 的精简展示模型（仅保留打印所需的字段）。

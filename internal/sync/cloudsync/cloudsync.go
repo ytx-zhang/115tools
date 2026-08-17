@@ -56,10 +56,10 @@ func (t *Task) Run(ctx context.Context, task *common.Task) {
 			if dbFid != "" {
 				if dbFid != fid {
 					t0 := time.Now()
-					if err := t.api.DeleteFile(ctx, fid); err != nil {
+					if err := t.api.DeleteFile(ctx, fid, savePath); err != nil {
 						logs.Error(logs.ModuleSync, "清理云端冗余项失败", "路径", savePath, "错误", err)
 					} else {
-						logs.Debug(logs.ModuleSync, "删除云端冗余项", "路径", savePath, "云端FID", fid, "耗时", time.Since(t0))
+						logs.Debug(logs.ModuleSync, "删除云端冗余项", "路径", savePath, "耗时", time.Since(t0))
 					}
 				}
 				return nil

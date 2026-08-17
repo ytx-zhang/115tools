@@ -1,13 +1,13 @@
 // Package sync 实现本地文件系统 ↔ 115 网盘的双向同步。
 //
 // 目录结构（组合根 + 任务子包）：
-//   - 顶层（本包）：syncer.go（门面 Syncer）+ runner.go（组合根 Runner）+ cron.go + init.go（初始化）
+//   - 顶层（本包）：syncer.go（门面 Syncer）+ runner.go（组合根 Runner）+ cron.go + init.go
 //   - common/：零依赖公共值对象与纯函数（Rules/Paths/Entry/Visitor/Task）
 //   - localsync/：本地→云端（Scanner/Uploader/CloudOps/Watcher 实时监听）
 //   - cloudsync/：云端→本地（Walker/StrmIO/CloudsyncTask）
 //   - strmgen/：STRM 生成（StrmgenTask）
 //
-// 数据流图见 runner.go 顶部——那里是「看这里知道同步怎么运行」的唯一视图。
+// 数据流图见 runner.go 顶部。
 package sync
 
 import (

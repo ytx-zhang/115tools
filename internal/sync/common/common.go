@@ -124,7 +124,7 @@ func DownloadCloudFile(ctx context.Context, api *drive.Client, pickcode, localPa
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	info, err := api.GetDownloadUrl(ctx, pickcode, "115tools")
+	info, err := api.GetDownloadUrl(ctx, pickcode, "115tools", localPath)
 	if err != nil {
 		return err
 	}

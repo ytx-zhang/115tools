@@ -112,7 +112,7 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 	// 单飞：同一 key 的并发请求合并为一次 115 调用，所有等待者共享同一份结果。
 	ch := s.sf.DoChan(cacheKey, func() (any, error) {
 		t0 := time.Now()
-		info, err := s.api.GetDownloadUrl(r.Context(), pickCode, ua)
+		info, err := s.api.GetDownloadUrl(r.Context(), pickCode, ua, "")
 		if err != nil {
 			logs.Error(logs.ModuleDrive, "获取直链失败", "错误", err)
 			return nil, err
