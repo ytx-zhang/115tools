@@ -148,19 +148,6 @@ type Entry struct {
 	Status *status.StatusData `json:"status,omitempty"`
 }
 
-// moduleList 全部日志模块的有序列表：与前端分类 chip 对齐，Counts 按其统计。
-var moduleList = [...]Module{ModuleSystem, ModuleSync, ModuleStrm, ModuleDrive, ModuleCloud, ModuleDB}
-
-// moduleIndex 返回模块名在 moduleList 中的下标（未知模块归零，语义安全）。
-func moduleIndex(name string) int {
-	for i, mod := range moduleList {
-		if string(mod) == name {
-			return i
-		}
-	}
-	return 0
-}
-
 // Hub 保存近期日志并向订阅者广播。
 type Hub struct {
 	stream *Stream[Entry]
@@ -212,7 +199,7 @@ func (h *Hub) RecentFiltered(cat LogFilter, limit int) []Entry {
 // 键与前端 filterKeys 对齐：all/warn/error + 各模块名。O(ring) 线性扫描（5000 条，微秒级），
 // 由 counts SSE 在 150ms 合并后推送，无性能压力。
 func (h *Hub) Counts() map[string]int64 {
-	m := make(map[string]int64, len(moduleList)+3)
+	m := make(map[string]int64, 9) // all/warn/error + 6 个日志模块
 	h.stream.mu.RLock()
 	defer h.stream.mu.RUnlock()
 	for _, e := range h.stream.buf {
@@ -223,7 +210,7 @@ func (h *Hub) Counts() map[string]int64 {
 		case "ERROR":
 			m["error"]++
 		}
-		m[string(moduleList[moduleIndex(e.Module)])]++
+		m[string(e.Module)]++
 	}
 	return m
 }

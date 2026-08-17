@@ -58,8 +58,7 @@ func (w *Watcher) Pump(ctx context.Context) {
 		kick:    make(chan struct{}, 1),
 		window:  func() time.Duration { return w.paths.Debounce },
 	}
-	batcher.timer = time.AfterFunc(time.Hour, batcher.notify) // 占位极大窗口，真实计时始于首次 Arm
-	w.arm = batcher.Arm                                       // 供 dispatch/uploadVideo 共用
+	w.arm = batcher.Arm // 供 dispatch/uploadVideo 共用
 
 	// 防抖后批量扫描目录合集。
 	go func() {

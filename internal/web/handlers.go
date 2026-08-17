@@ -179,19 +179,19 @@ func sseConnect(w http.ResponseWriter) (*sseWriter, bool) {
 
 // serveSSE 把 events 流实时推给单个订阅者，并在连接建立时先回放 replay。
 // match 可选：非 nil 时回放与实时事件都先经它过滤（分类日志 SSE 用）；nil 表示不过滤。
-func serveSSE[T any](w http.ResponseWriter, r *http.Request, appCtx context.Context, events <-chan T, replay []T, match func(T) bool) {
+func serveSSE(w http.ResponseWriter, r *http.Request, appCtx context.Context, events <-chan logs.Entry, replay []logs.Entry, match func(logs.Entry) bool) {
 	sw, ok := sseConnect(w)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	pass := func(v T) bool { return match == nil || match(v) }
+	pass := func(v logs.Entry) bool { return match == nil || match(v) }
 	// 回放打包为单个数据帧（JSON 数组），避免 1000 条逐条写+Flush 拖慢首屏。
 	if len(replay) > 0 {
 		if match != nil {
 			// 用 slices.DeleteFunc 在克隆上过滤，避免改动调用方持有的 replay 底层数组
 			//（RecentFiltered 返回的切片可能被上层复用，原地写入会污染回放缓冲）。
-			replay = slices.DeleteFunc(slices.Clone(replay), func(v T) bool {
+			replay = slices.DeleteFunc(slices.Clone(replay), func(v logs.Entry) bool {
 				return !pass(v)
 			})
 		}
@@ -202,7 +202,7 @@ func serveSSE[T any](w http.ResponseWriter, r *http.Request, appCtx context.Cont
 			}
 		}
 	}
-	writeFrame := func(v T) bool {
+	writeFrame := func(v logs.Entry) bool {
 		if !pass(v) {
 			return true
 		}

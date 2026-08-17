@@ -104,12 +104,12 @@ func (sc *Scanner) ConsumeLoop(residentCtx context.Context, newBatchCtx func() (
 // dirBatcher 非视频事件（目录/.strm 增删改）的防抖合批器：
 // Arm 登记父目录并重置防抖定时；窗口内无新事件才到点唤醒消费者，一次性 Take 整批投池
 // （视频事件不走这里，由 Watcher 直传秒级生效）。kick 容量 1 非阻塞发送（有一次待唤醒即够）；
-// timer 以占位启动，真实计时始于首次 Arm；window 为函数，每次 Reset 才读 Paths.Debounce（共享指针语义）。
+// timer 首次 Arm 时惰性创建（避免占位初始化 hack）；window 为函数，每次 Reset 才读 Paths.Debounce（共享指针语义）。
 type dirBatcher struct {
 	mu      sync.Mutex
 	pending map[string]struct{}  // 待处理目录合集（自动去重）
 	kick    chan struct{}        // 到点唤醒通道（容量 1，非阻塞发送）
-	timer   *time.Timer          // 防抖定时：每次 Arm 重置
+	timer   *time.Timer          // 防抖定时：每次 Arm 重置（首次 Arm 时 AfterFunc 惰性创建）
 	window  func() time.Duration // 防抖窗口取值函数（每次 Reset 时求值）
 }
 
@@ -122,11 +122,19 @@ func (b *dirBatcher) notify() {
 }
 
 // Arm 登记一个目录并重置防抖定时（合集自动去重）。
+// timer 首次 Arm 时惰性创建（⚠️ 必须用 time.AfterFunc 而非 NewTimer：AfterFunc 到期自动调用
+// notify 发送 kick 唤醒消费者，NewTimer 只会往无人读取的 timer.C 发值，防抖永不触发）；
+// 后续 Arm 直接 Reset（Go 1.23+ 已停止/已触发的 Timer 可直接 Reset）。
+// 初始化与 Reset 都持锁，避免多个 dispatch goroutine 并发创建重复 timer。
 func (b *dirBatcher) Arm(dir string) {
 	b.mu.Lock()
 	b.pending[dir] = struct{}{}
+	if b.timer == nil {
+		b.timer = time.AfterFunc(b.window(), b.notify)
+	} else {
+		b.timer.Reset(b.window())
+	}
 	b.mu.Unlock()
-	b.timer.Reset(b.window()) // Go 1.23+ 已停止/已触发的 Timer 可直接 Reset
 }
 
 // Take 取出并清空合集（顺序不定，调用方按集合语义使用）。
@@ -142,7 +150,13 @@ func (b *dirBatcher) Take() []string {
 func (b *dirBatcher) Kick() <-chan struct{} { return b.kick }
 
 // Stop 停止防抖定时（监听器退出时调用）。
-func (b *dirBatcher) Stop() { b.timer.Stop() }
+func (b *dirBatcher) Stop() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+}
 
 // ClearPending 停止本地同步时丢弃未处理目录：清空 pending + 非阻塞排空 dirCh。
 // ⚠️ 已取到正在处理的目录不受影响：其 ctx 已被取消，ScanDir 早退后 running 在 onDone 自然灭。

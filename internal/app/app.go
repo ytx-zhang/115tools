@@ -161,9 +161,10 @@ func (b *App) Snapshot() *status.StatusData {
 		InitError:   b.getInitErr(),
 	}
 	if cloud, strm, local, ok := b.syncer.CurrentStatus(); ok {
-		snap.Sync = &status.TaskStatus{Running: cloud.Running, Completed: cloud.Completed, Total: cloud.Total}
-		snap.Strm = &status.TaskStatus{Running: strm.Running, Completed: strm.Completed, Total: strm.Total}
-		snap.Local = &status.TaskStatus{Running: local.Running, Completed: local.Completed, Total: local.Total}
+		// CurrentStatus 返回的 TaskStatus 每次新建（Task.Status() 内部分配），可直接赋引用
+		snap.Sync = cloud
+		snap.Strm = strm
+		snap.Local = local
 	}
 	return snap
 }

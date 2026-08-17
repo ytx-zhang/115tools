@@ -15,9 +15,6 @@ import (
 	"github.com/ytx-zhang/115tools/internal/sync/common"
 )
 
-// UploadWorkerCount 上传并发数（全串行：任何来源的上传绝对不并发）。
-const UploadWorkerCount = 1
-
 // NewUploader 构造 uploader 小模块（依赖注入）。
 func NewUploader(deps *common.SyncDeps, task *common.Task) *Uploader {
 	return &Uploader{
@@ -26,12 +23,11 @@ func NewUploader(deps *common.SyncDeps, task *common.Task) *Uploader {
 		paths: deps.Paths,
 		rules: deps.Rules,
 		task:  task,
-		sem:   make(chan struct{}, UploadWorkerCount),
 	}
 }
 
 // Uploader 上传执行模块（只做"执行上传"，不含"该不该上传"判定——判定归 scanner.HandleFile / watch 复用）。
-// 每次 AddUpFile 起一个 goroutine 跑 DoUpload，进度计数实时上报前端；并发由 sem 令牌控制。
+// 每次 AddUpFile 起一个 goroutine 跑 DoUpload，进度计数实时上报前端；uploadMu 保证全串行。
 // 批次等待（覆盖「扫描+本批上传完」）由调用方显式传 *sync.WaitGroup：目录消费者新建 wg 透传，
 // 视频直传传独立 wg 或 nil（不入批、不阻塞扫描消费者）。
 type Uploader struct {
@@ -41,8 +37,8 @@ type Uploader struct {
 	rules common.Rules
 	task  *common.Task // 本地同步进度（AddUpFile +total，任务完成 +completed）
 
-	sem      chan struct{} // 并发令牌（容量 = UploadWorkerCount）
-	inFlight sync.Map      // path → struct{}：同文件已在传/排队则跳过（防双传）
+	uploadMu sync.Mutex // 全串行：任何来源的上传绝对不并发
+	inFlight sync.Map   // path → struct{}：同文件已在传/排队则跳过（防双传）
 }
 
 // upJob 一个待上传任务。
@@ -81,10 +77,10 @@ func (u *Uploader) AddUpFile(ctx context.Context, batch *sync.WaitGroup, parentF
 }
 
 // DoUpload 真正执行一次上传（由 AddUpFile 起 goroutine 调用）。
-// 开头取并发令牌（满则阻塞排队），结尾归还。上传前大小一致性兜底由 drive 层负责，本层不重复检查。
+// 开头持锁（有人在上传则阻塞排队），结尾释放。上传前大小一致性兜底由 drive 层负责，本层不重复检查。
 func (u *Uploader) DoUpload(job upJob) {
-	u.sem <- struct{}{}
-	defer func() { <-u.sem }()
+	u.uploadMu.Lock()
+	defer u.uploadMu.Unlock()
 
 	fileInfo, err := os.Stat(job.path)
 	if err != nil {
