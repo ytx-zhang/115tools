@@ -1,52 +1,52 @@
 // Package config 负责配置的加载、校验与热更新。
 //
 // 结构说明：
-//   - Config：YAML 存储模型（配置文件字段，含私有 token/path/mu）。
+//   - Config：JSON 存储模型（配置文件字段，含私有 token/path/mu）。
 //   - Editable：JSON 传输 DTO（web 面板快照与更新），见 settings.go。
 //   - Snapshot/Update：配置快照与合并更新（空字段=保持原值）。
 //   - 死字段已清理：Editable 不再含 ConfigReady/MissingFields/HasPassword（前端不消费）。
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/ytx-zhang/115tools/internal/logs"
-	"gopkg.in/yaml.v3"
 )
 
 // Config 包含所有业务路径和 Token 操作方法。
 type Config struct {
 	// 静态配置字段：外部直接通过 cfg.SyncPath 访问
-	SyncPath string `yaml:"sync_path"`
-	StrmPath string `yaml:"strm_path"`
-	TempPath string `yaml:"temp_path"`
-	StrmUrl  string `yaml:"strm_url"`
+	SyncPath string `json:"sync_path"`
+	StrmPath string `json:"strm_path"`
+	TempPath string `json:"temp_path"`
+	StrmUrl  string `json:"strm_url"`
 
 	// 视频文件扩展名白名单：命中且体积达阈值的文件按「视频」处理
 	// （上传后替换为 .strm 索引而非落地原文件）。为空时使用内置默认（见 DefaultVideoExts）。
 	// 可通过配置文件或 Web 设置页修改，二者保持一致。
-	VideoExts []string `yaml:"video_exts"`
+	VideoExts []string `json:"video_exts"`
 
 	// 上传排除名单：这些后缀（或整名，如 .DS_Store / Thumbs.db）的文件不上传，
 	// 且云端已存在的同名项会被联动清理。用于跳过下载器/系统的临时半成品文件。
 	// 为空时不排除任何文件（运行期名单为空即不过滤）；可通过配置文件或 Web 设置页修改。
-	UploadExclude []string `yaml:"upload_exclude"`
+	UploadExclude []string `json:"upload_exclude"`
 
 	// 本地同步去抖窗口（分钟）：非视频事件（.strm/目录）监听后等待该时长内无新事件才批量同步，
 	// 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 10 分钟。
 	// 视频文件事件实时直传，不走此窗口（秒级生效）。
-	DebounceMinutes int `yaml:"debounce_minutes"`
+	DebounceMinutes int `json:"debounce_minutes"`
 
-	// Cron 定时全量同步配置（嵌套段，YAML 键 cron）。
-	Cron CronConfig `yaml:"cron"`
+	// Cron 定时全量同步配置（嵌套段）。
+	Cron CronConfig `json:"cron"`
 
 	// Auth 前端管理页登录凭据；Username 为空表示关闭登录验证。
 	// 密码仅以 bcrypt 哈希存储（PasswordHash），绝不保存明文。
 	// /download 直链接口始终不做验证（供 Emby 使用）。
-	Auth AuthConfig `yaml:"auth"`
+	Auth AuthConfig `json:"auth"`
 
 	// 内部私有属性
 	path  string
@@ -62,17 +62,17 @@ var DefaultVideoExts = []string{
 
 // AuthConfig 前端登录的账号密码；密码仅以 bcrypt 哈希存储。
 type AuthConfig struct {
-	Username     string `yaml:"username"`
-	PasswordHash string `yaml:"password_hash"`
+	Username     string `json:"username"`
+	PasswordHash string `json:"password_hash"`
 }
 
-// CronConfig 定时全量同步配置（嵌套段，YAML 键 cron）。
+// CronConfig 定时全量同步配置（嵌套段，JSON 键 cron）。
 // Enabled 用 *bool：nil 表示未显式设置，按「默认开启」处理；
 // 只有显式写 enabled: false（面板取消勾选或手动 YAML）才是真正关闭，
 // 确保「默认开启」与「用户能关掉」两个语义同时成立。
 type CronConfig struct {
-	Enabled       *bool `yaml:"enabled"`        // 是否启用；nil = 未设置，默认开启
-	IntervalHours int   `yaml:"interval_hours"` // 间隔（小时），0 表示默认 12
+	Enabled       *bool `json:"enabled"`        // 是否启用；nil = 未设置，默认开启
+	IntervalHours int   `json:"interval_hours"` // 间隔（小时），0 表示默认 12
 }
 
 // defaultCronInterval 定时全量同步默认间隔（IntervalHours <= 0 时回退），
@@ -89,12 +89,19 @@ func normalizeCronInterval(hours int) int {
 }
 
 type tokenData struct {
-	AccessToken  string    `yaml:"access_token"`
-	RefreshToken string    `yaml:"refresh_token"`
-	ExpireAt     time.Time `yaml:"expire_at"`
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	ExpireAt     time.Time `json:"expire_at"`
 }
 
-// New 读取配置文件。文件不存在时创建空白骨架（字段全空，供 web 面板填写）。
+// configFile 是配置文件的 JSON 序列化模型。
+// 嵌入 *Config 以避免复制其内部的 sync.RWMutex；Token 单独成段持久化。
+type configFile struct {
+	*Config
+	Token tokenData `json:"token"`
+}
+
+// New 读取配置文件（JSON 格式）。文件不存在时创建空白骨架（字段全空，供 web 面板填写）。
 func New(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -112,25 +119,22 @@ func New(path string) (*Config, error) {
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)
 	}
 
-	var tmp struct {
-		Config `yaml:",inline"`
-		Token  tokenData `yaml:"token"`
-	}
-	if err := yaml.Unmarshal(data, &tmp); err != nil {
+	var f configFile
+	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
 	// cron 间隔兜底
-	tmp.Cron.IntervalHours = normalizeCronInterval(tmp.Cron.IntervalHours)
+	f.Cron.IntervalHours = normalizeCronInterval(f.Cron.IntervalHours)
 
 	// 视频扩展名白名单：未设置时回退内置默认
-	if len(tmp.VideoExts) == 0 {
-		tmp.VideoExts = append([]string(nil), DefaultVideoExts...)
+	if len(f.VideoExts) == 0 {
+		f.VideoExts = append([]string(nil), DefaultVideoExts...)
 	}
 
-	cfg := &tmp.Config
+	cfg := f.Config
 	cfg.path = path
-	cfg.token = tmp.Token
+	cfg.token = f.Token
 	return cfg, nil
 }
 
@@ -180,10 +184,7 @@ func (c *Config) SaveToken(access, refresh string, expiresIn int64) {
 
 // persistLocked 序列化并写盘，调用方必须已持有 c.mu 写锁。
 func (c *Config) persistLocked() error {
-	out, err := yaml.Marshal(struct {
-		*Config `yaml:",inline"`
-		Token   tokenData `yaml:"token"`
-	}{c, c.token})
+	out, err := json.MarshalIndent(configFile{Config: c, Token: c.token}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化失败: %w", err)
 	}

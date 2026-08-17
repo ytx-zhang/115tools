@@ -3,13 +3,13 @@ data/files.db
 data/*.db
 
 # 配置文件（含token等敏感信息）
-config/config.yaml
-data/config.yaml
+config/config.json
+data/config.json
 cookie.txt
 
-# Go 编译产物
+# Go 编译产物（/115tools 仅忽略仓库根的可执行文件，勿误伤 cmd/115tools 源码目录）
 server
-115tools
+/115tools
 *.exe
 *.exe~
 

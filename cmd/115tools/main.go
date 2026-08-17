@@ -33,7 +33,7 @@ func main() {
 	dataDir := flag.String("data", "/app/data", "数据目录（配置文件与索引库存放处）")
 	port := flag.String("port", "8080", "Web 管理面板端口")
 	flag.Parse()
-	configPath := *dataDir + "/config.yaml"
+	configPath := *dataDir + "/config.json"
 	dbPath := *dataDir + "/files.db"
 
 	// 3. 先建日志中心（Hub），再 Setup 全局 slog——日志要在装配早期就可用

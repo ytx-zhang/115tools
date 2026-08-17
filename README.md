@@ -21,14 +21,16 @@
 
 ### 目录命名规则（重要）
 
-**Docker 挂载的目录名必须与 `config.yaml` 中的云端目录名完全一致**，因为代码根据本地文件路径直接映射云端路径。
+**Docker 挂载的目录名必须与 `config.json` 中的云端目录名完全一致**，因为代码根据本地文件路径直接映射云端路径。
 
 例如配置文件写了：
 
-```yaml
-sync_path: /strm媒体库
-strm_path: /待刮削
-temp_path: /Temp
+```json
+{
+  "sync_path": "/strm媒体库",
+  "strm_path": "/待刮削",
+  "temp_path": "/Temp"
+}
 ```
 
 则 `docker-compose.yml` 的 volumes 必须这样写：
@@ -60,66 +62,47 @@ services:
     restart: unless-stopped
 ```
 
-> **关键**：Docker volumes 冒号右边的容器内路径，必须与 `config.yaml` 中 `sync_path`、`strm_path` 的值**字符完全一致**。
+> **关键**：Docker volumes 冒号右边的容器内路径，必须与 `config.json` 中 `sync_path`、`strm_path` 的值**字符完全一致**。
 
-### config.yaml
+### config.json
 
-配置文件缺失时程序会**自动创建含注释的模板文件**，无需手动新建。
+配置文件缺失时程序会**自动创建空白骨架文件**（字段全空，需通过 Web 管理面板填写后保存以启动同步），无需手动新建。
 
-```yaml
-# 云端同步根目录（115 网盘中的路径）
-sync_path: /strm媒体库
+```json
+{
+  "sync_path": "/strm媒体库",
+  "strm_path": "/待刮削",
+  "temp_path": "/Temp",
+  "strm_url": "http://your-server:8080",
 
-# STRM 生成的起始云端目录
-strm_path: /待刮削
+  "cron": {
+    "enabled": true,
+    "interval_hours": 12
+  },
 
-# 回收/临时目录（云端）
-temp_path: /Temp
+  "debounce_minutes": 10,
 
-# STRM 文件中的直链地址（Emby 可访问的地址）
-strm_url: http://your-server:8080
+  "video_exts": [".mp4", ".mkv"],
 
-# 定时全量同步（cron 段）：enabled 是否启用（默认开启），interval_hours 间隔小时（0 表示默认 12）
-cron:
-  enabled: true
-  interval_hours: 12
+  "upload_exclude": [
+    ".part", ".partial", ".aria2", ".crdownload",
+    ".download", ".tmp", ".!qB", ".DS_Store", "Thumbs.db"
+  ],
 
-# 本地同步静默窗口（分钟）：非视频事件监听后等待该时长内无新事件才批量同步，
-# 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 10 分钟。
-# 视频文件事件实时直传（秒级上传并转 .strm），不受此窗口限制。
-debounce_minutes: 10
+  "auth": {
+    "username": "",
+    "password_hash": ""
+  },
 
-# 视频文件扩展名白名单（命中且体积达 10MB 阈值按视频处理，上传后本地替换为 .strm）。
-# 留空则用内置默认 .mp4/.mkv；亦可在 Web 设置页修改。
-video_exts:
-  - .mp4
-  - .mkv
-
-# 上传排除名单（下载器/系统临时文件后缀；整名如 .DS_Store / Thumbs.db 也支持）。
-# 这些文件不上传，且云端已存在的同名项会在同步时被联动清理（进 115 回收站）。
-# 留空则不排除任何文件；亦可在 Web 设置页修改。
-upload_exclude:
-  - .part
-  - .partial
-  - .aria2
-  - .crdownload
-  - .download
-  - .tmp
-  - .!qB
-  - .DS_Store
-  - Thumbs.db
-
-# 管理面板登录验证（username 留空则关闭验证；/download 直链始终免验证，供 Emby 使用）
-auth:
-  username: ""
-  password: ""
-
-# 115 网盘 Token
-token:
-  access_token: ""
-  refresh_token: ""
-  expire_at: ""
+  "token": {
+    "access_token": "",
+    "refresh_token": "",
+    "expire_at": ""
+  }
+}
 ```
+
+> 说明：以上字段除 `token` 外均可在 Web 设置页修改；`token` 由程序自动维护（仅需首次填入 `refresh_token`）。`auth.password_hash` 为 bcrypt 哈希，由面板写入，勿手填明文。
 
 **获取 Token（开放平台）**：只需填写 `refresh_token` 一项，`access_token` 和 `expire_at` 留空即可——程序启动后会自动获取并周期性刷新、回写。
 
