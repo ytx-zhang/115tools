@@ -7,7 +7,7 @@ import (
 
 // GetUserInfo 获取用户空间信息（GET /open/user/info，需 Bearer 鉴权）。
 // 返回用户名、空间占用，用于验证成功后打印账户概况。
-// 鉴权头由 Client 的 resty 中间件在请求前自动注入（Bearer access_token）。
+// 鉴权头由 Client 在请求前自动注入（Bearer access_token）。
 func (c *Client) GetUserInfo(ctx context.Context) (*UserInfo, error) {
 	data, dur, err := Get[userInfoData](ctx, c, "/open/user/info", nil)
 	if err != nil {

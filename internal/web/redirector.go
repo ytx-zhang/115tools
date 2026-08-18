@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -275,12 +276,9 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 		}
 
 		// 原样透传 CDN 全部响应头（含同名多值），绝不重算长度字段
+		// maps.Copy 整体复制（底层 []string 保留多值），dst 此时为空 Header，与逐条 Add 等价
 		dst := w.Header()
-		for k, vs := range resp.Header {
-			for _, v := range vs {
-				dst.Add(k, v)
-			}
-		}
+		maps.Copy(dst, resp.Header)
 		// 附加原始文件名头，UTF-8 原样写入，供客户端（ffprobe/下载器）直接读取
 		dst.Set("X-Origin-Filename", item.name)
 

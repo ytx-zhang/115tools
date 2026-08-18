@@ -1,9 +1,9 @@
 // Package drive 提供 115 开放平台（refresh_token）驱动的完整实现。
-// 架构借鉴 OpenList/115-sdk-go：resty v2 + 泛型请求入口（Get/Post）+
+// 架构借鉴 OpenList/115-sdk-go：标准库 net/http + 泛型请求入口（Get/Post）+
 // 统一响应外壳（Resp[T]）+ 请求前 token 保活刷新 + StructOrArray[T] 泛型容错。
 //
 // 【代码划分】
-//   - client.go：Client 装配（resty v2：限流/鉴权/重试中间件 + 全局 HTTP client）与泛型请求执行
+//   - client.go：Client 装配（标准库 net/http：限流/鉴权/重试 + 全局 HTTP client）与泛型请求执行
 //     （Get/Post 统一入口：自动解包 data 段 + state=false 自动报错）；
 //   - types.go：数据结构与工具（文件/目录/上传/离线类型、StructOrArray 容错、IntString、
 //     SHA1、私有响应结构）；
@@ -158,8 +158,6 @@ type OfflineQuota struct {
 	Surplus int `json:"surplus"` // 剩余
 	Used    int `json:"used"`    // 已用
 }
-
-
 
 // IntString 兼容 115 响应中「数字或字符串」两种形态的整数字段
 // （aid/iv/status/fileid/count 等字段偶发返回字符串，普通 int 解析会失败）。

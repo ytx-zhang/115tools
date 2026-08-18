@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -127,9 +128,9 @@ func New(path string) (*Config, error) {
 	// cron 间隔兜底
 	f.Cron.IntervalHours = normalizeCronInterval(f.Cron.IntervalHours)
 
-	// 视频扩展名白名单：未设置时回退内置默认
+	// 视频扩展名白名单：未设置时回退内置默认（克隆避免后续修改污染全局默认值）
 	if len(f.VideoExts) == 0 {
-		f.VideoExts = append([]string(nil), DefaultVideoExts...)
+		f.VideoExts = slices.Clone(DefaultVideoExts)
 	}
 
 	cfg := f.Config

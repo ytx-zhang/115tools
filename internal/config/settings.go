@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/ytx-zhang/115tools/internal/logs"
@@ -109,7 +110,7 @@ func normalizeVideoExts(in []string) []string {
 		out = append(out, e)
 	}
 	if len(out) == 0 {
-		return append([]string(nil), DefaultVideoExts...)
+		return slices.Clone(DefaultVideoExts)
 	}
 	return out
 }

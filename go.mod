@@ -9,13 +9,11 @@ require (
 )
 
 require (
-	github.com/go-resty/resty/v2 v2.17.2
 	golang.org/x/crypto v0.55.0
 	golang.org/x/sync v0.22.0
 )
 
 require (
 	github.com/sgtdi/fswatcher v1.3.0
-	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )

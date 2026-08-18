@@ -361,10 +361,10 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	// 回放该分类最近 logReplayLimit 条（而非 ring 全部）：首屏只需一屏，更早的由
 	// /api/logs/history 滚动翻页按需取（ring 仍有全量）。避免一次性推送 5000 条、前端只渲染 300 条的浪费。
 	replay := s.App.RecentFiltered(cat, logReplayLimit)
-	replay = append([]logs.Entry{{
+	replay = slices.Concat([]logs.Entry{{
 		Time: time.Now(), Level: "INFO", Module: "status", Msg: "状态快照",
 		Status: snap,
-	}}, replay...)
+	}}, replay)
 
 	serveSSE(w, r, s.AppCtx, sub, replay, match)
 }

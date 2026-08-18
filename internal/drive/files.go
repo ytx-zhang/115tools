@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -62,7 +63,7 @@ func (c *Client) GetDownloadUrl(ctx context.Context, pickCode, ua, path string) 
 	// ⚠️ pickcode 无效/文件不可用时 115 返回 [] 而非 {fid:{...}}，用 StructOrArray 按空结果放行
 	logInfo := []any{"pickcode", pickCode}
 	if path != "" {
-		logInfo = append([]any{"路径", path}, logInfo...)
+		logInfo = slices.Concat([]any{"路径", path}, logInfo)
 	}
 	items, dur, err := Post[StructOrArray[map[string]downItem]](ctx, c, "/open/ufile/downurl",
 		Form{"pick_code": pickCode}, ReqWithUA(ua))
