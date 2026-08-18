@@ -81,10 +81,6 @@ docker compose up -d
 | **离线下载** | 添加 http/magnet/ed2k 链接任务、上传种子、查看进度/配额、删除与批量清除 |
 | **设置** | 在线修改路径、STRM URL、静默窗口、定时全量同步、`refresh_token`、视频扩展名白名单、上传排除名单等；保存后实时生效 |
 
-### Emby 配置
-
-在 Emby 媒体库中添加本地 STRM 目录（与 `sync_path`/`strm_path` 对应的本地挂载路径），Emby 会将 `.strm` 文件识别为视频，播放时 115tools 自动 302 重定向到 115 CDN 直链。
-
 ### 数据迁移
 
 已有数据的媒体库按以下方式植入：
