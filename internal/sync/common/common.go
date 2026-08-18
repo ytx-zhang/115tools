@@ -116,6 +116,40 @@ func ParseStrmFile(strmPath string) (pickcode string, fid string) {
 	return pc, fid
 }
 
+// NormalizeStrmFile 检查本地 .strm 内容是否为本程序设定的直链格式
+// （{strmURL}/download?pickcode=）。迁移自其他 115 strm 项目时，旧 strm 可能指向
+// 其他 host，需重写为本程序直链（pickcode 不变，仅修正地址）。
+// 返回（是否覆写，文件实际 mtime，错误）：
+// ⚠️ 覆写后必须重新 Stat 取写盘后的 mtime 返回，调用方应直接用它记 DB，
+// 否则 DB 记录的 mtime 与文件实际 mtime 不一致，后续扫描会误判「strm 变更」触发重传。
+// 无法解析 pickcode（无法安全重写）或已是正确格式时返回 rewrote=false 及原文件 mtime。
+func NormalizeStrmFile(strmURL, strmPath string) (bool, int64, error) {
+	pc, _ := ParseStrmFile(strmPath)
+	if pc == "" {
+		if st, e := os.Stat(strmPath); e == nil {
+			return false, st.ModTime().Unix(), nil
+		}
+		return false, 0, nil
+	}
+	want := fmt.Sprintf("%s/download?pickcode=%s", strings.TrimRight(strmURL, "/"), pc)
+	if raw, rerr := os.ReadFile(strmPath); rerr == nil {
+		cur := strings.TrimSpace(strings.TrimPrefix(string(raw), "\xEF\xBB\xBF"))
+		if cur == want {
+			if st, e := os.Stat(strmPath); e == nil {
+				return false, st.ModTime().Unix(), nil
+			}
+			return false, 0, nil
+		}
+	}
+	if werr := WriteStrmFile(strmURL, pc, strmPath); werr != nil {
+		return false, 0, werr
+	}
+	if st, e := os.Stat(strmPath); e == nil {
+		return true, st.ModTime().Unix(), nil
+	}
+	return true, 0, nil
+}
+
 // ──── 云端 → 本地落地辅助 ────
 
 // DownloadCloudFile 用 pickcode 换取 115 下载直链，把文件完整下载到 localPath。

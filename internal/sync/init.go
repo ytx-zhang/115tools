@@ -93,7 +93,17 @@ func (r *Runner) runInit(ctx context.Context) (walked bool, err error) {
 				path, saveSize = common.VideoStrmMeta(path)
 				if info, err := os.Stat(path); err == nil {
 					if _, localFid := common.ParseStrmFile(path); localFid == fid {
-						saveSize = info.ModTime().Unix()
+						// fid 匹配：信任该 strm，但顺带规范化链接地址
+						// （迁移自其他项目的旧 strm 可能指向其他 host，地址不符则重写成本程序直链）。
+						// 覆写后必须用写盘后的实际 mtime 记 DB，否则后续扫描会因 mtime 不一致误触发重传。
+						if rewrote, mt, nerr := common.NormalizeStrmFile(r.paths.StrmUrl, path); nerr == nil {
+							if rewrote {
+								logs.Info(logs.ModuleSync, "规范化旧STRM链接", "路径", path)
+							}
+							saveSize = mt
+						} else {
+							saveSize = info.ModTime().Unix()
+						}
 					}
 				}
 			}
