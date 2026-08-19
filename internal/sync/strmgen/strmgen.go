@@ -14,7 +14,6 @@ import (
 
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/logs"
-	"github.com/ytx-zhang/115tools/internal/sync/cloudsync"
 	"github.com/ytx-zhang/115tools/internal/sync/common"
 )
 
@@ -24,12 +23,12 @@ import (
 type Task struct {
 	api   *drive.Client
 	paths *common.Paths
-	wk    *cloudsync.Walker
-	strm  *cloudsync.StrmIO
+	wk    *common.Walker
+	strm  *common.StrmIO
 }
 
 // NewTask 构造 STRM 生成任务（依赖注入）。
-func NewTask(api *drive.Client, paths *common.Paths, wk *cloudsync.Walker, strm *cloudsync.StrmIO) *Task {
+func NewTask(api *drive.Client, paths *common.Paths, wk *common.Walker, strm *common.StrmIO) *Task {
 	return &Task{api: api, paths: paths, wk: wk, strm: strm}
 }
 
@@ -78,7 +77,7 @@ func (t *Task) Run(ctx context.Context, task *common.Task) {
 				return nil
 			}
 			task.AddTotal(1)
-			if err := t.strm.FetchAndSave(ctx, logs.ModuleStrm, pickCode, savePath, e.IsVideo); err != nil {
+			if _, err := t.strm.FetchAndSave(ctx, logs.ModuleStrm, pickCode, savePath, e.IsVideo); err != nil {
 				failed.Store(true)
 				return nil
 			}

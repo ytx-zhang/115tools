@@ -1,11 +1,11 @@
 // Package common 提供 sync 各任务子包共享的值对象与纯函数：
 // 判定规则（Rules）、路径参数（Paths）、遍历协议（Entry/Visitor）、任务与进度封装（Task），
-// 以及 .strm 路径 / 直链 URL 纯函数与云端落地辅助（下载）。
+// 以及 .strm 路径 / 直链 URL 纯函数、云端落地辅助（下载）、落地编排（StrmIO）与云端目录树遍历（Walker）。
 //
 // 依赖方向严格单向：被全部任务子包 import，本包不 import 任何 sync 子包（因此不会成环）。
 // 本包只依赖三个更底层的包（并非“无依赖工具包”）：
-//   - drive：DownloadCloudFile 需要云端客户端，ParseStrmFile 需要 PickcodeToID 本地解码；
-//   - store：SyncDeps 依赖载体（DB 句柄类型）；
+//   - drive：DownloadCloudFile 需要云端客户端，ParseStrmFile 需要 PickcodeToID 本地解码，Walker 需要列表接口；
+//   - store：Core 依赖载体（DB 句柄类型）；
 //   - logs：调试与状态日志。
 package common
 
@@ -93,10 +93,10 @@ func ProcessCloudFile(path string, e Entry) (savePath string, saveSize int64) {
 	return path, e.Size
 }
 
-// ParseStrmFile 读取 .strm 文件，解析出 pickcode 并本地解码出 fid。
-// 兼容 UTF-8 BOM 与首尾空白；格式：{url}/download?pickcode=xxx
-// （新格式无 fid 参数，fid 恒由 pickcode 解码获得；旧格式若带 fid 参数一律忽略）。
-// 读取失败或内容不可解析时返回空串（不报错，由调用方按「无效 strm」处理）。
+// ParseStrmFile 解析 .strm 内容，返回 pickcode 及本地解码出的 fid。
+// 兼容 UTF-8 BOM 与首尾空白；格式 {url}/download?pickcode=xxx（fid 恒由
+// pickcode 解码，旧格式自带的 fid 参数忽略）。读取或解析失败时返回空串，
+// 由调用方按「无效 strm」处理。
 func ParseStrmFile(strmPath string) (pickcode string, fid string) {
 	data, err := os.ReadFile(strmPath)
 	if err != nil {
@@ -116,16 +116,11 @@ func ParseStrmFile(strmPath string) (pickcode string, fid string) {
 	return pc, fid
 }
 
-// NormalizeStrmFile 检查本地 .strm 内容是否为本程序设定的直链格式
-// （{strmURL}/download?pickcode=）。迁移自其他 115 strm 项目时，旧 strm 可能指向
-// 其他 host，需重写为本程序直链（pickcode 不变，仅修正地址）。
-// 返回（是否覆写，文件实际 mtime，错误）：
-// ⚠️ 覆写后必须重新 Stat 取写盘后的 mtime 返回，调用方应直接用它记 DB，
-// 否则 DB 记录的 mtime 与文件实际 mtime 不一致，后续扫描会误判「strm 变更」触发重传。
-// ⚠️ WriteStrmFile 覆写已存在文件时会保留原 mtime，故此处 Stat 取到的即是原 mtime，
-// 需注意：内容虽被重写（host 规范化），但时间戳不变，扫描不会因此误判变更。
-// 无法解析 pickcode（无法安全重写）或已是正确格式时返回 rewrote=false 及原文件 mtime。
-func NormalizeStrmFile(strmURL, strmPath string) (bool, int64, error) {
+// normalizeStrmFile 把 .strm 重写成本程序直链格式（{strmURL}/download?pickcode=），
+// 仅修正 host、pickcode 不变。返回（是否实际覆写，写盘后文件 mtime，错误）；
+// pickcode 无法解析或已是正确格式时 rewrote=false 并返回原文件 mtime。
+// 仅由 NormalizeOwnedStrm 内部调用。
+func normalizeStrmFile(strmURL, strmPath string) (bool, int64, error) {
 	pc, _ := ParseStrmFile(strmPath)
 	if pc == "" {
 		if st, e := os.Stat(strmPath); e == nil {
@@ -150,6 +145,25 @@ func NormalizeStrmFile(strmURL, strmPath string) (bool, int64, error) {
 		return true, st.ModTime().Unix(), nil
 	}
 	return true, 0, nil
+}
+
+// NormalizeOwnedStrm 把旧 strm 规范化为本程序直链，但仅当 strm 内 pickcode 解码出的
+// fid 与 expectedFid 一致（确属同一云端文件）时才重写，避免张冠李戴。
+//
+// 返回（matched, rewrote, mt）：
+//   - matched=false：pc 为空或 fid 不符，调用方应走其它逻辑（如清旧视频 + 重传）；
+//   - matched=true ：mt 为写库应使用的 mtime——取写盘后实际 mtime，规范化失败（极少，
+//     pickcode 可解析却写盘失败）退化为 fileModTime。rewrote 表示是否实际改写了文件内容，
+//     供调用方决定是否记日志。
+func NormalizeOwnedStrm(strmURL, strmPath, expectedFid string, fileModTime int64) (matched, rewrote bool, mt int64) {
+	pc, localFid := ParseStrmFile(strmPath)
+	if pc == "" || localFid != expectedFid {
+		return false, false, fileModTime
+	}
+	if r, m, nerr := normalizeStrmFile(strmURL, strmPath); nerr == nil {
+		return true, r, m
+	}
+	return true, false, fileModTime
 }
 
 // ──── 云端 → 本地落地辅助 ────

@@ -23,7 +23,7 @@ type CloudOps struct {
 }
 
 // NewCloudOps 构造 cloudOps 小模块（依赖注入）。
-func NewCloudOps(deps *common.SyncDeps) *CloudOps {
+func NewCloudOps(deps *common.Core) *CloudOps {
 	return &CloudOps{api: deps.API, db: deps.DB, paths: deps.Paths}
 }
 

@@ -1,3 +1,6 @@
+// Package cloudsync 实现「云端 → 本地」同步任务：遍历云端 SyncPath 树，
+// 新文件落地（视频写 strm / 普通下载）、云端冗余项去重删除、云端缺失目录在本地补建。
+// 核心遍历（Walker）与落地编排（StrmIO）已下沉到 common 包，被本包与 strmgen 共用。
 package cloudsync
 
 import (
@@ -19,12 +22,12 @@ type Task struct {
 	api   *drive.Client
 	db    *store.Store
 	paths *common.Paths
-	wk    *Walker
-	strm  *StrmIO
+	wk    *common.Walker
+	strm  *common.StrmIO
 }
 
 // NewTask 构造云端同步任务（依赖注入）。
-func NewTask(api *drive.Client, db *store.Store, paths *common.Paths, wk *Walker, strm *StrmIO) *Task {
+func NewTask(api *drive.Client, db *store.Store, paths *common.Paths, wk *common.Walker, strm *common.StrmIO) *Task {
 	return &Task{api: api, db: db, paths: paths, wk: wk, strm: strm}
 }
 
@@ -50,7 +53,7 @@ func (t *Task) Run(ctx context.Context, task *common.Task) {
 			return true, nil
 		},
 		VisitFile: func(ctx context.Context, path, fid, pickCode string, e common.Entry) error {
-			savePath, saveSize := common.ProcessCloudFile(path, e)
+			savePath, _ := common.ProcessCloudFile(path, e)
 
 			dbFid := t.db.GetFid(savePath)
 			if dbFid != "" {
@@ -65,7 +68,10 @@ func (t *Task) Run(ctx context.Context, task *common.Task) {
 				return nil
 			}
 			task.AddTotal(1)
-			if err := t.strm.FetchAndSave(ctx, logs.ModuleSync, pickCode, savePath, e.IsVideo); err != nil {
+			// saveSize 由落地处 FetchAndSave 回读实际属性给出（视频=本地 strm mtime，
+			// 普通=真实字节数），确保与后续本地同步比对基准一致，绝不自算时间戳。
+			saveSize, err := t.strm.FetchAndSave(ctx, logs.ModuleSync, pickCode, savePath, e.IsVideo)
+			if err != nil {
 				return nil
 			}
 			t.db.SaveRecord(savePath, fid, saveSize)

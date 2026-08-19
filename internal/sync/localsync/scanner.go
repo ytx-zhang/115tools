@@ -29,7 +29,7 @@ type Scanner struct {
 }
 
 // NewScanner 构造 scanner 小模块（依赖注入）。
-func NewScanner(deps *common.SyncDeps, up *Uploader, co *CloudOps, task *common.Task) *Scanner {
+func NewScanner(deps *common.Core, up *Uploader, co *CloudOps, task *common.Task) *Scanner {
 	return &Scanner{api: deps.API, db: deps.DB, paths: deps.Paths, rules: deps.Rules, up: up, co: co, task: task,
 		dirPool: dirPool{dirCh: make(chan string, 64), pending: make(map[string]SyncSource)}}
 }
@@ -176,10 +176,21 @@ func (sc *Scanner) HandleFile(ctx context.Context, batch *sync.WaitGroup, fullPa
 		if fileInfo.ModTime().Unix() == dbSize {
 			return // mtime 未变 → 本就有记录
 		}
+		// mtime 变：先判定 pickcode 是否未变（解析出的 fid 与 DB 一致）。
+		// pc 未变 ⇒ 云端视频没变，仅规范化链接 + 刷新 DB mtime，绝不走
+		// 「清旧视频 + 重传」——否则会把云端视频误挪回收目录且搬不回。
+		if matched, rewrote, mt := common.NormalizeOwnedStrm(sc.paths.StrmUrl, fullPath, dbFid, fileInfo.ModTime().Unix()); matched {
+			if rewrote {
+				logs.Debug(logs.ModuleSync, "规范化STRM链接", "路径", fullPath)
+			}
+			sc.db.SaveRecord(fullPath, dbFid, mt)
+			return
+		}
+		// pickcode 变 / 无法解析 ⇒ 旧链接失效，走「清旧视频 + 重传」
 		if cerr := sc.co.CloudCleanTask(ctx, fullPath); cerr != nil {
 			logs.Error(logs.ModuleSync, "云端删除失败", "路径", fullPath, "错误", cerr)
 		}
-		sc.enqueueUpload(ctx, batch, fullPath) // mtime 变 → 删旧视频 + 重传
+		sc.enqueueUpload(ctx, batch, fullPath)
 		return
 	}
 

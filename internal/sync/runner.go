@@ -3,8 +3,8 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║                            核心数据流                                    ║
 // ║   【本地 → 云端】Watcher 监听 → 视频直传/目录防抖 → scanner → uploader   ║
-// ║   【云端 → 本地】cronTask 触发 → cloudsyncTask → walker → strmIO          ║
-// ║   【STRM 生成】strmgenTask → walker → strmIO → 移入回收                   ║
+// ║   【云端 → 本地】cronTask 触发 → cloudsyncTask → walker → common.strmIO    ║
+// ║   【STRM 生成】strmgenTask → walker → common.strmIO → 移入回收             ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 //
 // 依赖注入：Runner 持全部基础依赖（api/db/paths/rules），按最小依赖集构造并注入各子包小模块。
@@ -38,8 +38,8 @@ type Runner struct {
 	sc   *localsync.Scanner
 	up   *localsync.Uploader
 	co   *localsync.CloudOps
-	wk   *cloudsync.Walker
-	strm *cloudsync.StrmIO
+	wk   *common.Walker
+	strm *common.StrmIO
 
 	// 任务层：cloudSyncTask/strmGenTask 是「业务体」（Run 所在子包对象）；
 	// cloudTask/strmTask/localTask 是「运行态封装」（common.Task：防重入/取消/进度）。
@@ -78,11 +78,11 @@ func NewRunner(api *drive.Client, db *store.Store, cfg *config.Config, onChange 
 	r.localTask = common.NewTask("本地同步", onChange)
 
 	// 子包功能层模块：按最小依赖集注入。
-	deps := &common.SyncDeps{API: api, DB: db, Paths: paths, Rules: rules}
-	r.strm = cloudsync.NewStrmIO(api, paths)
+	deps := &common.Core{API: api, DB: db, Paths: paths, Rules: rules}
+	r.strm = common.NewStrmIO(deps)
 	r.up = localsync.NewUploader(deps, r.localTask)
 	r.co = localsync.NewCloudOps(deps)
-	r.wk = cloudsync.NewWalker(deps)
+	r.wk = common.NewWalker(deps)
 	r.sc = localsync.NewScanner(deps, r.up, r.co, r.localTask)
 	r.cloudSyncTask = cloudsync.NewTask(api, db, paths, r.wk, r.strm)
 	r.strmGenTask = strmgen.NewTask(api, paths, r.wk, r.strm)

@@ -4,7 +4,7 @@
 //   - 顶层（本包）：syncer.go（门面 Syncer）+ runner.go（组合根 Runner）+ cron.go + init.go
 //   - common/：零依赖公共值对象与纯函数（Rules/Paths/Entry/Visitor/Task）
 //   - localsync/：本地→云端（Scanner/Uploader/CloudOps/Watcher 实时监听）
-//   - cloudsync/：云端→本地（Walker/StrmIO/CloudsyncTask）
+//   - cloudsync/：云端→本地（Walker/CloudsyncTask；落地编排用 common.StrmIO）
 //   - strmgen/：STRM 生成（StrmgenTask）
 //
 // 数据流图见 runner.go 顶部。

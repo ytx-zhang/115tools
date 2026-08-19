@@ -92,18 +92,13 @@ func (r *Runner) runInit(ctx context.Context) (walked bool, err error) {
 			if en.IsVideo {
 				path, saveSize = common.VideoStrmMeta(path)
 				if info, err := os.Stat(path); err == nil {
-					if _, localFid := common.ParseStrmFile(path); localFid == fid {
-						// fid 匹配：信任该 strm，但顺带规范化链接地址
-						// （迁移自其他项目的旧 strm 可能指向其他 host，地址不符则重写成本程序直链）。
-						// 覆写后必须用写盘后的实际 mtime 记 DB，否则后续扫描会因 mtime 不一致误触发重传。
-						if rewrote, mt, nerr := common.NormalizeStrmFile(r.paths.StrmUrl, path); nerr == nil {
-							if rewrote {
-								logs.Info(logs.ModuleSync, "规范化旧STRM链接", "路径", path)
-							}
-							saveSize = mt
-						} else {
-							saveSize = info.ModTime().Unix()
+					// 本地已存在对应 strm（迁移自其他项目的旧 strm），按云端 fid 校验归属后
+					// 规范化链接地址（旧 strm 可能指向其他 host），并取写盘后实际 mtime 记 DB。
+					if matched, rewrote, mt := common.NormalizeOwnedStrm(r.paths.StrmUrl, path, fid, info.ModTime().Unix()); matched {
+						if rewrote {
+							logs.Info(logs.ModuleSync, "规范化旧STRM链接", "路径", path)
 						}
+						saveSize = mt
 					}
 				}
 			}

@@ -16,7 +16,7 @@ import (
 )
 
 // NewUploader 构造 uploader 小模块（依赖注入）。
-func NewUploader(deps *common.SyncDeps, task *common.Task) *Uploader {
+func NewUploader(deps *common.Core, task *common.Task) *Uploader {
 	return &Uploader{
 		api:   deps.API,
 		db:    deps.DB,

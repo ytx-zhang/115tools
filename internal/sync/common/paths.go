@@ -1,27 +1,10 @@
 package common
 
 import (
-	"context"
 	"time"
 
 	"github.com/ytx-zhang/115tools/internal/config"
 )
-
-// Entry 是 VisitFile 回调收到的文件元数据。
-type Entry struct {
-	IsVideo  bool
-	Size     int64
-	PickCode string
-}
-
-// Visitor 定义云端遍历回调。Walker.Walk 负责递归/并发/配额/分页/取消，
-// 使用方通过回调决定「拿到目录/文件后做什么」。
-type Visitor struct {
-	EnterDir  func(ctx context.Context, path, fid string) (descend bool, err error)
-	VisitFile func(ctx context.Context, path, fid, pickCode string, e Entry) error
-	// SkipByCount：云端总数与 DB 记录数一致则跳过该目录（大库二次同步提速）。
-	SkipByCount bool
-}
 
 // Paths 是本/云端目录路径与文件系统交互参数（由 runner 从配置组装一次，指针共享）。
 // ⚠️ 共享指针是关键：SyncFid/TempFid/StrmFid 在 Init 时才从云端解析写入，
