@@ -160,26 +160,30 @@
           <fieldset>
             <legend>账号凭证 <small class="muted">保存后重建同步器</small></legend>
             <div class="form-grid">
-              <label class="col-2"><span class="req">*</span> Refresh_token
-                <small class="muted">换取访问令牌（115 开放平台）</small>
+              <label class="col-2"><span class="req">*</span> refresh_token
+                <small class="muted">115 开放平台刷新令牌，换取访问令牌</small>
                 <input name="refresh_token" type="password" autocomplete="off">
               </label>
             </div>
           </fieldset>
 
           <fieldset>
-            <legend>同步配置</legend>
+            <legend>同步配置 <small class="muted">* 为必填项，缺一同步不会启动</small></legend>
             <div class="form-grid">
-              <label><span class="req">*</span> 同步目录
+              <label><span class="req">*</span> sync_path
+                <small class="muted">本地媒体文件同步根（Emby 媒体库目录）</small>
                 <input name="sync_path" placeholder="/媒体库">
               </label>
-              <label><span class="req">*</span> STRM 生成目录
+              <label><span class="req">*</span> strm_path
+                <small class="muted">STRM 生成输出目录（对应云端媒体库）</small>
                 <input name="strm_path" placeholder="/待整理">
               </label>
-              <label><span class="req">*</span> 云端临时目录
+              <label><span class="req">*</span> temp_path
+                <small class="muted">云端临时回收目录（清理视频时移入，可找回）</small>
                 <input name="temp_path" placeholder="/Temp">
               </label>
-              <label><span class="req">*</span> STRM 链接 URL
+              <label><span class="req">*</span> strm_url
+                <small class="muted">STRM 链接前缀（/download 直链地址）</small>
                 <input name="strm_url" placeholder="http://设备IP:端口号">
               </label>
               <label>本地同步去抖窗口
