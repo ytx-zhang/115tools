@@ -14,9 +14,10 @@ import (
 
 // ──── 离线下载原子方法 ────
 
-// addTasks 批量添加离线下载链接（http/https/magnet/ed2k），保存到 saveDirID。
+// AddOfflineTasks 批量添加离线下载链接（http/https/magnet/ed2k），保存到 saveDirID。
+// 仅负责向 115 发起请求并解析响应，不做任何用户输入校验/规范化（由调用方 web 层负责）。
 // savePath 为日志定位用的目标目录路径（调用方传入），仅用于动作日志。
-func (c *Client) addTasks(ctx context.Context, urls []string, saveDirID, savePath string) ([]OfflineAddResult, error) {
+func (c *Client) AddOfflineTasks(ctx context.Context, urls []string, saveDirID, savePath string) ([]OfflineAddResult, error) {
 	res, dur, err := Post[[]OfflineAddResult](ctx, c, "/open/offline/add_task_urls",
 		Form{
 			"urls":       strings.Join(urls, "\n"),
@@ -88,15 +89,6 @@ func (c *Client) GetQuota(ctx context.Context) (*OfflineQuota, error) {
 
 // ──── 离线下载辅助函数 ────
 
-// ValidateAndAddOffline 参数校验 + 添加离线任务（请求日志由 addTasks 自打）。
-// savePath 为目标目录路径（仅日志定位用；FID 由调用方另传 saveDirID）。
-func ValidateAndAddOffline(ctx context.Context, c *Client, urls []string, saveDirID, savePath string) ([]OfflineAddResult, error) {
-	if len(urls) == 0 {
-		return nil, fmt.Errorf("没有可添加的链接")
-	}
-	return c.addTasks(ctx, urls, saveDirID, savePath)
-}
-
 // AddTorrentFromData 添加 BT 种子离线任务：解析 bencode→构造 magnet→提交。
 func AddTorrentFromData(ctx context.Context, c *Client, torrentData []byte, torrentName, savePath string) (*OfflineAddResult, error) {
 	t0 := time.Now()
@@ -116,7 +108,7 @@ func AddTorrentFromData(ctx context.Context, c *Client, torrentData []byte, torr
 		return nil, fmt.Errorf("解析保存目录失败: %w", err)
 	}
 	magnet := "magnet:?xt=urn:btih:" + infoHash + "&dn=" + url.QueryEscape(displayName)
-	results, err := ValidateAndAddOffline(ctx, c, []string{magnet}, saveDir.Fid, savePath)
+	results, err := c.AddOfflineTasks(ctx, []string{magnet}, saveDir.Fid, savePath)
 	if err != nil {
 		return nil, fmt.Errorf("添加磁力链接失败: %w", err)
 	}

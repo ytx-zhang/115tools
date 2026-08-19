@@ -425,8 +425,8 @@ func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 
 	var urls []string
 	for line := range strings.Lines(req.Urls) {
-		if line = strings.TrimSpace(line); line != "" {
-			urls = append(urls, line)
+		if norm := normalizeMagnetURL(line); norm != "" {
+			urls = append(urls, norm)
 		}
 	}
 	if len(urls) == 0 {
@@ -457,6 +457,46 @@ func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	logs.Info(logs.ModuleSystem, "添加离线任务", "提交", len(urls), "成功", added, "保存路径", savePath, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "results": results})
+}
+
+// normalizeMagnetURL 规范化单个磁链/下载链接输入（web 层输入校验的一部分，
+// 不在 drive 侧做）：用户漏写 magnet:?xt=urn:btih: 前缀、只贴 info_hash
+// （40 位 hex 或 32 位 base32）时自动补全；已是完整链接则原样返回；空行返回空串。
+func normalizeMagnetURL(line string) string {
+	s := strings.TrimSpace(line)
+	if s == "" {
+		return s
+	}
+	if strings.HasPrefix(s, "magnet:") || strings.Contains(s, "://") {
+		return s
+	}
+	hash := strings.TrimPrefix(s, "btih:")
+	hash = strings.TrimPrefix(hash, "urn:btih:")
+	if isBTHash(hash) {
+		return "magnet:?xt=urn:btih:" + hash
+	}
+	return s
+}
+
+// isBTHash 判断字符串是否为合法的 BT info_hash：40 位 hex 或 32 位 base32（大小写不敏感）。
+func isBTHash(s string) bool {
+	if len(s) == 40 {
+		for _, c := range s {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+				return false
+			}
+		}
+		return true
+	}
+	if len(s) == 32 {
+		for _, c := range s {
+			if !strings.ContainsRune("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ234567", c) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
