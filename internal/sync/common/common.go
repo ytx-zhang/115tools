@@ -122,6 +122,8 @@ func ParseStrmFile(strmPath string) (pickcode string, fid string) {
 // 返回（是否覆写，文件实际 mtime，错误）：
 // ⚠️ 覆写后必须重新 Stat 取写盘后的 mtime 返回，调用方应直接用它记 DB，
 // 否则 DB 记录的 mtime 与文件实际 mtime 不一致，后续扫描会误判「strm 变更」触发重传。
+// ⚠️ WriteStrmFile 覆写已存在文件时会保留原 mtime，故此处 Stat 取到的即是原 mtime，
+// 需注意：内容虽被重写（host 规范化），但时间戳不变，扫描不会因此误判变更。
 // 无法解析 pickcode（无法安全重写）或已是正确格式时返回 rewrote=false 及原文件 mtime。
 func NormalizeStrmFile(strmURL, strmPath string) (bool, int64, error) {
 	pc, _ := ParseStrmFile(strmPath)
@@ -200,7 +202,21 @@ func DownloadCloudFile(ctx context.Context, api *drive.Client, pickcode, localPa
 // 内容格式：{strmURL}/download?pickcode={pickcode}；strmURL 末尾多余的 "/" 会被去掉，避免拼出 "http://host//download?..."。
 // ⚠️ 直链只允许携带 pickcode：不含 fid（fid 由 drive.PickcodeToID 本地解码）、
 // 不含带过期时间的 115 CDN 地址（CDN 直链在播放时才实时取，见 web/redirector.go）。
+//
+// 覆盖已存在的文件时保留原 mtime（os.Chtimes 恢复）：
+// 本程序自身重写 strm（规范化、改名、覆盖同名视频）不应被扫描当成「用户修改了文件」，
+// 否则按 mtime 判变更会误触发删旧视频+重传。权限/属主不受影响（O_TRUNC 写已存在文件不改变权限）。
 func WriteStrmFile(strmURL, pickcode, localPath string) error {
 	content := fmt.Sprintf("%s/download?pickcode=%s", strings.TrimRight(strmURL, "/"), pickcode)
-	return os.WriteFile(localPath, []byte(content), 0644)
+	var oldMod time.Time
+	if st, err := os.Stat(localPath); err == nil {
+		oldMod = st.ModTime()
+	}
+	if err := os.WriteFile(localPath, []byte(content), 0644); err != nil {
+		return err
+	}
+	if !oldMod.IsZero() {
+		return os.Chtimes(localPath, oldMod, oldMod)
+	}
+	return nil
 }
