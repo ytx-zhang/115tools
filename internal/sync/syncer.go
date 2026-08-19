@@ -149,6 +149,16 @@ func (s *Syncer) StopTask(name string) {
 	}
 }
 
+// RewriteStrmLinks 批量把当前实例的本地 strm 链接规范化到最新 StrmUrl 前缀
+// （app.ApplyConfig 在 strm_url 变更、同步器重建后调用）。返回（扫描数, 重写数, 错误）。
+func (s *Syncer) RewriteStrmLinks(ctx context.Context) (scanned, rewrote int, err error) {
+	cur := s.current()
+	if cur == nil {
+		return 0, 0, fmt.Errorf("同步器实例未就绪")
+	}
+	return cur.RewriteStrmLinks(ctx)
+}
+
 // taskCtx 返回当前实例 ctx；无实例则返回 appCtx。
 func (s *Syncer) taskCtx() context.Context {
 	s.mu.Lock()

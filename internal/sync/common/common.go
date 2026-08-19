@@ -116,11 +116,12 @@ func ParseStrmFile(strmPath string) (pickcode string, fid string) {
 	return pc, fid
 }
 
-// normalizeStrmFile 把 .strm 重写成本程序直链格式（{strmURL}/download?pickcode=），
+// NormalizeStrmFile 把 .strm 重写成本程序直链格式（{strmURL}/download?pickcode=），
 // 仅修正 host、pickcode 不变。返回（是否实际覆写，写盘后文件 mtime，错误）；
 // pickcode 无法解析或已是正确格式时 rewrote=false 并返回原文件 mtime。
-// 仅由 NormalizeOwnedStrm 内部调用。
-func normalizeStrmFile(strmURL, strmPath string) (bool, int64, error) {
+// 覆盖时保留原 mtime（WriteStrmFile 内部恢复），不会让 Emby/本地同步误判文件变更。
+// 被 NormalizeOwnedStrm（带 fid 校验）与批量重写 Runner.RewriteStrmLinks（无 DB 记录场景）共用。
+func NormalizeStrmFile(strmURL, strmPath string) (bool, int64, error) {
 	pc, _ := ParseStrmFile(strmPath)
 	if pc == "" {
 		if st, e := os.Stat(strmPath); e == nil {
@@ -160,7 +161,7 @@ func NormalizeOwnedStrm(strmURL, strmPath, expectedFid string, fileModTime int64
 	if pc == "" || localFid != expectedFid {
 		return false, false, fileModTime
 	}
-	if r, m, nerr := normalizeStrmFile(strmURL, strmPath); nerr == nil {
+	if r, m, nerr := NormalizeStrmFile(strmURL, strmPath); nerr == nil {
 		return true, r, m
 	}
 	return true, false, fileModTime

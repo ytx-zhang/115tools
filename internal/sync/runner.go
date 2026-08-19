@@ -13,6 +13,9 @@ package sync
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/ytx-zhang/115tools/internal/config"
@@ -203,4 +206,56 @@ func (r *Runner) StopTask(name string) {
 // Status 返回三个任务的进度快照。
 func (r *Runner) Status() (cloud, strm, local *status.TaskStatus) {
 	return r.cloudTask.Status(), r.strmTask.Status(), r.localTask.Status()
+}
+
+// RewriteStrmLinks 把本地 SyncPath 与 StrmPath 两棵目录树下所有 .strm 的链接地址
+// 批量规范化到当前 StrmUrl 前缀（保存配置修改 strm_url 后由 app 层自动调用）。
+//
+// 重写经 WriteStrmFile 落地，覆盖已存在文件时保留原 mtime，因此：
+//   - Emby 不会因 mtime 变化把 strm 误判为变更而重扫媒体库；
+//   - 本地同步/监听器按 mtime 比对（mtime == DB size）不会误触发「删旧视频 + 重传」。
+//
+// SyncPath 下带 DB 记录的 strm 走 NormalizeOwnedStrm（按云端 fid 校验归属，防张冠李戴）；
+// StrmPath 下 strmgen 产物不写 DB，走 NormalizeStrmFile（仅按 pickcode 重写）。
+// 单个文件失败只记 Warn 不中断批量，返回（扫描数, 重写数, 错误）。
+func (r *Runner) RewriteStrmLinks(ctx context.Context) (scanned, rewrote int, err error) {
+	for _, root := range []string{r.paths.SyncPath, r.paths.StrmPath} {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		if werr := filepath.WalkDir(root, func(path string, d fs.DirEntry, werr error) error {
+			if werr != nil {
+				logs.Warn(logs.ModuleSync, "遍历STRM目录失败", "路径", path, "错误", werr)
+				return nil
+			}
+			if d.IsDir() || !common.IsStrmPath(path) {
+				return nil
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			scanned++
+			mt := int64(0)
+			if info, ierr := d.Info(); ierr == nil {
+				mt = info.ModTime().Unix()
+			}
+			if dbFid := r.db.GetFid(path); dbFid != "" {
+				if matched, rw, _ := common.NormalizeOwnedStrm(r.paths.StrmUrl, path, dbFid, mt); matched && rw {
+					rewrote++
+					logs.Debug(logs.ModuleSync, "规范化STRM链接", "路径", path)
+				}
+				return nil
+			}
+			if rw, _, nerr := common.NormalizeStrmFile(r.paths.StrmUrl, path); nerr != nil {
+				logs.Warn(logs.ModuleSync, "规范化STRM链接失败", "路径", path, "错误", nerr)
+			} else if rw {
+				rewrote++
+				logs.Debug(logs.ModuleSync, "规范化STRM链接", "路径", path)
+			}
+			return nil
+		}); werr != nil {
+			return scanned, rewrote, werr
+		}
+	}
+	return scanned, rewrote, nil
 }

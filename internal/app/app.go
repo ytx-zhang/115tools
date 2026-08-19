@@ -101,6 +101,7 @@ func (b *App) ApplyConfig(ctx context.Context, req config.Editable) error {
 	oldSyncPath := b.cfg.SyncPath
 	oldTempPath := b.cfg.TempPath
 	oldStrmPath := b.cfg.StrmPath
+	oldStrmUrl := b.cfg.StrmUrl
 
 	// 验证新 refresh_token（空表示未修改，跳过）
 	if err := b.verifyCredential(ctx, req); err != nil {
@@ -120,6 +121,18 @@ func (b *App) ApplyConfig(ctx context.Context, req config.Editable) error {
 		return b.failInit(err.Error())
 	}
 	logs.Info(logs.ModuleSystem, "配置已更新，同步器已重建", "构建索引", walked, "耗时", time.Since(syncStart).String())
+
+	// strm_url 变更 → 批量把本地 strm 链接规范化到新前缀。重写保留文件 mtime
+	// （WriteStrmFile 覆盖恢复），Emby 不会重扫媒体库、本地同步不会误判变更重传。
+	// 失败不阻塞配置保存，只记日志。
+	if oldStrmUrl != b.cfg.StrmUrl {
+		scanned, rewrote, rerr := b.syncer.RewriteStrmLinks(ctx)
+		if rerr != nil {
+			logs.Error(logs.ModuleSystem, "批量规范化STRM链接失败", "错误", rerr)
+		} else {
+			logs.Info(logs.ModuleSystem, "批量规范化STRM链接完成", "扫描", scanned, "重写", rewrote)
+		}
+	}
 
 	b.setInitErr("")
 	return nil
