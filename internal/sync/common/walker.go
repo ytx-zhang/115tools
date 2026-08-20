@@ -57,7 +57,7 @@ func (w *Walker) Walk(ctx context.Context, rootPath, rootFid string, v Visitor, 
 	walk = func(path, fid string) error {
 		logs.Debug(logs.ModuleSync, "进入目录", "路径", path)
 
-		if err := gctx.Err(); err != nil {
+		if err := context.Cause(gctx); err != nil {
 			return err
 		}
 
@@ -83,7 +83,7 @@ func (w *Walker) Walk(ctx context.Context, rootPath, rootFid string, v Visitor, 
 		}
 
 		for _, item := range items {
-			if err := gctx.Err(); err != nil {
+			if err := context.Cause(gctx); err != nil {
 				return err
 			}
 			fullPath := filepath.Join(path, item.Name)

@@ -90,7 +90,7 @@ func (s *Server) registerStatic(mux *http.ServeMux) {
 	// 天然解决「发布新版后用户仍看到旧页面/旧 JS」的缓存陈旧问题（无构建步骤，无法用内容指纹文件名+immutable）。
 	// FileServer 的 checkPreconditions 会用预设的 ETag 头处理 If-None-Match → 304。
 	etags := make(map[string]string, 16)
-	_ = fs.WalkDir(sub, ".", func(path string, d fs.DirEntry, err error) error {
+	if err := fs.WalkDir(sub, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
@@ -101,7 +101,10 @@ func (s *Server) registerStatic(mux *http.ServeMux) {
 		h := sha1.Sum(data)
 		etags[path] = `"` + hex.EncodeToString(h[:]) + `"`
 		return nil
-	})
+	}); err != nil {
+		// 指纹计算失败：ETag 缺失时浏览器按 no-cache 每次回源验证，功能仍可用，仅告警
+		logs.Warn(logs.ModuleSystem, "静态资源指纹计算失败", "错误", err)
+	}
 
 	indexHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -112,7 +115,9 @@ func (s *Server) registerStatic(mux *http.ServeMux) {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		_, _ = w.Write(indexData)
+		if _, err := w.Write(indexData); err != nil {
+			logs.Warn(logs.ModuleSystem, "写入首页响应失败", "错误", err)
+		}
 	})
 	mux.Handle("GET /{$}", indexHandler)
 
@@ -133,7 +138,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// 客户端已断开等场景编码/写出失败：连接不可恢复，仅告警
+		logs.Warn(logs.ModuleSystem, "写入JSON响应失败", "状态码", code, "错误", err)
+	}
 }
 
 // writeOK 收敛「成功响应 map[string]bool{"ok":true}」的样板。

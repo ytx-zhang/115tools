@@ -265,7 +265,9 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 		// 仅 2xx 透传；其余关 body 重试
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			lastStatus = resp.StatusCode
-			resp.Body.Close()
+			if cerr := resp.Body.Close(); cerr != nil {
+				logs.Debug(logs.ModuleDrive, "关闭回源响应体失败", "错误", cerr)
+			}
 			if attempt < maxRetries {
 				// 还有重试机会：警告一条即可，带 range 便于定位哪个分片
 				logs.Warn(logs.ModuleDrive, "回源非2xx，将重试",
@@ -285,7 +287,9 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 		w.WriteHeader(resp.StatusCode) // 原样透传 200 / 206
 		streamStart := time.Now()
 		written, copyErr := io.Copy(w, resp.Body)
-		resp.Body.Close()
+		if cerr := resp.Body.Close(); cerr != nil {
+			logs.Debug(logs.ModuleDrive, "透传后关闭回源响应体失败", "错误", cerr)
+		}
 		if copyErr != nil {
 			if r.Context().Err() != nil {
 				return // 客户端断开，正常

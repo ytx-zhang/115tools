@@ -20,7 +20,7 @@ import (
 // 机制：AccessToken 有有效期（通常几小时）。守护基于 time.AfterFunc 链式调度——
 // StartRefreshDaemon 初始化按配置里的到期时间提前 refreshAhead 排定首次刷新，
 // scheduleRefresh 每次刷新成功后按新到期时间续排、失败则退避 refreshBackoff，
-// 形成永不断裂的链；ctx 取消时回调开头检查 ctx.Err() 直接终止，不再续排。
+// 形成永不断裂的链；ctx 取消时回调开头检查 context.Cause() 直接终止，不再续排。
 // 业务请求侧（Client 的 before 钩子）发现过期时也走同一刷新函数，由包级 refreshMu
 // 串行化，避免并发重复刷新。⚠️ 检查节流阈值与预约阈值必须同为 refreshAhead。
 
@@ -42,7 +42,7 @@ const refreshBackoff = time.Minute
 func refreshAccessToken(ctx context.Context, cfg *config.Config, overrideRT string) error {
 	refreshMu.Lock()
 	defer refreshMu.Unlock()
-	if err := ctx.Err(); err != nil {
+	if err := context.Cause(ctx); err != nil {
 		return err
 	}
 
@@ -75,8 +75,15 @@ func refreshAccessToken(ctx context.Context, cfg *config.Config, overrideRT stri
 	if err != nil {
 		return fmt.Errorf("网络请求失败: %w", err)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			logs.Debug(logs.ModuleCloud, "关闭刷新响应体失败", "错误", cerr)
+		}
+	}()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("读取刷新响应失败: %w", err)
+	}
 	var res struct {
 		State   IntString `json:"state"` // ⚠️ 115 整数字段偶发为字符串，双兼容（见 IntString）
 		Code    IntString `json:"code"`
@@ -136,7 +143,7 @@ func StartRefreshDaemon(ctx context.Context, cfg *config.Config) {
 // scheduleRefresh 在 delay 后触发一次刷新，触发后按结果链式排下一次。
 func scheduleRefresh(ctx context.Context, cfg *config.Config, delay time.Duration) {
 	time.AfterFunc(delay, func() {
-		if ctx.Err() != nil {
+		if context.Cause(ctx) != nil {
 			return // 应用退出，终止刷新链
 		}
 		// 未配置 refresh_token：按 refreshBackoff 空转等待（不发请求、不打日志），

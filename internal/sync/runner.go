@@ -135,7 +135,7 @@ func (r *Runner) newBatchCtx() (context.Context, context.CancelFunc) {
 }
 
 // startLocalSync 触发本地全量扫描（首启/cron/手动共用）：投主目录进目录池，由消费者串行消化。
-// 若已停止（localCancel==nil）先基于 localBaseCtx 重建 localCtx 再投，否则新批次 ScanDir 一进来就 ctx.Err()。
+// 若已停止（localCancel==nil）先基于 localBaseCtx 重建 localCtx 再投，否则新批次 ScanDir 一进来就因 context.Cause 命中而提前退出。
 // 云同步进行中让路；SyncFid 未就绪（登录态异常）跳过。
 func (r *Runner) startLocalSync() {
 	r.localMu.Lock()
@@ -231,7 +231,7 @@ func (r *Runner) RewriteStrmLinks(ctx context.Context) (scanned, rewrote int, er
 			if d.IsDir() || !common.IsStrmPath(path) {
 				return nil
 			}
-			if err := ctx.Err(); err != nil {
+			if err := context.Cause(ctx); err != nil {
 				return err
 			}
 			scanned++

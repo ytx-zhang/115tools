@@ -145,7 +145,7 @@ func multipartUpload(ctx context.Context, t *ossTarget, fileSize int64, readerAt
 			}
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, context.Cause(ctx)
 			case <-time.After(time.Duration(1<<(attempt-1)) * time.Second):
 			}
 		}
@@ -336,7 +336,11 @@ func uploadByOSS(ctx context.Context, c *Client, pathStr string, fileSize int64,
 	if err != nil {
 		return nil, "", fmt.Errorf("打开文件失败: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			logs.Debug(logs.ModuleCloud, "关闭上传文件失败", "错误", cerr)
+		}
+	}()
 	// 上传前兜底：本地实际大小与上传参数 fileSize 不一致（文件在 init 后被重写/截断）→ 直接报错，不走上传。
 	if fi, statErr := f.Stat(); statErr == nil && fi.Size() != fileSize {
 		return nil, "", fmt.Errorf("上传前文件大小已变化: 期望=%d 实际=%d", fileSize, fi.Size())
@@ -345,7 +349,10 @@ func uploadByOSS(ctx context.Context, c *Client, pathStr string, fileSize int64,
 	if err != nil {
 		return nil, "", fmt.Errorf("OSS上传失败: %w", err)
 	}
-	raw, _ := json.Marshal(cbResp)
+	raw, err := json.Marshal(cbResp)
+	if err != nil {
+		return nil, "", fmt.Errorf("OSS上传回调序列化失败: %w", err)
+	}
 	var cb struct {
 		Data UploadCallbackData `json:"data"`
 	}

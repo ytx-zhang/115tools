@@ -1,5 +1,6 @@
 # golangci-lint v2 配置（兼容 Go 1.26）。
 # 启用 Go 主流静态检查：gofmt / govet / staticcheck / errcheck / unused / ineffassign / misspell / revive。
+# 原则：零豁免。所有 lint 问题都通过修复代码解决，不在配置中扩大排除范围。
 version: "2"
 
 linters:
@@ -8,32 +9,9 @@ linters:
     enable:
       - gofmt
   settings:
-    # 项目惯例：延后关闭（defer Close）、bbolt View/Update、os.Remove 的返回错误按惯用法忽略，
-    # 不在 lint 层面强制处理（避免为忽略错误而引入无意义分支）。
-    errcheck:
-      exclude-functions:
-        - (io.Closer).Close
-        - (*os.File).Close
-        - os.Remove
-        - (*go.etcd.io/bbolt.DB).View
-        - (*go.etcd.io/bbolt.DB).Update
-        - (*go.etcd.io/bbolt.DB).Close
     misspell:
       locale: US
-    revive:
-      rules:
-        # 项目统一采用「简短精准」中文行内注释，不强制为每个导出符号写 godoc。
-        - name: exported
-          disabled: true
 
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - revive
-    - path: \.gen\.go
-      linters:
-        - all

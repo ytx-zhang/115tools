@@ -12,13 +12,8 @@ data/
 
 # 文档与杂项
 *.md
-LICENSE
 .dockerignore
 .golangci.yml
 
 # 旧版本文档归档
 archive/
-
-# 测试与缓存
-*_test.go
-/coverage.out

@@ -2,9 +2,7 @@
 data/
 cookie.txt
 
-# Go 编译产物（/115tools 仅忽略仓库根的可执行文件，勿误伤 cmd/115tools 源码目录）
-server
-/115tools
+# Go 编译产物（仅忽略仓库根的可执行文件，勿误伤 cmd/115tools 源码目录）
 *.exe
 *.exe~
 
@@ -18,13 +16,12 @@ server
 .DS_Store
 Thumbs.db
 
-# 本地脚本
-update-deps.ps1
-count.sh
-
 # 旧版本文档归档（旧项目代码压缩包）
 archive/
 
 # CodeBuddy / WorkBuddy 本地数据（内存、记忆等，勿提交）
 .codebuddy/
 .workbuddy/
+
+# AI 助手规范文件（本地工具数据，不随仓库分发）
+AGENTS.md

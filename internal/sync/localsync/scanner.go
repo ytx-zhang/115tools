@@ -52,7 +52,7 @@ func (sc *Scanner) scanDirLocked(ctx context.Context, currentPath string, recurs
 		logs.Debug(logs.ModuleSync, "本地文件扫描完成", "处理目录", currentPath, "耗时", time.Since(start))
 	}()
 
-	if err := ctx.Err(); err != nil {
+	if context.Cause(ctx) != nil {
 		return
 	}
 
@@ -72,7 +72,7 @@ func (sc *Scanner) scanDirLocked(ctx context.Context, currentPath string, recurs
 	dbChildren := sc.db.ScanChildren(ctx, currentPath)
 
 	for _, ch := range dbChildren {
-		if err := ctx.Err(); err != nil {
+		if context.Cause(ctx) != nil {
 			break
 		}
 		name, dbFid, dbSize := ch.Name, ch.Fid, ch.Size
@@ -103,7 +103,7 @@ func (sc *Scanner) scanDirLocked(ctx context.Context, currentPath string, recurs
 	}
 
 	for name, entry := range localFiles {
-		if err := ctx.Err(); err != nil {
+		if context.Cause(ctx) != nil {
 			break
 		}
 		fullPath := filepath.Join(currentPath, name)

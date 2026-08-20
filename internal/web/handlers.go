@@ -35,7 +35,11 @@ type sessionStore struct {
 
 func (s *sessionStore) create() string {
 	buf := make([]byte, 32)
-	_, _ = rand.Read(buf)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand 几乎不会失败（内部自动兜底）；真失败时 token 退化为零值，
+		// 生成的会话不可用即被拒绝，此处仅告警。
+		logs.Error(logs.ModuleSystem, "生成会话令牌失败", "错误", err)
+	}
 	token := hex.EncodeToString(buf)
 	now := time.Now()
 	// 惰性清理过期会话（登录低频，Range 全扫成本可忽略）
@@ -381,8 +385,14 @@ func (s *Server) handleLogsHistory(w http.ResponseWriter, r *http.Request) {
 	if cat == "" {
 		cat = "all"
 	}
-	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
-	limit, _ := strconv.ParseInt(r.URL.Query().Get("limit"), 10, 64)
+	before, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+	if err != nil {
+		before = 0 // 缺失/非法 → 取最新 limit 条
+	}
+	limit, err := strconv.ParseInt(r.URL.Query().Get("limit"), 10, 64)
+	if err != nil {
+		limit = 0 // 缺失/非法 → 走下方默认 200
+	}
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
@@ -394,7 +404,10 @@ func (s *Server) handleLogsHistory(w http.ResponseWriter, r *http.Request) {
 const _torrentMaxSize = 10 << 20
 
 func (s *Server) handleOfflineTasks(w http.ResponseWriter, r *http.Request) {
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	page, err := strconv.Atoi(r.URL.Query().Get("page"))
+	if err != nil {
+		page = 0 // 缺失/非法 → 第 0 页
+	}
 	list, err := s.App.OfflineTaskList(r.Context(), page)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "获取任务列表失败: %v", err)
@@ -510,7 +523,11 @@ func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "未收到种子文件")
 		return
 	}
-	defer file.Close()
+	defer func() {
+		if cerr := file.Close(); cerr != nil {
+			logs.Debug(logs.ModuleSystem, "关闭种子文件失败", "错误", cerr)
+		}
+	}()
 
 	data, err := io.ReadAll(file)
 	if err != nil || len(data) == 0 {

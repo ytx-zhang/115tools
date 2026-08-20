@@ -172,7 +172,7 @@ func NormalizeOwnedStrm(strmURL, strmPath, expectedFid string, fileModTime int64
 // DownloadCloudFile 用 pickcode 换取 115 下载直链，把文件完整下载到 localPath。
 // api 由调用方注入（strmIO 持有），ua 固定 "115tools"。
 func DownloadCloudFile(ctx context.Context, api *drive.Client, pickcode, localPath string) error {
-	if err := ctx.Err(); err != nil {
+	if err := context.Cause(ctx); err != nil {
 		return err
 	}
 	info, err := api.GetDownloadUrl(ctx, pickcode, "115tools", localPath)
@@ -189,7 +189,11 @@ func DownloadCloudFile(ctx context.Context, api *drive.Client, pickcode, localPa
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			logs.Debug(logs.ModuleSync, "关闭下载响应体失败", "错误", cerr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP status: %d", resp.StatusCode)
@@ -202,7 +206,11 @@ func DownloadCloudFile(ctx context.Context, api *drive.Client, pickcode, localPa
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		if cerr := out.Close(); cerr != nil {
+			logs.Debug(logs.ModuleSync, "关闭下载文件失败", "路径", localPath, "错误", cerr)
+		}
+	}()
 
 	if _, copyErr := io.Copy(out, resp.Body); copyErr != nil {
 		if rmErr := os.Remove(localPath); rmErr != nil {

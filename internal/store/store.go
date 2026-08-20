@@ -67,7 +67,9 @@ func New(path string) (*Store, error) {
 		return err
 	})
 	if err != nil {
-		db.Close()
+		if cerr := db.Close(); cerr != nil {
+			logs.Error(logs.ModuleDB, "初始化失败关闭数据库出错", "错误", cerr)
+		}
 		return nil, fmt.Errorf("创建 Bucket 失败: %w", err)
 	}
 
@@ -128,7 +130,7 @@ func decodeValue(v []byte) (fid string, size int64, ok bool) {
 // GetInfo 获取单个路径的信息。
 func (d *Store) GetInfo(localPath string) (fid string, size int64) {
 	size = SizeNotFound
-	d.boltDB.View(func(tx *bbolt.Tx) error {
+	if err := d.boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		v := b.Get([]byte(localPath))
 		if v == nil {
@@ -136,7 +138,9 @@ func (d *Store) GetInfo(localPath string) (fid string, size int64) {
 		}
 		fid, size, _ = decodeValue(v)
 		return nil
-	})
+	}); err != nil {
+		logs.Error(logs.ModuleDB, "读取记录失败", "路径", localPath, "错误", err)
+	}
 	return
 }
 
@@ -237,7 +241,7 @@ func (d *Store) FindOrphanSubdirs(currentPath string) []string {
 	var orphans []string
 	seen := make(map[string]bool)
 
-	d.boltDB.View(func(tx *bbolt.Tx) error {
+	if err := d.boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		if b == nil {
 			return nil
@@ -261,7 +265,9 @@ func (d *Store) FindOrphanSubdirs(currentPath string) []string {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		logs.Error(logs.ModuleDB, "查找孤儿子目录失败", "路径", currentPath, "错误", err)
+	}
 	return orphans
 }
 
@@ -271,7 +277,7 @@ func (d *Store) CountRecursive(path string) int64 {
 	prefix := dirPrefix(path)
 	prefixBytes := []byte(prefix)
 	var count int64
-	d.boltDB.View(func(tx *bbolt.Tx) error {
+	if err := d.boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		if b == nil {
 			return nil
@@ -281,7 +287,9 @@ func (d *Store) CountRecursive(path string) int64 {
 			count++
 		}
 		return nil
-	})
+	}); err != nil {
+		logs.Error(logs.ModuleDB, "统计失败", "路径", path, "错误", err)
+	}
 	return count
 }
 
@@ -292,14 +300,14 @@ func (d *Store) CountRecursive(path string) int64 {
 // 通过 0xFF 跳转直接跳过深层子目录，避免无谓遍历。
 func (d *Store) ScanChildren(ctx context.Context, workPath string) []Child {
 	logs.Debug(logs.ModuleDB, "扫描子条目", "路径", workPath)
-	if err := ctx.Err(); err != nil {
+	if context.Cause(ctx) != nil {
 		return nil
 	}
 	prefix := dirPrefix(workPath)
 	prefixBytes := []byte(prefix)
 
 	var out []Child
-	d.boltDB.View(func(tx *bbolt.Tx) error {
+	if err := d.boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		if b == nil {
 			return nil
@@ -310,7 +318,7 @@ func (d *Store) ScanChildren(ctx context.Context, workPath string) []Child {
 		for k != nil && bytes.HasPrefix(k, prefixBytes) {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return context.Cause(ctx)
 			default:
 			}
 
@@ -335,7 +343,9 @@ func (d *Store) ScanChildren(ctx context.Context, workPath string) []Child {
 			k, v = c.Next()
 		}
 		return nil
-	})
+	}); err != nil {
+		logs.Error(logs.ModuleDB, "扫描子条目失败", "路径", workPath, "错误", err)
+	}
 	return out
 }
 
@@ -352,7 +362,7 @@ func (d *Store) ListStrmFids(dirPath string) (fids []string) {
 	prefix := dirPrefix(dirPath)
 	prefixBytes := []byte(prefix)
 
-	d.boltDB.View(func(tx *bbolt.Tx) error {
+	if err := d.boltDB.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(d.bucketName)
 		if b == nil {
 			return nil
@@ -368,7 +378,9 @@ func (d *Store) ListStrmFids(dirPath string) (fids []string) {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		logs.Error(logs.ModuleDB, "列出Strm链接失败", "路径", dirPath, "错误", err)
+	}
 	return fids
 }
 
@@ -393,10 +405,16 @@ func (d *Store) Compact() error {
 	if err != nil {
 		return d.reopenOnError("压缩时打开源文件失败", err)
 	}
-	defer src.Close()
+	defer func() {
+		if cerr := src.Close(); cerr != nil {
+			logs.Error(logs.ModuleDB, "压缩关闭源文件出错", "错误", cerr)
+		}
+	}()
 
 	tmpPath := d.path + ".compact.tmp"
-	os.Remove(tmpPath)
+	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+		logs.Debug(logs.ModuleDB, "清理旧压缩临时文件失败", "错误", err)
+	}
 
 	dst, err := bbolt.Open(tmpPath, 0600, nil)
 	if err != nil {
@@ -404,11 +422,17 @@ func (d *Store) Compact() error {
 	}
 
 	if err := bbolt.Compact(dst, src, 0); err != nil {
-		dst.Close()
-		os.Remove(tmpPath)
+		if cerr := dst.Close(); cerr != nil {
+			logs.Error(logs.ModuleDB, "压缩失败关闭目标文件出错", "错误", cerr)
+		}
+		if rerr := os.Remove(tmpPath); rerr != nil && !os.IsNotExist(rerr) {
+			logs.Debug(logs.ModuleDB, "压缩失败清理临时文件出错", "错误", rerr)
+		}
 		return d.reopenOnError("压缩写入失败", err)
 	}
-	dst.Close()
+	if cerr := dst.Close(); cerr != nil {
+		logs.Error(logs.ModuleDB, "压缩后关闭目标文件出错", "错误", cerr)
+	}
 
 	if err := os.Rename(tmpPath, d.path); err != nil {
 		return d.reopenOnError("压缩后替换文件失败，已恢复原 DB", err)

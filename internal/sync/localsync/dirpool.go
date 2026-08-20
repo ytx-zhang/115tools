@@ -57,15 +57,15 @@ func (sc *Scanner) ConsumeLoop(residentCtx context.Context, newBatchCtx func() (
 		select {
 		case <-residentCtx.Done():
 			return
-		case dir, ok := <-sc.dirPool.dirCh:
+		case dir, ok := <-sc.dirCh:
 			if !ok {
 				return
 			}
 			// 消费时读取触发来源（可能已被手动升级为 SrcManual）。取即删，与写入互斥。
-			sc.dirPool.mu.Lock()
-			src, ok := sc.dirPool.pending[dir]
-			delete(sc.dirPool.pending, dir)
-			sc.dirPool.mu.Unlock()
+			sc.mu.Lock()
+			src, ok := sc.pending[dir]
+			delete(sc.pending, dir)
+			sc.mu.Unlock()
 			if !ok {
 				src = SrcManual // 防御：正常必有记录
 			}
@@ -162,12 +162,12 @@ func (b *dirBatcher) Stop() {
 // ⚠️ 已取到正在处理的目录不受影响：其 ctx 已被取消，ScanDir 早退后 running 在 onDone 自然灭。
 // 通道不关闭（watcher 常驻投目录，下次启动重建 localCtx 消化）。
 func (sc *Scanner) ClearPending() {
-	sc.dirPool.mu.Lock()
-	clear(sc.dirPool.pending)
-	sc.dirPool.mu.Unlock()
+	sc.mu.Lock()
+	clear(sc.pending)
+	sc.mu.Unlock()
 	for {
 		select {
-		case <-sc.dirPool.dirCh:
+		case <-sc.dirCh:
 			// 丢弃未消费目录
 		default:
 			return

@@ -24,6 +24,8 @@ import (
 	"os"
 	"strconv"
 	"sync"
+
+	"github.com/ytx-zhang/115tools/internal/logs"
 )
 
 // DownloadUrlInfo 下载直链查询结果。
@@ -215,7 +217,11 @@ func FileSHA1WithPreid(filePath string) (full, pre string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			logs.Debug(logs.ModuleCloud, "关闭文件失败", "错误", cerr)
+		}
+	}()
 
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
@@ -243,7 +249,11 @@ func FileSHA1Partial(filePath string, start, end int64) string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			logs.Debug(logs.ModuleCloud, "关闭文件失败", "错误", cerr)
+		}
+	}()
 	if _, err = f.Seek(start, io.SeekStart); err != nil {
 		return ""
 	}

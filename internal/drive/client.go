@@ -153,12 +153,19 @@ func exec[T any](ctx context.Context, c *Client, method, url string, params Form
 			State   bool   `json:"state"`
 			Message string `json:"message"`
 		}
-		_ = json.Unmarshal(body, &probe)
+		if err := json.Unmarshal(body, &probe); err != nil {
+			// body 非合法 JSON（空响应/非统一外壳）：probe 保持零值，
+			// 「稍后再试」重试条件自然不命中，按普通响应继续处理。
+			probe = struct {
+				State   bool   `json:"state"`
+				Message string `json:"message"`
+			}{}
+		}
 		if status == http.StatusOK && !probe.State && strings.Contains(probe.Message, "稍后再试") && attempt < maxRetries {
 			wait := retryWaitTime * time.Duration(attempt+1) // 1s → 2s → 3s
 			select {
 			case <-ctx.Done():
-				return Resp[T]{}, netDur, ctx.Err()
+				return Resp[T]{}, netDur, context.Cause(ctx)
 			case <-time.After(wait):
 			}
 			continue
@@ -223,7 +230,11 @@ func (c *Client) doOnce(ctx context.Context, method, urlPath string, params Form
 	if err != nil {
 		return 0, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			logs.Debug(logs.ModuleCloud, "关闭响应体失败", "错误", cerr)
+		}
+	}()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return 0, nil, err
