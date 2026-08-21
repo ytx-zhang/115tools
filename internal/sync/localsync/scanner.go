@@ -56,7 +56,7 @@ func (sc *Scanner) scanDirLocked(ctx context.Context, currentPath string, recurs
 		return
 	}
 
-	localFiles, err := readLocalDir(currentPath, sc.rules)
+	localFiles, err := readLocalDir(currentPath, sc.rules, sc.paths.CacheDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			logs.Debug(logs.ModuleSync, "本地目录已不存在，兜底清理云端残留", "路径", currentPath)
@@ -219,14 +219,19 @@ func (sc *Scanner) enqueueUpload(ctx context.Context, batch *sync.WaitGroup, fPa
 	sc.up.AddUpFile(ctx, batch, parentFid, fPath)
 }
 
-// readLocalDir 读取目录到 map（文件名→DirEntry），跳过上传排除名单项。
-func readLocalDir(path string, rules common.Rules) (map[string]os.DirEntry, error) {
+// readLocalDir 读取目录到 map（文件名→DirEntry），跳过上传排除名单项与本地缓存根目录。
+func readLocalDir(path string, rules common.Rules, cacheDir string) (map[string]os.DirEntry, error) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, err
 	}
 	m := make(map[string]os.DirEntry, len(entries))
 	for _, e := range entries {
+		// ⚠️ 跳过本地缓存根目录（<SyncPath>/.cache）：缓存放于源同挂载点以便原子 rename，
+		// 绝不能让周期扫描把它当成新增视频重新上传。
+		if filepath.Join(path, e.Name()) == cacheDir {
+			continue
+		}
 		if rules.IsUploadExcluded(e.Name()) {
 			continue
 		}

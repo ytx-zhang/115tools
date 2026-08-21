@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -62,9 +63,11 @@ func main() {
 	// 6. 创建 115 驱动（开放平台 refresh_token，纯装配无网络请求）
 	api := drive.NewClient(cfg)
 
-	// 6.5 创建透传本地缓存层：上传完成的视频按 pickcode 分目录暂存于 <dataDir>/cache，
-	// 透传命中本地可跳过 115 上游回源（保留 cache.Retention，到期由清理协程回收）。
-	cacheDir := *dataDir + "/cache"
+	// 6.5 创建透传本地缓存层：上传完成的视频按 pickcode 分目录暂存于 <SyncPath>/.cache。
+	// ⚠️ 必须落在 SyncPath 同挂载点内：cache.Move 才能走原子 rename（否则跨 Docker 卷是 EXDEV → 整文件拷贝）。
+	// 监听与扫描均按 .cache 根目录忽略，避免被当成新增视频重新上传。透传命中本地可跳过 115 上游回源
+	// （保留 cache.Retention，到期由清理协程回收）。
+	cacheDir := filepath.Join(cfg.SyncPath, ".cache")
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		fmt.Fprintln(os.Stderr, "缓存目录创建失败:", err)
 		os.Exit(1)

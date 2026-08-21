@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sgtdi/fswatcher"
@@ -35,10 +36,24 @@ func (w *Watcher) armParent(p string) {
 	}
 }
 
+// cacheExcludeFilter 实现 fswatcher.PathFilter：按路径前缀直接忽略本地缓存根目录（<SyncPath>/.cache）子树。
+// 不用正则（避免转义与误匹配）：目录本身及其下所有子孙路径返回 false（排除），其余 true（包含）。
+type cacheExcludeFilter struct {
+	dir string
+}
+
+// ShouldInclude 实现 fswatcher.PathFilter 接口。
+func (f *cacheExcludeFilter) ShouldInclude(path string) bool {
+	return path != f.dir && !strings.HasPrefix(path, f.dir+string(os.PathSeparator))
+}
+
 // Pump 文件监听器主循环（常驻协程，ctx 取消退出）。
 func (w *Watcher) Pump(ctx context.Context) {
 	watcher, err := fswatcher.New(
-		fswatcher.WithPath(w.paths.SyncPath),
+		// ⚠️ 原生忽略 <SyncPath>/.cache 子树：事件在入队前即被 fswatcher 丢弃（watcher.go:738），
+		// 既省事件量，又杜绝缓存里的视频被当成新增视频重新上传。路径过滤而非正则，避免转义与误匹配。
+		fswatcher.WithPath(w.paths.SyncPath,
+			fswatcher.WithPathFilter(&cacheExcludeFilter{dir: w.paths.CacheDir})),
 		fswatcher.WithSeverity(fswatcher.SeverityNone), // 关闭 fswatcher 内部日志
 	)
 	if err != nil {

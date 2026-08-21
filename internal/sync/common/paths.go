@@ -1,6 +1,7 @@
 package common
 
 import (
+	"path/filepath"
 	"time"
 
 	"github.com/ytx-zhang/115tools/internal/config"
@@ -18,6 +19,7 @@ type Paths struct {
 	StrmFid  string // strm 目录对应云端 FID（Init 时从 GetDirInfo 获得，运行时直接复用）
 	StrmUrl  string // strm 链接前缀（http://...）
 	Debounce time.Duration
+	CacheDir string // 本地缓存根目录（<SyncPath>/.cache）：与源同挂载点以便 cache.Move 走原子 rename
 }
 
 // NewPaths 从配置装配路径对象（含去抖窗口默认值归一），返回指针供各子包共享。
@@ -32,5 +34,7 @@ func NewPaths(cfg *config.Config) *Paths {
 		StrmPath: cfg.StrmPath,
 		StrmUrl:  cfg.StrmUrl,
 		Debounce: debounce,
+		// ⚠️ 缓存必须落在 SyncPath 同挂载点：cache.Move 才能原子 rename；监听/扫描均按此根目录忽略。
+		CacheDir: filepath.Join(cfg.SyncPath, ".cache"),
 	}
 }
