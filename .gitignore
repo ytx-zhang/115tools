@@ -2,9 +2,10 @@
 data/
 cookie.txt
 
-# Go 编译产物（仅忽略仓库根的可执行文件，勿误伤 cmd/115tools 源码目录）
+# Go 编译产物（勿误伤 cmd/115tools 源码目录，仅忽略生成的二进制文件）
 *.exe
 *.exe~
+cmd/115tools/115tools
 
 # IDE
 .idea/
