@@ -91,7 +91,7 @@ func (c *Cache) Move(srcPath, pickCode string) (string, error) {
 	dst := filepath.Join(dstDir, filepath.Base(srcPath))
 	// 同盘：原子 rename（SyncPath 与缓存同文件系统时的常见路径）。
 	if err := os.Rename(srcPath, dst); err == nil {
-		logs.Info(logs.ModuleSync, "视频移入本地缓存", "缓存路径", dst)
+		logs.Info(logs.ModuleSystem, "视频移入本地缓存", "缓存路径", dst)
 		return dst, nil
 	}
 	// 跨设备：拷贝后删原件（缓存本质是副本，失败不会丢云端数据）。
@@ -100,9 +100,9 @@ func (c *Cache) Move(srcPath, pickCode string) (string, error) {
 	}
 	if rerr := os.Remove(srcPath); rerr != nil && !os.IsNotExist(rerr) {
 		// 拷贝成功但删原件失败：缓存已有完整副本，仅告警（原件残留会在下次 strm 比对时被忽略）
-		logs.Warn(logs.ModuleSync, "缓存拷贝成功但删除原件失败", "路径", srcPath, "错误", rerr)
+		logs.Warn(logs.ModuleSystem, "缓存拷贝成功但删除原件失败", "路径", srcPath, "错误", rerr)
 	}
-	logs.Info(logs.ModuleSync, "视频移入本地缓存(跨设备拷贝)", "缓存路径", dst)
+	logs.Info(logs.ModuleSystem, "视频移入本地缓存(跨设备拷贝)", "缓存路径", dst)
 	return dst, nil
 }
 
@@ -111,7 +111,7 @@ func (c *Cache) StartCleaner(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	// 启动日志：展示缓存根目录、保留期与当前占用，便于核对清理策略与磁盘影响。
-	logs.Info(logs.ModuleSync, "本地缓存清理协程启动",
+	logs.Info(logs.ModuleSystem, "本地缓存清理协程启动",
 		"缓存路径", c.dir,
 		"保留期", c.retentionLocked().Round(time.Minute).String(),
 		"缓存大小", formatBytes(dirSize(c.dir)))
@@ -133,7 +133,7 @@ func (c *Cache) sweep() {
 	}
 	entries, err := os.ReadDir(c.dir)
 	if err != nil {
-		logs.Debug(logs.ModuleSync, "读取缓存目录失败", "路径", c.dir, "错误", err)
+		logs.Debug(logs.ModuleSystem, "读取缓存目录失败", "路径", c.dir, "错误", err)
 		return
 	}
 	cutoff := time.Now().Add(-c.retentionLocked())
@@ -145,7 +145,7 @@ func (c *Cache) sweep() {
 			if rerr := os.Remove(pcDir); rerr == nil {
 				removed++
 			} else if !os.IsNotExist(rerr) {
-				logs.Debug(logs.ModuleSync, "清理缓存散落文件失败", "路径", pcDir, "错误", rerr)
+				logs.Debug(logs.ModuleSystem, "清理缓存散落文件失败", "路径", pcDir, "错误", rerr)
 			}
 			continue
 		}
@@ -156,15 +156,15 @@ func (c *Cache) sweep() {
 		// 目录 mtime = 移入缓存时刻（MkdirAll/Rename 刷新），按保留期判定
 		if info.ModTime().Before(cutoff) {
 			if rerr := os.RemoveAll(pcDir); rerr != nil && !os.IsNotExist(rerr) {
-				logs.Warn(logs.ModuleSync, "清理过期缓存目录失败", "路径", pcDir, "错误", rerr)
+				logs.Warn(logs.ModuleSystem, "清理过期缓存目录失败", "路径", pcDir, "错误", rerr)
 			} else {
-				logs.Info(logs.ModuleSync, "清理过期缓存", "pickcode", e.Name())
+				logs.Info(logs.ModuleSystem, "清理过期缓存", "pickcode", e.Name())
 				removed++
 			}
 		}
 	}
 	// 每次清理末尾打汇总：清了多少项 + 清理后缓存目录占用（周期性可见，便于观测缓存是否异常膨胀）。
-	logs.Info(logs.ModuleSync, "缓存清理完成", "清理项", removed, "缓存大小", formatBytes(dirSize(c.dir)))
+	logs.Info(logs.ModuleSystem, "缓存清理完成", "清理项", removed, "缓存大小", formatBytes(dirSize(c.dir)))
 }
 
 // copyFile 流式拷贝 src → dst（用于跨设备移动兜底）。失败清理半成品目标文件。
@@ -175,7 +175,7 @@ func copyFile(src, dst string) error {
 	}
 	defer func() {
 		if cerr := in.Close(); cerr != nil {
-			logs.Debug(logs.ModuleSync, "关闭源文件失败", "错误", cerr)
+			logs.Debug(logs.ModuleSystem, "关闭源文件失败", "错误", cerr)
 		}
 	}()
 	out, err := os.Create(dst)
@@ -184,12 +184,12 @@ func copyFile(src, dst string) error {
 	}
 	defer func() {
 		if cerr := out.Close(); cerr != nil {
-			logs.Debug(logs.ModuleSync, "关闭目标文件失败", "错误", cerr)
+			logs.Debug(logs.ModuleSystem, "关闭目标文件失败", "错误", cerr)
 		}
 	}()
 	if _, err := io.Copy(out, in); err != nil {
 		if rerr := os.Remove(dst); rerr != nil && !os.IsNotExist(rerr) {
-			logs.Debug(logs.ModuleSync, "清理拷贝失败残留失败", "路径", dst, "错误", rerr)
+			logs.Debug(logs.ModuleSystem, "清理拷贝失败残留失败", "路径", dst, "错误", rerr)
 		}
 		return err
 	}
@@ -213,7 +213,7 @@ func dirSize(root string) int64 {
 		return nil
 	})
 	if err != nil {
-		logs.Debug(logs.ModuleSync, "统计缓存目录大小失败", "路径", root, "错误", err)
+		logs.Debug(logs.ModuleSystem, "统计缓存目录大小失败", "路径", root, "错误", err)
 		return 0
 	}
 	return total
