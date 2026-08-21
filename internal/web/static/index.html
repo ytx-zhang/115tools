@@ -30,6 +30,7 @@
       <nav id="nav">
         <button class="nav-item active" data-view="dashboard">📊 <span>仪表盘</span></button>
         <button class="nav-item" data-view="offline">⬇️ <span>离线下载</span></button>
+        <button class="nav-item" data-view="cache">📦 <span>本地缓存</span></button>
         <button class="nav-item" data-view="settings">⚙️ <span>设置</span></button>
       </nav>
       <button id="logout-btn" class="nav-item logout" hidden>🚪 <span>退出登录</span></button>
@@ -153,6 +154,33 @@
         </div>
       </section>
 
+      <!-- 本地缓存 -->
+      <section id="view-cache" class="view" hidden>
+        <h2>本地缓存 <small class="muted" id="cache-summary"></small></h2>
+        <div class="card">
+          <div class="card-head">
+            <h3>缓存列表</h3>
+            <div class="row">
+              <button class="btn sm" id="cache-refresh">刷新</button>
+              <button class="btn sm danger" id="cache-delete-selected" disabled>删除选中</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:32px"><input type="checkbox" id="cache-check-all" title="全选"></th>
+                  <th>文件名</th>
+                  <th style="width:110px">大小</th>
+                  <th style="width:200px">过期时间</th>
+                </tr>
+              </thead>
+              <tbody id="cache-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- 设置 -->
       <section id="view-settings" class="view" hidden>
         <h2>设置</h2>
@@ -270,6 +298,19 @@
         <button class="btn sm" data-cell="del"></button>
         <button class="btn sm danger" data-cell="delFiles"></button>
       </td>
+    </tr>
+  </template>
+
+  <!-- 缓存行模板：文件名主显示、pickcode 小字副行；文本全部用 textContent 写入避免 XSS -->
+  <template id="cache-row">
+    <tr>
+      <td><input type="checkbox" class="cache-check" data-cell="check"></td>
+      <td>
+        <div class="cache-name" data-cell="name"></div>
+        <div class="cache-pickcode muted" data-cell="pickcode"></div>
+      </td>
+      <td data-cell="size"></td>
+      <td data-cell="expire"></td>
     </tr>
   </template>
 

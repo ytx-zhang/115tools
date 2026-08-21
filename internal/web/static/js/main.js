@@ -2,6 +2,7 @@
 import { api, toast, toastError } from './api.js';
 import { initDashboard, stopDashboard } from './dashboard.js';
 import { initOffline, stopOffline } from './offline.js';
+import { initCache } from './cache.js';
 import { cfg } from './settings.js';
 
 function _viewEl(name) { return document.getElementById(`view-${name}`); }
@@ -16,10 +17,11 @@ function makeView(name, init, stop) {
   };
 }
 
-const ALLOWED = ['dashboard', 'offline', 'settings'];
+const ALLOWED = ['dashboard', 'offline', 'cache', 'settings'];
 const VIEWS = {
   dashboard: makeView('dashboard', initDashboard, stopDashboard),
   offline: makeView('offline', initOffline, stopOffline),
+  cache: makeView('cache', initCache),
   settings: makeView('settings', () => cfg.load()),
 };
 

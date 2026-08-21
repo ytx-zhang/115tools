@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -78,6 +79,53 @@ func (c *Cache) LocalPath(pickCode string) (string, bool) {
 	return "", false
 }
 
+// Item 缓存条目（供 WebUI 展示与管理）。
+type Item struct {
+	PickCode  string    `json:"pickcode"`
+	Name      string    `json:"name"`       // 缓存内原文件名（可读性优先，pickcode 无含义）
+	Size      int64     `json:"size"`       // 文件字节数
+	CachedAt  time.Time `json:"cached_at"`  // 移入缓存时刻（目录 mtime，与清理判定一致）
+	ExpiresAt time.Time `json:"expires_at"` // 过期时刻 = CachedAt + 当前保留期（与清理 cutoff 公式一致）
+}
+
+// List 枚举全部缓存项，按文件名升序返回（WebUI 默认按文件名排序）。
+// 与清理协程共用目录 mtime + 保留期判定，页面显示的过期时间与清理行为一致。
+// 单项读取失败跳过不中断；散落的非目录文件不展示（sweep 会直接清理）。
+func (c *Cache) List() []Item {
+	items := []Item{}
+	if c.dir == "" {
+		return items
+	}
+	retention := c.retentionLocked()
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		logs.Debug(logs.ModuleSystem, "读取缓存目录失败", "路径", c.dir, "错误", err)
+		return items
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pcDir := filepath.Join(c.dir, e.Name())
+		info, serr := os.Stat(pcDir)
+		if serr != nil {
+			continue
+		}
+		// 目录内首个文件即缓存原件（布局 <dir>/<pickcode>/<原名>），顺带取大小
+		name, size := firstFile(pcDir)
+		cachedAt := info.ModTime()
+		items = append(items, Item{
+			PickCode:  e.Name(),
+			Name:      name,
+			Size:      size,
+			CachedAt:  cachedAt,
+			ExpiresAt: cachedAt.Add(retention),
+		})
+	}
+	slices.SortFunc(items, func(a, b Item) int { return strings.Compare(a.Name, b.Name) })
+	return items
+}
+
 // Move 把已上传的视频原件移入缓存（<dir>/<pickcode>/<原名>），返回落盘路径。
 // 优先同盘原子 rename；跨设备（EXDEV）退化为流式拷贝后删除原件。
 func (c *Cache) Move(srcPath, pickCode string) (string, error) {
@@ -104,6 +152,34 @@ func (c *Cache) Move(srcPath, pickCode string) (string, error) {
 	}
 	logs.Info(logs.ModuleSystem, "视频移入本地缓存(跨设备拷贝)", "缓存路径", dst)
 	return dst, nil
+}
+
+// Delete 批量删除指定 pickcode 的缓存项，返回实际删除的数量。
+// 与清理协程并发时以 IsNotExist 容错；正在透传播放的文件句柄不受 RemoveAll 影响（Unix），
+// 其后续切片会退化为回源，行为可接受，无需额外加锁。
+func (c *Cache) Delete(pickCodes []string) int {
+	deleted := 0
+	for _, pc := range pickCodes {
+		if !validPickCode(pc) {
+			continue
+		}
+		dir := filepath.Join(c.dir, pc)
+		if _, err := os.Stat(dir); err != nil {
+			if os.IsNotExist(err) {
+				continue // 已不存在（可能刚被清理协程删除），跳过不计数
+			}
+			logs.Warn(logs.ModuleSystem, "检查待删缓存失败", "pickcode", pc, "错误", err)
+			continue
+		}
+		name := firstFileName(dir)
+		if err := os.RemoveAll(dir); err != nil {
+			logs.Warn(logs.ModuleSystem, "手动删除缓存失败", "文件名", name, "pickcode", pc, "错误", err)
+			continue
+		}
+		logs.Info(logs.ModuleSystem, "手动删除缓存", "文件名", name)
+		deleted++
+	}
+	return deleted
 }
 
 // StartCleaner 周期清理超过 retention 的缓存目录（绑定 ctx 生命周期，ctx 取消即退出）。
@@ -224,16 +300,28 @@ func dirSize(root string) int64 {
 // firstFileName 读取缓存目录内第一个文件名（缓存布局 <dir>/<pickcode>/<原文件名>，
 // 目录为空或读取失败返回 ""），供清理日志展示可读文件名。
 func firstFileName(dir string) string {
+	name, _ := firstFile(dir)
+	return name
+}
+
+// firstFile 返回缓存目录内第一个文件名及其大小（目录为空或读取失败返回 ("", 0)），
+// 供 List 枚举缓存条目时复用同一次 ReadDir 取到文件名与大小。
+func firstFile(dir string) (string, int64) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return ""
+		return "", 0
 	}
 	for _, e := range entries {
-		if !e.IsDir() {
-			return e.Name()
+		if e.IsDir() {
+			continue
 		}
+		size := int64(0)
+		if info, serr := e.Info(); serr == nil {
+			size = info.Size()
+		}
+		return e.Name(), size
 	}
-	return ""
+	return "", 0
 }
 
 // formatBytes 人类可读字节数（B/KB/MB/GB，1024 进制），供日志展示。

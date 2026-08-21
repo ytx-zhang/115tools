@@ -67,6 +67,8 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 		"POST /api/offline/torrent": s.handleOfflineTorrent,
 		"POST /api/offline/delete":  s.handleOfflineDelete,
 		"POST /api/offline/clear":   s.handleOfflineClear,
+		"GET /api/cache":            s.handleCacheList,
+		"POST /api/cache/delete":    s.handleCacheDelete,
 	}
 	for pattern, h := range protected {
 		mux.Handle(pattern, s.protect(h))

@@ -572,6 +572,27 @@
     }
   }
 
+  /* 缓存行：文件名主显示 + pickcode 小字副行 */
+  .cache-name {
+    max-width: 380px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+
+    @media (width <= 720px) {
+      max-width: 160px;
+    }
+  }
+
+  .cache-pickcode {
+    font-size: 11px;
+    word-break: break-all;
+    max-width: 380px;
+
+    @media (width <= 720px) {
+      max-width: 160px;
+    }
+  }
+
   th {
     color: var(--muted);
     font-weight: 500;
