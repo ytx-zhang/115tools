@@ -6,6 +6,7 @@ cookie.txt
 *.exe
 *.exe~
 cmd/115tools/115tools
+/115tools
 
 # IDE
 .idea/

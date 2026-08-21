@@ -5,6 +5,9 @@
 # 运行时数据（容器通过 volume 挂载，无需打进镜像）
 data/
 
+# Go 编译产物（本机 go build ./cmd/115tools 生成的二进制；锚定根目录，勿误伤 cmd/115tools 源码）
+/115tools
+
 # 编辑器/IDE
 .idea
 .vscode
