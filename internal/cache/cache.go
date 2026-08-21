@@ -155,10 +155,12 @@ func (c *Cache) sweep() {
 		}
 		// 目录 mtime = 移入缓存时刻（MkdirAll/Rename 刷新），按保留期判定
 		if info.ModTime().Before(cutoff) {
+			// 展示缓存内原文件名而非 pickcode（pickcode 无可读性，文件名一眼可辨）
+			name := firstFileName(pcDir)
 			if rerr := os.RemoveAll(pcDir); rerr != nil && !os.IsNotExist(rerr) {
 				logs.Warn(logs.ModuleSystem, "清理过期缓存目录失败", "路径", pcDir, "错误", rerr)
 			} else {
-				logs.Info(logs.ModuleSystem, "清理过期缓存", "pickcode", e.Name())
+				logs.Info(logs.ModuleSystem, "清理过期缓存", "文件名", name)
 				removed++
 			}
 		}
@@ -217,6 +219,21 @@ func dirSize(root string) int64 {
 		return 0
 	}
 	return total
+}
+
+// firstFileName 读取缓存目录内第一个文件名（缓存布局 <dir>/<pickcode>/<原文件名>，
+// 目录为空或读取失败返回 ""），供清理日志展示可读文件名。
+func firstFileName(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			return e.Name()
+		}
+	}
+	return ""
 }
 
 // formatBytes 人类可读字节数（B/KB/MB/GB，1024 进制），供日志展示。
