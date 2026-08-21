@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/config"
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/logs"
@@ -64,7 +65,8 @@ type Runner struct {
 }
 
 // NewRunner 构造同步调度器（装配全部子包模块）。不启动，调用方再调 Init+Start。
-func NewRunner(api *drive.Client, db *store.Store, cfg *config.Config, onChange func()) *Runner {
+// c 为透传本地缓存层（注入 Core，供上传完成的视频移入）。
+func NewRunner(api *drive.Client, db *store.Store, cfg *config.Config, onChange func(), c *cache.Cache) *Runner {
 	paths := common.NewPaths(cfg)
 	rules := common.NewRules(cfg)
 
@@ -81,7 +83,7 @@ func NewRunner(api *drive.Client, db *store.Store, cfg *config.Config, onChange 
 	r.localTask = common.NewTask("本地同步", onChange)
 
 	// 子包功能层模块：按最小依赖集注入。
-	deps := &common.Core{API: api, DB: db, Paths: paths, Rules: rules}
+	deps := &common.Core{API: api, DB: db, Paths: paths, Rules: rules, Cache: c}
 	r.strm = common.NewStrmIO(deps)
 	r.up = localsync.NewUploader(deps, r.localTask)
 	r.co = localsync.NewCloudOps(deps)

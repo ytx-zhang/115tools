@@ -33,6 +33,7 @@ export const cfg = {
       },
       video_exts: get('video_exts').split(',').map(s => s.trim()).filter(Boolean),
       upload_exclude: get('upload_exclude').split(',').map(s => s.trim()).filter(Boolean),
+      cache_retention_days: +get('cache_retention_days') || 0,
       auth_username: get('auth_username').trim(),
       auth_password: get('auth_password'),
       refresh_token: get('refresh_token').trim(),
@@ -68,6 +69,7 @@ function fillForm(c) {
   set('debounce_minutes', c.debounce_minutes ?? 0);
   set('video_exts', (c.video_exts || []).join(', '));
   set('upload_exclude', (c.upload_exclude || []).join(', '));
+  set('cache_retention_days', c.cache_retention_days ?? 1);
   set('cron_interval_hours', c.cron?.interval_hours || 12);
   set('auth_username', c.auth_username);
   set('auth_password', '');

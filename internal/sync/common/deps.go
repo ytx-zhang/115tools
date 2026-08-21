@@ -1,11 +1,12 @@
 package common
 
 import (
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/store"
 )
 
-// Core 同步各子模块共享的核心基础依赖载体（API / DB / Paths / Rules）。
+// Core 同步各子模块共享的核心基础依赖载体（API / DB / Paths / Rules / Cache）。
 // NewScanner / NewUploader / NewCloudOps / NewWalker / NewStrmIO 都重复同一组参数，
 // 抽成统一载体避免每个构造函数一长串重复形参、调用点也更清爽。
 // 放本包是因为它被 localsync/cloudsync 两个子包共用（若放 sync 根或任一子包会导致
@@ -15,4 +16,5 @@ type Core struct {
 	DB    *store.Store
 	Paths *Paths
 	Rules Rules
+	Cache *cache.Cache // 透传本地缓存层：上传完成的视频移入此处，供 /download 直读跳过上游回源
 }

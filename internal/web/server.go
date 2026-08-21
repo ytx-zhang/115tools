@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/ytx-zhang/115tools/internal/app"
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/logs"
 )
 
@@ -22,9 +23,11 @@ import (
 var staticFS embed.FS
 
 // Deps 由 main 注入的依赖。App 聚合所有模块，web 仅通过它交互。
+// Cache 为透传本地缓存层（透传命中本地可跳过 115 上游回源），nil 时禁用本地命中。
 type Deps struct {
 	App    *app.App
 	AppCtx context.Context
+	Cache  *cache.Cache
 }
 
 // Server 管理面板 HTTP 服务。
@@ -40,7 +43,7 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 
 	// /download 直链重定向器（Emby 依赖，免鉴权）：直接持有 App.API 客户端实例（类型引用，不调用 app 方法），
 	// 登录方式热切换后自动跟随。不能放保护路由组，需独立注册。
-	redirector := NewRedirector(d.App.API)
+	redirector := NewRedirector(d.App.API, d.Cache)
 	mux.Handle("GET /download", http.HandlerFunc(redirector.RedirectToRealURL))
 
 	// 公开接口（登录/会话探测无需鉴权）

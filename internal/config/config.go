@@ -36,6 +36,10 @@ type Config struct {
 	// 为空时不排除任何文件（运行期名单为空即不过滤）；可通过配置文件或 Web 设置页修改。
 	UploadExclude []string `json:"upload_exclude"`
 
+	// 透传本地缓存保留期（天）：上传完成的视频移入本地缓存后保留 N 天，到期由清理协程回收；
+	// 0 表示使用默认 1 天。仅透传模式生效（命中本地可跳过 115 上游回源，详见 internal/cache）。
+	CacheRetentionDays int `json:"cache_retention_days"`
+
 	// 本地同步去抖窗口（分钟）：非视频事件（.strm/目录）监听后等待该时长内无新事件才批量同步，
 	// 避免扫描/上传过程中其他程序仍在修改文件造成竞态。0 表示使用默认 10 分钟。
 	// 视频文件事件实时直传，不走此窗口（秒级生效）。
@@ -89,6 +93,19 @@ func normalizeCronInterval(hours int) int {
 	return hours
 }
 
+// DefaultCacheRetentionDays 透传本地缓存保留期默认天数（CacheRetentionDays <= 0 时回退），
+// 是「1 天」这一默认值的唯一来源（加载、Update 写盘、CacheRetention 读取三处共用）。
+const DefaultCacheRetentionDays = 1
+
+// normalizeCacheRetentionDays 归一缓存保留天数：<=0 回退默认 1 天，
+// 避免 0/负导致缓存被瞬间清空（retention 为 0 时 cleanup 会删掉所有刚写入的缓存）。
+func normalizeCacheRetentionDays(days int) int {
+	if days <= 0 {
+		return DefaultCacheRetentionDays
+	}
+	return days
+}
+
 type tokenData struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
@@ -128,6 +145,9 @@ func New(path string) (*Config, error) {
 	// cron 间隔兜底
 	f.Cron.IntervalHours = normalizeCronInterval(f.Cron.IntervalHours)
 
+	// 缓存保留天数兜底
+	f.CacheRetentionDays = normalizeCacheRetentionDays(f.CacheRetentionDays)
+
 	// 视频扩展名白名单：未设置时回退内置默认（克隆避免后续修改污染全局默认值）
 	if len(f.VideoExts) == 0 {
 		f.VideoExts = slices.Clone(DefaultVideoExts)
@@ -155,6 +175,11 @@ func (c *Config) CronEnabled() bool {
 // CronInterval 返回定时全量同步间隔；IntervalHours <= 0 时回退默认 12 小时（见 normalizeCronInterval）。
 func (c *Config) CronInterval() time.Duration {
 	return time.Duration(normalizeCronInterval(c.Cron.IntervalHours)) * time.Hour
+}
+
+// CacheRetention 返回透传本地缓存保留期；CacheRetentionDays <= 0 时回退默认 1 天（见 normalizeCacheRetentionDays）。
+func (c *Config) CacheRetention() time.Duration {
+	return time.Duration(normalizeCacheRetentionDays(c.CacheRetentionDays)) * 24 * time.Hour
 }
 
 // Token 返回当前 token 快照（访问令牌 / 刷新令牌 / 到期时间）。

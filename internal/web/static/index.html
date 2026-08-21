@@ -227,6 +227,16 @@
           </fieldset>
 
           <fieldset>
+            <legend>透传缓存 <small class="muted">上传视频本地暂存，命中跳过 115 回源</small></legend>
+            <div class="form-grid">
+              <label>缓存保留天数
+                <small class="muted">本地缓存视频保留 N 天；0=默认1；到期自动清理</small>
+                <input name="cache_retention_days" type="number" min="0">
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset>
             <legend>登录验证 <small class="muted">用户名留空则关闭验证</small></legend>
             <div class="form-grid">
               <label>用户名

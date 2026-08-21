@@ -39,6 +39,10 @@ type Editable struct {
 	// UploadExclude 上传排除名单（下载器/系统临时文件后缀；整名如 .DS_Store 也支持）。
 	// 快照回显当前生效值（未设置则为空=不排除任何文件）；保存时按用户输入覆盖。
 	UploadExclude []string `json:"upload_exclude"`
+
+	// CacheRetentionDays 透传本地缓存保留期（天）；快照回显当前生效值（未设置则为默认 1），
+	// 保存时按用户输入覆盖（<=0 由后端归一为默认 1 天）。
+	CacheRetentionDays int `json:"cache_retention_days"`
 }
 
 // CronJSON 是定时全量同步配置的前端传输结构（用普通 bool，避免 JSON 出现 null）。
@@ -83,10 +87,11 @@ func (c *Config) Snapshot() Editable {
 			Enabled:       c.CronEnabled(), // 归一：nil 或 true → true，前端始终收到布尔
 			IntervalHours: c.Cron.IntervalHours,
 		},
-		AuthUsername:    c.Auth.Username,
-		HasRefreshToken: c.token.RefreshToken != "",
-		VideoExts:       c.VideoExts,
-		UploadExclude:   c.UploadExclude,
+		AuthUsername:       c.Auth.Username,
+		HasRefreshToken:    c.token.RefreshToken != "",
+		VideoExts:          c.VideoExts,
+		UploadExclude:      c.UploadExclude,
+		CacheRetentionDays: c.CacheRetentionDays,
 	}
 }
 
@@ -166,6 +171,7 @@ func (c *Config) Update(e Editable) error {
 	c.StrmUrl = e.StrmUrl
 	c.VideoExts = normalizeVideoExts(e.VideoExts)
 	c.UploadExclude = normalizeUploadExclude(e.UploadExclude)
+	c.CacheRetentionDays = normalizeCacheRetentionDays(e.CacheRetentionDays)
 	c.DebounceMinutes = e.DebounceMinutes
 
 	// cron：Enabled 取地址存 *bool（前端恒传布尔，显式 false 才是真正关闭）；

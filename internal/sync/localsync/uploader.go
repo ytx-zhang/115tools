@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/logs"
 	"github.com/ytx-zhang/115tools/internal/store"
@@ -22,6 +23,7 @@ func NewUploader(deps *common.Core, task *common.Task) *Uploader {
 		db:    deps.DB,
 		paths: deps.Paths,
 		rules: deps.Rules,
+		cache: deps.Cache,
 		task:  task,
 	}
 }
@@ -35,6 +37,7 @@ type Uploader struct {
 	db    *store.Store
 	paths *common.Paths
 	rules common.Rules
+	cache *cache.Cache // 透传本地缓存层：上传完成的视频移入此处（nil 时退化为旧行为删原件）
 	task  *common.Task // 本地同步进度（AddUpFile +total，任务完成 +completed）
 
 	uploadMu sync.Mutex // 全串行：任何来源的上传绝对不并发
@@ -128,7 +131,17 @@ func (u *Uploader) upFileTask(ctx context.Context, parentFid, fPath string, file
 		if st, err := os.Stat(savePath); err == nil {
 			size = st.ModTime().Unix()
 		}
-		if err := os.Remove(fPath); err != nil {
+		// ⚠️ 不再删除本地视频原件：移入本地缓存层（<CacheDir>/<pickcode>/<原名>），
+		// 透传命中本地可直接跳过 115 上游回源（保留期由配置 cache_retention_days 控制）。缓存未启用时退化为旧行为删原件。
+		if u.cache != nil {
+			if _, err := u.cache.Move(fPath, info.PickCode); err != nil {
+				// 移动失败：退化为删除原件，避免本地视频残留在 SyncPath 与云端 .strm 并存双份
+				if rerr := os.Remove(fPath); rerr != nil && !os.IsNotExist(rerr) {
+					return fmt.Errorf("[%s]: 移入缓存失败且删除原件失败: %w", fPath, err)
+				}
+				logs.Warn(logs.ModuleSync, "视频移入缓存失败，已删除原件", "路径", fPath, "错误", err)
+			}
+		} else if err := os.Remove(fPath); err != nil {
 			return fmt.Errorf("[%s]: 删除视频文件失败: %w", fPath, err)
 		}
 	}

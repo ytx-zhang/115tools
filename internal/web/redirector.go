@@ -10,11 +10,14 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/logs"
 	"golang.org/x/sync/semaphore"
@@ -34,8 +37,10 @@ const passthroughUA = "Fuck115"
 type Redirector struct {
 	// api 115 客户端实例（直接持有，来自 App.API；当前实例固定不变）。
 	api   *drive.Client
-	cache sync.Map
-	sf    singleflight.Group
+	cache sync.Map // URL 直链缓存（key=pickcode|ua），见 resolveURL/loadCache/storeCache
+	// localCache 透传本地缓存层：命中本地文件即可跳过 115 上游回源（nil 时禁用本地命中）。
+	localCache *cache.Cache
+	sf         singleflight.Group
 }
 
 // errEmptyURL 表示 115 接口成功返回但直链为空。
@@ -65,9 +70,10 @@ var proxyClient = &http.Client{
 //   - 空闲：无在途请求时信号量回满 2 个权重，下次又能突发 2 个。
 var originSem = semaphore.NewWeighted(2)
 
-// NewRedirector 创建直链重定向器。api 为 115 客户端实例（直接持有，来自 App.API）。
-func NewRedirector(api *drive.Client) *Redirector {
-	return &Redirector{api: api}
+// NewRedirector 创建直链重定向器。api 为 115 客户端实例（直接持有，来自 App.API）；
+// localCache 为透传本地缓存层（nil 时禁用本地命中，仍走 115 上游回源）。
+func NewRedirector(api *drive.Client, localCache *cache.Cache) *Redirector {
+	return &Redirector{api: api, localCache: localCache}
 }
 
 type cacheItem struct {
@@ -218,6 +224,17 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 	var lastName string
 	rng := r.Header.Get("Range")
 
+	// 本地缓存命中：直接流式回传本地文件（支持 Range/206），跳过 115 上游回源与信号量准入。
+	// 仅透传模式生效（302 分支仍走 CDN）。缓存未启用或 miss 才走上游。
+	// 命中判定与打开间极小窗口内被清理协程删除（IsNotExist）→ 返回 false 回退上游回源。
+	if s.localCache != nil {
+		if localPath, ok := s.localCache.LocalPath(pickCode); ok {
+			if served := s.serveLocalFile(w, r, localPath, pickCode); served {
+				return
+			}
+		}
+	}
+
 	// 信号量准入（覆盖整个回源生命周期：取链+回源+下载）：突发最多 2 个在途，
 	// 第 3 个起 Acquire 阻塞严格排队（只顺序下载）；等待期客户端断开即返回。
 	// 重试循环在同一连接内，只占一个槽（defer 释放）。
@@ -311,4 +328,40 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 	logs.Error(logs.ModuleDrive, "回源多次重试仍失败",
 		"文件名", lastName, "status", lastStatus, "重试", maxRetries, "range", rng)
 	http.Error(w, "回源失败", http.StatusBadGateway)
+}
+
+// serveLocalFile 透传命中本地缓存：直接流式回传本地文件，跳过 115 上游回源。
+// 用标准库 http.ServeContent 自动处理 Range 请求（返回 206），供前置 nginx 切片缓存。
+// 不消耗缓存（文件保留期由 cache.Cache 清理协程控制），也不占 originSem（本地磁盘 IO 不挤占上游）。
+// 返回是否已完成响应：仅当命中判定后文件被并发清理（IsNotExist）返回 false，调用方应回退上游回源。
+func (s *Redirector) serveLocalFile(w http.ResponseWriter, r *http.Request, localPath, pickCode string) bool {
+	f, err := os.Open(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 命中判定后被清理协程并发删除：交回上游回源（调用方继续走回源逻辑）
+			logs.Debug(logs.ModuleDrive, "本地缓存命中判定后被清理", "路径", localPath)
+			return false
+		}
+		logs.Error(logs.ModuleDrive, "打开本地缓存失败", "路径", localPath, "错误", err)
+		http.Error(w, "打开本地缓存失败", http.StatusInternalServerError)
+		return true
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			logs.Debug(logs.ModuleDrive, "关闭本地缓存文件失败", "错误", cerr)
+		}
+	}()
+	fi, err := f.Stat()
+	if err != nil {
+		logs.Error(logs.ModuleDrive, "读取本地缓存元信息失败", "路径", localPath, "错误", err)
+		http.Error(w, "读取本地缓存元信息失败", http.StatusInternalServerError)
+		return true
+	}
+	dst := w.Header()
+	dst.Set("X-Origin-Filename", filepath.Base(localPath))
+	dst.Set("X-Cache", "HIT") // 标记本地缓存命中，便于排查与统计
+	logs.Info(logs.ModuleDrive, "透传命中本地缓存", "文件名", filepath.Base(localPath),
+		"pickcode", pickCode, "大小", fi.Size())
+	http.ServeContent(w, r, filepath.Base(localPath), fi.ModTime(), f)
+	return true
 }

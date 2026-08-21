@@ -17,6 +17,7 @@ import (
 	_ "time/tzdata" // 内嵌时区数据库：Docker alpine 下 TZ 生效依赖它
 
 	"github.com/ytx-zhang/115tools/internal/app"
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/config"
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/logs"
@@ -61,13 +62,23 @@ func main() {
 	// 6. 创建 115 驱动（开放平台 refresh_token，纯装配无网络请求）
 	api := drive.NewClient(cfg)
 
+	// 6.5 创建透传本地缓存层：上传完成的视频按 pickcode 分目录暂存于 <dataDir>/cache，
+	// 透传命中本地可跳过 115 上游回源（保留 cache.Retention，到期由清理协程回收）。
+	cacheDir := *dataDir + "/cache"
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		fmt.Fprintln(os.Stderr, "缓存目录创建失败:", err)
+		os.Exit(1)
+	}
+	localCache := cache.New(cacheDir, cfg.CacheRetention())
+	go localCache.StartCleaner(appCtx, cache.SweepInterval) // 绑定 appCtx 生命周期，ctx 取消即退出
+
 	// 7. 组装应用编排层（组合根本体：持全部全局依赖，串联 config/db/api/sync/logs）
 	var wg sync.WaitGroup
-	application := app.New(cfg, api, database, hub, appCtx, &wg)
+	application := app.New(cfg, api, database, hub, appCtx, &wg, localCache)
 
 	// 8. 注册 HTTP 路由并启动监听（管理面板 + /download 直链）
 	mux := http.NewServeMux()
-	web.Register(mux, web.Deps{App: application, AppCtx: appCtx})
+	web.Register(mux, web.Deps{App: application, AppCtx: appCtx, Cache: localCache})
 	server := &http.Server{
 		Addr:    ":" + *port,
 		Handler: mux,

@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/config"
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/logs"
@@ -35,22 +36,24 @@ type App struct {
 	db      *store.Store
 	hub     *logs.Hub
 	syncer  *synclib.Syncer
+	cache   *cache.Cache // 透传本地缓存层（上传移入 + 透传命中共享同一实例）；ApplyConfig 热更新其保留期
 	appCtx  context.Context
 	appWg   *sync.WaitGroup
 	initErr atomic.Pointer[string] // 初始化错误信息（单值替换，无锁）
 }
 
-// New 构造 App 并注入状态回调到同步器。
-func New(cfg *config.Config, api *drive.Client, database *store.Store, hub *logs.Hub, appCtx context.Context, appWg *sync.WaitGroup) *App {
+// New 构造 App 并注入状态回调到同步器。c 为透传本地缓存层（上传移入 + 透传命中共享同一实例）。
+func New(cfg *config.Config, api *drive.Client, database *store.Store, hub *logs.Hub, appCtx context.Context, appWg *sync.WaitGroup, c *cache.Cache) *App {
 	b := &App{
 		cfg:    cfg,
 		API:    api,
 		db:     database,
 		hub:    hub,
+		cache:  c,
 		appCtx: appCtx,
 		appWg:  appWg,
 	}
-	b.syncer = synclib.NewSyncer(appCtx, cfg, api, database, appWg)
+	b.syncer = synclib.NewSyncer(appCtx, cfg, api, database, appWg, c)
 	b.syncer.SetStatusCallback(b.publishStatus)
 	// 启动 refresh_token 常驻刷新守护：配置了 token 即持续刷新防止过期
 	drive.StartRefreshDaemon(appCtx, cfg)
@@ -109,6 +112,11 @@ func (b *App) ApplyConfig(ctx context.Context, req config.Editable) error {
 	}
 	if err := b.cfg.Update(req); err != nil {
 		return fmt.Errorf("保存配置失败: %w", err)
+	}
+
+	// 缓存保留期热更新：配置写入后立即推给缓存实例，清理协程下一轮即生效（无需重启进程）。
+	if b.cache != nil {
+		b.cache.SetRetention(b.cfg.CacheRetention())
 	}
 
 	// 路径变更 → 清理旧 DB 记录

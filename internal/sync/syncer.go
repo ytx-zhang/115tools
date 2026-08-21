@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/config"
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/logs"
@@ -30,6 +31,7 @@ type Syncer struct {
 	api    *drive.Client
 	db     *store.Store
 	appWg  *sync.WaitGroup
+	cache  *cache.Cache // 透传本地缓存层（传入 Runner 供上传移入）
 
 	mu       sync.Mutex // 保护 cur/ctx/cancel/wg/onChange
 	reloadMu sync.Mutex // 序列化 Initialize，避免并发重建
@@ -40,14 +42,15 @@ type Syncer struct {
 	onChange func() // 状态变更回调（app 层注入 publishStatus）
 }
 
-// NewSyncer 构造 Syncer（不立即启动，调用方再调 Initialize）。
-func NewSyncer(appCtx context.Context, cfg *config.Config, api *drive.Client, boltDB *store.Store, appWg *sync.WaitGroup) *Syncer {
+// NewSyncer 构造 Syncer（不立即启动，调用方再调 Initialize）。c 为透传本地缓存层（传入 Runner 供上传移入）。
+func NewSyncer(appCtx context.Context, cfg *config.Config, api *drive.Client, boltDB *store.Store, appWg *sync.WaitGroup, c *cache.Cache) *Syncer {
 	return &Syncer{
 		appCtx: appCtx,
 		cfg:    cfg,
 		api:    api,
 		db:     boltDB,
 		appWg:  appWg,
+		cache:  c,
 	}
 }
 
@@ -61,7 +64,7 @@ func (s *Syncer) Initialize() (walked bool, err error) {
 	ctx, cancel := context.WithCancel(s.appCtx)
 	wg := &sync.WaitGroup{}
 
-	runner := NewRunner(s.api, s.db, s.cfg, s.onChange)
+	runner := NewRunner(s.api, s.db, s.cfg, s.onChange, s.cache)
 	walked, err = runner.Init(ctx)
 	if err != nil {
 		cancel()
