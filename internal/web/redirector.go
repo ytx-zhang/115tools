@@ -359,9 +359,11 @@ func (s *Redirector) serveLocalFile(w http.ResponseWriter, r *http.Request, loca
 	}
 	dst := w.Header()
 	dst.Set("X-Origin-Filename", filepath.Base(localPath))
-	dst.Set("X-Cache", "HIT") // 标记本地缓存命中，便于排查与统计
-	logs.Info(logs.ModuleDrive, "透传命中本地缓存", "文件名", filepath.Base(localPath),
-		"pickcode", pickCode, "大小", fi.Size())
+	// ⚠️ 用自定义头名而非 X-Cache：避免与 115 CDN 回源透传的头重名。nginx 据此头跳过写切片缓存（本地命中直接透传）。
+	dst.Set("115tools-Cache", "HIT")
+	// 与上游"透传完成"日志字段对齐（含 range），便于同一请求链路对照排查
+	logs.Debug(logs.ModuleDrive, "透传命中本地缓存", "文件名", filepath.Base(localPath),
+		"pickcode", pickCode, "大小", fi.Size(), "range", r.Header.Get("Range"))
 	http.ServeContent(w, r, filepath.Base(localPath), fi.ModTime(), f)
 	return true
 }
