@@ -13,7 +13,9 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +110,11 @@ func (c *Cache) Move(srcPath, pickCode string) (string, error) {
 func (c *Cache) StartCleaner(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	// 启动日志：展示缓存根目录、保留期与当前占用，便于核对清理策略与磁盘影响。
+	logs.Info(logs.ModuleSync, "本地缓存清理协程启动",
+		"缓存路径", c.dir,
+		"保留期", c.retentionLocked().Round(time.Minute).String(),
+		"缓存大小", formatBytes(dirSize(c.dir)))
 	c.sweep() // 启动立即扫一次，避免重启后积压过期残留
 	for {
 		select {
@@ -130,11 +137,14 @@ func (c *Cache) sweep() {
 		return
 	}
 	cutoff := time.Now().Add(-c.retentionLocked())
+	removed := 0
 	for _, e := range entries {
 		pcDir := filepath.Join(c.dir, e.Name())
 		if !e.IsDir() {
 			// 意外散落文件（非 pickcode 目录）：直接删，避免无限堆积
-			if rerr := os.Remove(pcDir); rerr != nil && !os.IsNotExist(rerr) {
+			if rerr := os.Remove(pcDir); rerr == nil {
+				removed++
+			} else if !os.IsNotExist(rerr) {
 				logs.Debug(logs.ModuleSync, "清理缓存散落文件失败", "路径", pcDir, "错误", rerr)
 			}
 			continue
@@ -149,9 +159,12 @@ func (c *Cache) sweep() {
 				logs.Warn(logs.ModuleSync, "清理过期缓存目录失败", "路径", pcDir, "错误", rerr)
 			} else {
 				logs.Info(logs.ModuleSync, "清理过期缓存", "pickcode", e.Name())
+				removed++
 			}
 		}
 	}
+	// 每次清理末尾打汇总：清了多少项 + 清理后缓存目录占用（周期性可见，便于观测缓存是否异常膨胀）。
+	logs.Info(logs.ModuleSync, "缓存清理完成", "清理项", removed, "缓存大小", formatBytes(dirSize(c.dir)))
 }
 
 // copyFile 流式拷贝 src → dst（用于跨设备移动兜底）。失败清理半成品目标文件。
@@ -181,6 +194,43 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return nil
+}
+
+// dirSize 递归统计目录总字节数（供启动/清理日志展示缓存占用）。
+// 单项读取失败不中断统计（返回 nil 继续走）；根级失败返回 0。
+func dirSize(root string) int64 {
+	var total int64
+	err := filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // 单项不可读不阻塞整体统计
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if info, serr := d.Info(); serr == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		logs.Debug(logs.ModuleSync, "统计缓存目录大小失败", "路径", root, "错误", err)
+		return 0
+	}
+	return total
+}
+
+// formatBytes 人类可读字节数（B/KB/MB/GB，1024 进制），供日志展示。
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // validPickCode 校验 pickcode 可作缓存目录名（防路径穿越）：非空、不含路径分隔符、非 "."/".."。
