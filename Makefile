@@ -2,7 +2,7 @@
 
 GO          ?= go
 COMPOSE_DIR ?= /mnt/compose/emby
-NODE_IMAGE  ?= node:20-alpine
+NODE_IMAGE  ?= node:24-alpine
 
 # 静态检查工具：优先用 PATH 里的 golangci-lint；本机装在 /root/go/bin 但未进 PATH，作默认回退。
 GOLANGCI    ?= $(shell command -v golangci-lint 2>/dev/null || echo /root/go/bin/golangci-lint)
