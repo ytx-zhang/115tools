@@ -16,4 +16,5 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # 钉死版本，与本地 /root/go/bin/golangci-lint（v2.13.1）一致；action v6 不支持 latest。
+          version: v2.13.1
