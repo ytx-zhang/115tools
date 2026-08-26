@@ -1,10 +1,8 @@
 package drive
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"io"
@@ -213,21 +211,16 @@ func (c *Client) initUpload(ctx context.Context, req UploadInitReq, path string)
 		formData["sign_key"] = req.SignKey
 		formData["sign_val"] = req.SignVal
 	}
-	trimmed, dur, err := Post[jsontext.Value](ctx, c, "/open/upload/init", formData)
+	res, dur, err := Post[StructOrArray[uploadInitResp]](ctx, c, "/open/upload/init", formData)
 	if err != nil {
 		logCloud("上传初始化", err, dur, "路径", path)
 		return nil, err
 	}
-	trimmed = bytes.TrimSpace(trimmed)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
+	if res.Value == nil {
 		logCloud("上传初始化", fmt.Errorf("data 字段缺失"), dur, "路径", path)
-		return nil, fmt.Errorf("上传初始化失败: data 字段缺失, 响应体: %s", prettyJSON(trimmed))
+		return nil, fmt.Errorf("上传初始化失败: data 字段缺失")
 	}
-	var data uploadInitResp
-	if err := json.Unmarshal(trimmed, &data, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
-		logCloud("上传初始化", err, dur, "路径", path)
-		return nil, fmt.Errorf("解析初始化响应失败: %w, 响应体: %s", err, prettyJSON(trimmed))
-	}
+	data := *res.Value
 	// 成功：补充云端返回的 status（2 秒传/1 OSS/7 二次校验）
 	logCloud("上传初始化", nil, dur, "路径", path, "status", data.Status)
 	var cb OssCallback
@@ -355,7 +348,7 @@ func uploadByOSS(ctx context.Context, c *Client, pathStr string, fileSize int64,
 	var cb struct {
 		Data UploadCallbackData `json:"data"`
 	}
-	if err := json.Unmarshal(raw, &cb, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
+	if err := json.Unmarshal(raw, &cb); err != nil {
 		return nil, "", fmt.Errorf("OSS上传回调解析失败: %w, cbResp=%s", err, prettyJSON(raw))
 	}
 	fid, pc := cb.Data.FileID, cb.Data.PickCode

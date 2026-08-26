@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"sync"
 
 	"github.com/ytx-zhang/115tools/internal/logs"
@@ -36,12 +35,12 @@ type DownloadUrlInfo struct {
 }
 
 // DirInfo 目录信息：FID、目录名与直属子项计数（用于云端遍历的「计数跳过」优化）。
-// ⚠️ count/folder_count 官方为 string 类型（115 偶发数字形态），用 IntString 双兼容。
+// count/folder_count 实测为 JSON 数字（int），用 int64 直接解析。
 type DirInfo struct {
-	Fid         string    `json:"file_id"`
-	Name        string    `json:"file_name"` // 目录名（同名文件夹场景用 GetDirInfo 回查时返回）
-	FileCount   IntString `json:"count"`
-	FolderCount IntString `json:"folder_count"`
+	Fid         string `json:"file_id"`
+	Name        string `json:"file_name"` // 目录名（同名文件夹场景用 GetDirInfo 回查时返回）
+	FileCount   int64  `json:"count"`
+	FolderCount int64  `json:"folder_count"`
 }
 
 // FileInfo 文件列表中的单个子项。
@@ -117,8 +116,8 @@ func (s *StructOrArray[T]) UnmarshalJSON(b []byte) error {
 // downItem 是下载直链响应 data 的单条条目（map key 即 fid）。
 // 只保留消费的字段（file_name/url），其余附加字段无人读取，不解析。
 type downItem struct {
-	FileName string                 `json:"file_name"`
-	Url      StructOrArray[downURL] `json:"url"` // ⚠️ 不可下载时 url 可能是 false/[]，用 StructOrArray 容错
+	FileName string  `json:"file_name"`
+	Url      downURL `json:"url"` // 实测 url 恒为对象；不可下载时 data 段为 []，不会解析到 url 字段
 }
 
 // downURL 是 downItem 内层的直链对象。
@@ -135,16 +134,16 @@ type OfflineAddResult struct {
 }
 
 // OfflineTask 一条云下载任务。
-// ⚠️ Size/Status 用 IntString：115 接口可能返回字符串形态。
 // 只保留前端展示（offline.js：name/size/percentDone/status）与删除操作（info_hash）
 // 所需的字段；115 返回的 url/add_time/last_update/file_id 等附加字段无人读取，不解析。
+// size/status 实测为 JSON 数字（int），用 int64 直接解析。
 type OfflineTask struct {
-	InfoHash    string    `json:"info_hash"`   // 任务 sha1（删除任务用）
-	Name        string    `json:"name"`        // 任务名
-	Size        IntString `json:"size"`        // 总大小（字节）
-	PercentDone float64   `json:"percentDone"` // 下载进度 0-100
+	InfoHash    string  `json:"info_hash"`   // 任务 sha1（删除任务用）
+	Name        string  `json:"name"`        // 任务名
+	Size        int64   `json:"size"`        // 总大小（字节）
+	PercentDone float64 `json:"percentDone"` // 下载进度 0-100
 	// Status 任务状态：-1 失败，0 分配中，1 下载中，2 成功
-	Status IntString `json:"status"`
+	Status int64 `json:"status"`
 }
 
 // OfflineTaskPage 任务列表分页结果。
@@ -162,45 +161,18 @@ type OfflineQuota struct {
 	Used    int `json:"used"`    // 已用
 }
 
-// IntString 兼容 115 响应中「数字或字符串」两种形态的整数字段
-// （aid/iv/status/fileid/count 等字段偶发返回字符串，普通 int 解析会失败）。
-type IntString int64
-
-// UnmarshalJSON 同时接受 JSON 数字与字符串。
-func (v *IntString) UnmarshalJSON(b []byte) error {
-	if len(b) == 0 || string(b) == "null" {
-		return nil
-	}
-	if b[0] == '"' {
-		var s string
-		if err := json.Unmarshal(b, &s); err != nil {
-			return err
-		}
-		n, err := strconv.ParseInt(s, 10, 64)
-		if err != nil {
-			return err
-		}
-		*v = IntString(n)
-		return nil
-	}
-	var n int64
-	if err := json.Unmarshal(b, &n); err != nil {
-		return err
-	}
-	*v = IntString(n)
-	return nil
-}
-
 // prettyJSON 把响应体转成可读文本：先按 any 解析（自动解码 \uXXXX 转义为中文明文），
 // 再缩进重序列化。非 JSON 时原样返回（错误日志/调试用，绝不截断）。
 func prettyJSON(b []byte) string {
-	var v jsontext.Value
-	if err := v.UnmarshalJSON(b); err == nil {
-		if err := v.Indent(jsontext.WithIndent("  ")); err == nil {
-			return string(v)
-		}
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return string(b)
 	}
-	return string(b)
+	out, err := json.Marshal(v, jsontext.WithIndent("  "))
+	if err != nil {
+		return string(b)
+	}
+	return string(out)
 }
 
 // ──── SHA1 工具（全部输出【大写】十六进制，115 服务端强制要求）────
@@ -274,13 +246,13 @@ func FileSHA1Partial(filePath string, start, end int64) string {
 // fileListResponse 是 /open/ufile/files 响应 data 段的单条文件项。
 // ⚠️ 该接口 count 在外壳平铺；分页终止用「返回条数不足一页」判定，不依赖 count。
 type fileListResponse struct {
-	Fid      string    `json:"fid"`
-	Name     string    `json:"fn"`
-	PickCode string    `json:"pc"`
-	Size     int64     `json:"fs"`
-	IsVideo  IntString `json:"isv"` // ⚠️ 偶发为字符串，双兼容
-	Aid      string    `json:"aid"`
-	IsDir    string    `json:"fc"`
+	Fid      string `json:"fid"`
+	Name     string `json:"fn"`
+	PickCode string `json:"pc"`
+	Size     int64  `json:"fs"`
+	IsVideo  int64  `json:"isv"` // 实测为数字（0 非视频 / 1 视频）
+	Aid      string `json:"aid"`
+	IsDir    string `json:"fc"`
 }
 
 // uploadInitResp 是 /open/upload/init 响应 data 段的字段（115 返回字段多，只取需要的几个）。

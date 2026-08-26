@@ -2,6 +2,9 @@
 data/
 cookie.txt
 
+# 测试样本（record/replay 抓取的真实 115 响应，含 access_token/refresh_token/下载直链/账户信息，禁止提交）
+internal/drive/testdata/
+
 # Go 编译产物（勿误伤 cmd/115tools 源码目录，仅忽略生成的二进制文件）
 *.exe
 *.exe~

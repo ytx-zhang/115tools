@@ -43,7 +43,7 @@ func (c *Client) GetFileList(ctx context.Context, cid, name string) ([]FileInfo,
 				PickCode: item.PickCode,
 				Size:     item.Size,
 				IsDir:    item.IsDir == "0",
-				IsVideo:  int64(item.IsVideo) == 1,
+				IsVideo:  item.IsVideo == 1,
 			})
 		}
 		offset += len(files) // 以原始返回条数推进（含被过滤项）
@@ -76,14 +76,14 @@ func (c *Client) GetDownloadUrl(ctx context.Context, pickCode, ua, path string) 
 		return nil, fmt.Errorf("未提取到下载信息")
 	}
 	for _, item := range *items.Value {
-		if item.Url.Value == nil || item.Url.Value.Url == "" {
+		if item.Url.Url == "" {
 			logCloud("获取下载直链", fmt.Errorf("115接口返回空直链"), dur, logInfo...)
 			return nil, fmt.Errorf("115接口返回空直链")
 		}
 		// 成功：补充云端返回的文件名
 		logCloud("获取下载直链", nil, dur, append(logInfo, "文件名", item.FileName)...)
 		return &DownloadUrlInfo{
-			Url:  item.Url.Value.Url,
+			Url:  item.Url.Url,
 			Name: item.FileName,
 		}, nil
 	}

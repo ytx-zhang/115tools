@@ -2,7 +2,6 @@ package drive
 
 import (
 	"context"
-	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"io"
@@ -86,16 +85,16 @@ func refreshAccessToken(ctx context.Context, cfg *config.Config, overrideRT stri
 		return fmt.Errorf("读取刷新响应失败: %w", err)
 	}
 	var res struct {
-		State   IntString `json:"state"` // ⚠️ 115 整数字段偶发为字符串，双兼容（见 IntString）
-		Code    IntString `json:"code"`
-		Message string    `json:"message"`
+		State   int64  `json:"state"` // refreshToken 接口 state 为 int（1=成功），区别于普通 API 的 bool
+		Code    int64  `json:"code"`
+		Message string `json:"message"`
 		Data    struct {
 			AccessToken  string `json:"access_token"`
 			ExpiresIn    int64  `json:"expires_in"`
 			RefreshToken string `json:"refresh_token"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(body, &res, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
+	if err := json.Unmarshal(body, &res); err != nil {
 		return fmt.Errorf("解析响应失败: %w", err)
 	}
 	if res.State != 1 {
