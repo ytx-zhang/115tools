@@ -103,11 +103,9 @@ func singleUpload(ctx context.Context, t *ossTarget, size int64, readerAt io.Rea
 func multipartUpload(ctx context.Context, t *ossTarget, fileSize int64, readerAt io.ReaderAt) (map[string]any, error) {
 	// Step 1: 初始化分片上传，加 sequential 参数使 OSS 返回不带 -N 后缀的 ETag
 	initResult, err := t.client.InitiateMultipartUpload(ctx, &oss.InitiateMultipartUploadRequest{
-		Bucket: &t.bucket,
-		Key:    &t.object,
-		RequestCommon: oss.RequestCommon{
-			Parameters: map[string]string{"sequential": ""},
-		},
+		Bucket:     &t.bucket,
+		Key:        &t.object,
+		Parameters: map[string]string{"sequential": ""},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("初始化分片上传失败: %w", err)

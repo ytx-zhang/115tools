@@ -31,7 +31,7 @@ type Scanner struct {
 // NewScanner 构造 scanner 小模块（依赖注入）。
 func NewScanner(deps *common.Core, up *Uploader, co *CloudOps, task *common.Task) *Scanner {
 	return &Scanner{api: deps.API, db: deps.DB, paths: deps.Paths, rules: deps.Rules, up: up, co: co, task: task,
-		dirPool: dirPool{dirCh: make(chan string, 64), pending: make(map[string]SyncSource)}}
+		dirCh: make(chan string, 64), pending: make(map[string]SyncSource)}
 }
 
 // ScanDir 比对 DB 与本地内容，逐项就地执行动作（删云端/上传/刷新DB），再等本批上传完。

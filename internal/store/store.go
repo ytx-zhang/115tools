@@ -249,11 +249,11 @@ func (d *Store) FindOrphanSubdirs(currentPath string) []string {
 		c := b.Cursor()
 		for k, _ := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, _ = c.Next() {
 			rel := string(k[len(prefixBytes):])
-			slashIdx := strings.IndexByte(rel, '/')
-			if slashIdx == -1 {
+			before, _, ok := strings.Cut(rel, "/")
+			if !ok {
 				continue // 直属子项，不是深层
 			}
-			subDir := rel[:slashIdx]
+			subDir := before
 			if seen[subDir] {
 				continue
 			}

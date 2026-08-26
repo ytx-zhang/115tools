@@ -176,8 +176,8 @@ func clientIP(r *http.Request) string {
 		return xrip
 	}
 	addr := r.RemoteAddr
-	if i := strings.LastIndexByte(addr, ':'); i >= 0 {
-		addr = addr[:i]
+	if before, _, ok := strings.CutLast(addr, ":"); ok {
+		addr = before
 	}
 	return strings.Trim(addr, "[]")
 }
