@@ -29,7 +29,7 @@ function render(items, totalSize) {
   const all = document.getElementById('cache-check-all');
   if (all) all.checked = false;
 
-  tbody.textContent = '';
+  tbody.replaceChildren();
   if (!items.length) {
     const tr = document.createElement('tr');
     tr.innerHTML = '<td colspan="4" class="muted center">暂无缓存</td>';
@@ -37,8 +37,7 @@ function render(items, totalSize) {
   } else {
     for (const it of items) {
       const frag = rowTpl.content.cloneNode(true);
-      const cells = {};
-      frag.querySelectorAll('[data-cell]').forEach(el => { cells[el.dataset.cell] = el; });
+      const cells = Object.fromEntries([...frag.querySelectorAll('[data-cell]')].map(el => [el.dataset.cell, el]));
       cells.check.dataset.pickcode = it.pickcode;
       cells.name.textContent = it.name || '(未知文件名)';
       cells.name.title = it.name || '';

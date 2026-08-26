@@ -2,7 +2,7 @@
 // 并推送前端 SSE；LogStatus 推送任务进度。底层内嵌泛型 Stream 事件流。
 //
 // 架构说明：
-//   - Stream[T]：泛型 fan-out 事件流（非阻塞广播 + 环形缓冲回放），Hub 与状态推送共用。
+//   - Stream：Entry 的 fan-out 事件流（非阻塞广播 + 环形缓冲回放），Hub 与状态推送共用。
 //   - levelRouter：把底层 slog handler 按等级分流（≥WARN→stderr，<WARN→stdout）。
 //   - logf：四级别函数的统一内部实现（收敛样板，避免四个函数重复 slog.X+logEntry 两行）。
 //   - StatusData：任务状态快照的唯一类型，已迁至 internal/status（本包引用其推送状态），web 层与 sync 层共用。
@@ -20,20 +20,22 @@ import (
 	"github.com/ytx-zhang/115tools/internal/status"
 )
 
-// ──── 泛型 Stream ────
+// ──── 事件流 ────
 
-// Stream 泛型 fan-out 事件流：Publish 非阻塞广播，环形缓冲供新订阅者回放。
-type Stream[T any] struct {
+// Stream 是 Entry 的 fan-out 事件流：Publish 非阻塞广播并压入环形缓冲（供新订阅者回放），
+// Broadcast 只实时广播不缓存（状态帧用，避免占满 ring 把历史日志挤出）。
+// 全仓仅 Entry 一个实例化，故不引入泛型——省掉 [T] 噪音且不损失任何能力。
+type Stream struct {
 	mu     sync.RWMutex
-	buf    []T
+	buf    []Entry
 	bufCap int
-	subs   map[chan T]struct{}
+	subs   map[chan Entry]struct{}
 }
 
 // NewHub 创建空 Hub。
 func NewHub() *Hub {
 	return &Hub{
-		stream: &Stream[Entry]{
+		stream: &Stream{
 			bufCap: ringSize,
 			subs:   make(map[chan Entry]struct{}),
 		},
@@ -41,7 +43,7 @@ func NewHub() *Hub {
 }
 
 // 慢订阅者丢弃本次推送，不拖慢生产者。
-func (s *Stream[T]) Publish(v T) {
+func (s *Stream) Publish(v Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.bufCap > 0 {
@@ -60,7 +62,7 @@ func (s *Stream[T]) Publish(v T) {
 
 // Broadcast 只实时广播不压入环形缓冲（高频瞬态事件如任务状态帧用，
 // 避免占满 ring 把历史日志挤出——回放时状态由 handleLogs 手动快照补齐）。
-func (s *Stream[T]) Broadcast(v T) {
+func (s *Stream) Broadcast(v Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ch := range s.subs {
@@ -73,10 +75,10 @@ func (s *Stream[T]) Broadcast(v T) {
 
 // RecentFiltered 返回最近最多 limit 条满足 match 的历史事件（limit<=0 表示全部）。
 // 新在尾部，过滤保留原顺序。
-func (s *Stream[T]) RecentFiltered(limit int, match func(T) bool) []T {
+func (s *Stream) RecentFiltered(limit int, match func(Entry) bool) []Entry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]T, 0, len(s.buf))
+	out := make([]Entry, 0, len(s.buf))
 	for _, v := range s.buf {
 		if match(v) {
 			out = append(out, v)
@@ -89,8 +91,8 @@ func (s *Stream[T]) RecentFiltered(limit int, match func(T) bool) []T {
 }
 
 // Subscribe 返回一个接收新事件的缓冲通道（buf 为缓冲长度）。需配对调用 Unsubscribe。
-func (s *Stream[T]) Subscribe(buf int) chan T {
-	ch := make(chan T, buf)
+func (s *Stream) Subscribe(buf int) chan Entry {
+	ch := make(chan Entry, buf)
 	s.mu.Lock()
 	s.subs[ch] = struct{}{}
 	s.mu.Unlock()
@@ -98,7 +100,7 @@ func (s *Stream[T]) Subscribe(buf int) chan T {
 }
 
 // Unsubscribe 移除订阅者并关闭其通道。
-func (s *Stream[T]) Unsubscribe(ch chan T) {
+func (s *Stream) Unsubscribe(ch chan Entry) {
 	s.mu.Lock()
 	if _, ok := s.subs[ch]; ok {
 		delete(s.subs, ch)
@@ -108,7 +110,7 @@ func (s *Stream[T]) Unsubscribe(ch chan T) {
 }
 
 // Reset 清空环形缓冲但保留订阅者（「清空历史」操作，不切断实时推送）。
-func (s *Stream[T]) Reset() {
+func (s *Stream) Reset() {
 	s.mu.Lock()
 	s.buf = s.buf[:0]
 	s.mu.Unlock()
@@ -150,7 +152,7 @@ type Entry struct {
 
 // Hub 保存近期日志并向订阅者广播。
 type Hub struct {
-	stream *Stream[Entry]
+	stream *Stream
 	seq    atomic.Int64 // 全局日志序号生成器（见 Write）
 }
 

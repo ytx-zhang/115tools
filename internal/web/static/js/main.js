@@ -70,7 +70,7 @@ async function ping() {
 
 function logout() {
   // 先清服务端 session（失败不阻塞，reload 后仍需登录）。
-  fetch('/api/logout', {method: 'POST', credentials: 'same-origin'}).catch(() => {}).finally(() => {
+  fetch('/api/logout', {method: 'POST'}).catch(() => {}).finally(() => {
     location.reload();
   });
 }
@@ -92,7 +92,6 @@ async function boot() {
   document.getElementById('login').hidden = true;
   document.getElementById('app-view').hidden = false;
   // 仅启用登录验证时显示「退出登录」按钮（auth_required 为 true）。
-  const lb = document.getElementById('logout-btn');
   if (lb) lb.hidden = !res.authRequired;
 
   // 导航按钮点击改 hash，由 hashchange 单一归口路由（不直接调 showView，避免双路径）。

@@ -83,7 +83,7 @@ const rowTpl = document.getElementById('offline-row');
 function renderTasks() {
   const tbody = document.getElementById('offline-tbody');
   if (!tbody) return;
-  tbody.textContent = '';
+  tbody.replaceChildren();
   if (!off.tasks.length) {
     const tr = document.createElement('tr');
     tr.innerHTML = '<td colspan="5" class="muted center">暂无任务</td>';
@@ -92,8 +92,7 @@ function renderTasks() {
   }
   for (const t of off.tasks) {
     const frag = rowTpl.content.cloneNode(true);
-    const cells = {};
-    frag.querySelectorAll('[data-cell]').forEach(el => { cells[el.dataset.cell] = el; });
+    const cells = Object.fromEntries([...frag.querySelectorAll('[data-cell]')].map(el => [el.dataset.cell, el]));
     cells.name.textContent = t.name;
     cells.name.title = t.name;
     cells.size.textContent = t.sizeText;

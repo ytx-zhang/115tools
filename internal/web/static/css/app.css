@@ -1,49 +1,36 @@
 /* ============================================================
    app.css —— 115 Tools 管理面板样式
    分层：@layer theme < reset < base < layout < components < utilities
-   现代特性：CSS 嵌套、color-mix()、:has()、@layer
-   兼容性：自用内网面板，接受近两年浏览器（Chrome 114+ / Safari 17.4+ / Firefox 121+）
+   现代特性：CSS 嵌套、color-mix()、:has()、light-dark()、@layer
+   兼容性：自用内网面板，接受近两年浏览器（Chrome 123+ / Safari 17.5+ / Firefox 120+）
    ============================================================ */
 
 /* ── 1. 主题令牌（亮/暗 + 模块色） ── */
 @layer theme {
+  /* 亮/暗两套值合并为单一定义：light-dark() 按 color-scheme 自动取对应值，
+     顺带让原生控件（滚动条/复选框/输入框）也跟随系统主题。 */
   :root {
-    --bg: #ffffff;
-    --bg2: #f6f8fa;
-    --bg3: #eef0f2;
-    --border: #d0d7de;
-    --text: #1f2328;
-    --muted: #656d76;
-    --accent: #0969da;
-    --accent-h: #0550ae;
-    --green: #1a7f37;
-    --red: #cf222e;
-    --yellow: #9a6700;
+    color-scheme: light dark;
+    --bg: light-dark(#ffffff, #0d1117);
+    --bg2: light-dark(#f6f8fa, #161b22);
+    --bg3: light-dark(#eef0f2, #1f2630);
+    --border: light-dark(#d0d7de, #2d333b);
+    --text: light-dark(#1f2328, #e6edf3);
+    --muted: light-dark(#656d76, #8b949e);
+    --accent: light-dark(#0969da, #4493f8);
+    --accent-h: light-dark(#0550ae, #2f7de0);
+    --green: light-dark(#1a7f37, #3fb950);
+    --red: light-dark(#cf222e, #f85149);
+    --yellow: light-dark(#9a6700, #d29922);
     --radius: 10px;
 
-    /* 日志 6 模块独立色相，互不接近：蓝/绿/橙/紫/灰/青 */
+    /* 日志 6 模块独立色相，互不接近：蓝/绿/橙/紫/灰/青（亮暗一致） */
     --mod-sync: #4493f8;
     --mod-strm: #3fb950;
     --mod-drive: #f0883e;
     --mod-cloud: #a371f7;
     --mod-system: #8b949e;
     --mod-db: #39c5cf;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0d1117;
-      --bg2: #161b22;
-      --bg3: #1f2630;
-      --border: #2d333b;
-      --text: #e6edf3;
-      --muted: #8b949e;
-      --accent: #4493f8;
-      --accent-h: #2f7de0;
-      --green: #3fb950;
-      --red: #f85149;
-      --yellow: #d29922;
-    }
   }
 }
 
@@ -572,15 +559,11 @@
     }
   }
 
-  /* 缓存行：文件名主显示 + pickcode 小字副行 */
+  /* 缓存行：文件名主显示 + pickcode 小字副行；列宽自适应内容，超长名换行展示（不截断、不硬限宽）。
+     ⚠️ 必须显式覆盖 td 的 white-space:nowrap，否则 overflow-wrap 永不生效、长名撑开表格出现横向滚动条。 */
   .cache-name {
-    max-width: 380px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-
-    @media (width <= 720px) {
-      max-width: 160px;
-    }
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .cache-pickcode {
@@ -613,7 +596,6 @@
 
     @media (width <= 720px) {
       overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
       scrollbar-width: none;
       padding-bottom: 2px;
 
