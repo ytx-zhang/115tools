@@ -14,7 +14,7 @@ jobs:
         with:
           go-version: '1.26'
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          # 钉死版本，与本地 /root/go/bin/golangci-lint（v2.13.1）一致；action v6 不支持 latest。
+          # 钉死版本，与本地 /root/go/bin/golangci-lint（v2.13.1）一致；action v7 才支持 golangci-lint v2。
           version: v2.13.1
