@@ -39,7 +39,10 @@
     <main class="content">
       <!-- 仪表盘 -->
       <section id="view-dashboard" class="view">
-        <h2>仪表盘</h2>
+        <div class="view-head">
+          <h2>仪表盘</h2>
+          <span class="muted version-tag">115tools <span id="app-version">…</span></span>
+        </div>
         <div id="config-banner" class="banner" hidden>
           ⚠️ 配置不完整，同步未启动，请到「设置」补齐：<span id="config-banner-missing"></span>
         </div>
@@ -315,7 +318,6 @@
   </template>
 
   <div id="toast-box"></div>
-  <footer class="app-footer muted">115tools <span id="app-version">…</span></footer>
 </body>
 
 </html>

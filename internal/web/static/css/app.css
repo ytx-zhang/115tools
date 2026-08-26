@@ -900,9 +900,15 @@
   gap: 8px;
 }
 
-/* ── 底部版本条 ── */
-.app-footer {
-  margin: 18px 0 8px;
-  text-align: center;
+/* ── 仪表盘头部：标题居左、版本小字居右 ── */
+.view-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.version-tag {
   font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
 }
