@@ -7,9 +7,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+
+# 版本号由构建时注入（来源 git tag）：make up 传 --build-arg VERSION，CI 传 build-arg。
+# 缺省 "dev" 用于未提供版本信息的构建（如本地无 git）。
+ARG VERSION=dev
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-    go build -ldflags="all=-w -s" -trimpath -buildvcs=false -o server ./cmd/115tools \
+    go build -ldflags="all=-w -s -X github.com/ytx-zhang/115tools/internal/version.Version=${VERSION}" \
+    -trimpath -buildvcs=false -o server ./cmd/115tools \
     && mkdir -p /out/data
 
 # --- 第二阶段：运行时（distroless/static：自带 CA 证书、无 shell，比 alpine 更小）---
