@@ -1,16 +1,18 @@
 # golangci-lint v2 配置（兼容 Go 1.26）。
 # 启用 Go 主流静态检查：gofmt / govet / staticcheck / errcheck / unused / ineffassign / misspell / revive。
 # 原则：零豁免。所有 lint 问题都通过修复代码解决，不在配置中扩大排除范围。
+# 注意：v2 中 formatters 为顶层键，不能嵌套在 linters 下。
 version: "2"
 
 linters:
   default: standard
-  formatters:
-    enable:
-      - gofmt
   settings:
     misspell:
       locale: US
+
+formatters:
+  enable:
+    - gofmt
 
 issues:
   max-issues-per-linter: 0
