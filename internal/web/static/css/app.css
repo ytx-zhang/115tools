@@ -899,3 +899,10 @@
   flex-direction: column;
   gap: 8px;
 }
+
+/* ── 底部版本条 ── */
+.app-footer {
+  margin: 18px 0 8px;
+  text-align: center;
+  font-size: 12px;
+}

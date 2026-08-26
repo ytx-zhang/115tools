@@ -81,7 +81,17 @@ window.addEventListener('auth:required', logout);
 const lb = document.getElementById('logout-btn');
 if (lb) lb.addEventListener('click', logout);
 
+async function loadVersion() {
+  // 版本探针公开可访问，登录前后都展示；失败静默忽略（不影响主流程）。
+  try {
+    const v = await api('/api/version');
+    const el = document.getElementById('app-version');
+    if (el && v?.version) el.textContent = 'v' + v.version;
+  } catch { /* 忽略 */ }
+}
+
 async function boot() {
+  loadVersion();
   const res = await ping();
   if (!res.ok) {
     document.getElementById('login').hidden = false;

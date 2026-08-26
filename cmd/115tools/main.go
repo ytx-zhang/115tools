@@ -23,6 +23,7 @@ import (
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/logs"
 	"github.com/ytx-zhang/115tools/internal/store"
+	"github.com/ytx-zhang/115tools/internal/version"
 	"github.com/ytx-zhang/115tools/internal/web"
 )
 
@@ -97,7 +98,7 @@ func main() {
 	if err := application.Initialize(); err != nil {
 		logs.Error(logs.ModuleSystem, "初始化失败", "错误", err)
 	} else {
-		logs.Info(logs.ModuleSystem, "115tools 启动完成")
+		logs.Info(logs.ModuleSystem, "115tools 启动完成", "版本", version.Version)
 	}
 
 	// 10. 等待退出信号，优雅关闭：先停 HTTP（拒绝新请求），再取消应用 ctx 停同步任务

@@ -49,6 +49,7 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 	// 公开接口（登录/会话探测无需鉴权）
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("GET /api/me", s.handleMe)
+	mux.HandleFunc("GET /api/version", handleVersion) // 版本探针（公开）
 
 	// 受保护接口
 	protected := map[string]http.HandlerFunc{
