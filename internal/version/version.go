@@ -3,4 +3,4 @@
 package version
 
 // Version 为当前发布版本，采用语义化版本（SemVer，https://semver.org/lang/zh-CN/）。
-const Version = "0.1.0"
+const Version = "0.1.1"
