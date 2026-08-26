@@ -23,7 +23,7 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: 设置 QEMU（跨平台构建）
         uses: docker/setup-qemu-action@v3
