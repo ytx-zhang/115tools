@@ -18,7 +18,8 @@ package drive
 import (
 	"bytes"
 	"crypto/sha1"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"os"
@@ -193,10 +194,10 @@ func (v *IntString) UnmarshalJSON(b []byte) error {
 // prettyJSON 把响应体转成可读文本：先按 any 解析（自动解码 \uXXXX 转义为中文明文），
 // 再缩进重序列化。非 JSON 时原样返回（错误日志/调试用，绝不截断）。
 func prettyJSON(b []byte) string {
-	var v any
-	if err := json.Unmarshal(b, &v); err == nil {
-		if out, err := json.MarshalIndent(v, "", "  "); err == nil {
-			return string(out)
+	var v jsontext.Value
+	if err := v.UnmarshalJSON(b); err == nil {
+		if err := v.Indent(jsontext.WithIndent("  ")); err == nil {
+			return string(v)
 		}
 	}
 	return string(b)

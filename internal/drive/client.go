@@ -2,7 +2,8 @@ package drive
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -119,11 +120,11 @@ func Post[T any](ctx context.Context, c *Client, url string, form Form, opts ...
 // → state=false 报错 → 返回外壳与真实耗时（Get/Post 取 Data 段）。
 // ⚠️ 不打日志：日志由各 API 方法用返回的耗时自打（见 logCloud），以便补充云端返回内容。
 func exec[T any](ctx context.Context, c *Client, method, url string, params Form, opts ...ReqOption) (Resp[T], time.Duration, error) {
-	// ⚠️ 解析用 Resp[json.RawMessage] 而非 Resp[T]：115 错误场景（如创建同名目录 code 20004）
+	// ⚠️ 解析用 Resp[jsontext.Value] 而非 Resp[T]：115 错误场景（如创建同名目录 code 20004）
 	// data 段是 []（与 T 结构不匹配），直接解析到 Resp[T] 会失败，导致 state/code 读不到
 	// （报错信息丢失 115 的 code）。用 RawMessage 宽松解析外壳，data 段延后到
 	// state=true 时再手动反序列化到 T。
-	var shell Resp[json.RawMessage]
+	var shell Resp[jsontext.Value]
 	status := http.StatusOK
 	var lastBody []byte // 最后一次响应的完整 body（循环外作用域，供 [115报错] 展示原始响应）
 	netDur := time.Duration(0)
@@ -153,7 +154,7 @@ func exec[T any](ctx context.Context, c *Client, method, url string, params Form
 			State   bool   `json:"state"`
 			Message string `json:"message"`
 		}
-		if err := json.Unmarshal(body, &probe); err != nil {
+		if err := json.Unmarshal(body, &probe, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
 			// body 非合法 JSON（空响应/非统一外壳）：probe 保持零值，
 			// 「稍后再试」重试条件自然不命中，按普通响应继续处理。
 			probe = struct {
@@ -172,8 +173,8 @@ func exec[T any](ctx context.Context, c *Client, method, url string, params Form
 		}
 		// ⚠️ 重置 shell 再解析：json.Unmarshal 不清零目标结构体，若响应缺少某字段会残留
 		// 上一次（重试前）的值，导致重试成功后误判（如 Data 残留空数组 [] 触发解析错误）。
-		shell = Resp[json.RawMessage]{}
-		if err := json.Unmarshal(body, &shell); err != nil {
+		shell = Resp[jsontext.Value]{}
+		if err := json.Unmarshal(body, &shell, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
 			return Resp[T]{}, netDur, fmt.Errorf("解析响应外壳失败: %w (原始响应: %s)", err, prettyJSON(body))
 		}
 		break
@@ -187,7 +188,7 @@ func exec[T any](ctx context.Context, c *Client, method, url string, params Form
 	if len(shell.Data) == 0 || string(shell.Data) == "null" {
 		return resp, netDur, nil // data 缺失（null）按空处理，由调用方按需校验
 	}
-	if err := json.Unmarshal(shell.Data, &resp.Data); err != nil {
+	if err := json.Unmarshal(shell.Data, &resp.Data, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
 		perr := fmt.Errorf("解析 data 段失败: %w (原始响应: %s)", err, prettyJSON(shell.Data))
 		return Resp[T]{}, netDur, perr
 	}

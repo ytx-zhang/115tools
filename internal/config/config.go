@@ -8,7 +8,8 @@
 package config
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"os"
 	"slices"
@@ -210,9 +211,17 @@ func (c *Config) SaveToken(access, refresh string, expiresIn int64) {
 
 // persistLocked 序列化并写盘，调用方必须已持有 c.mu 写锁。
 func (c *Config) persistLocked() error {
-	out, err := json.MarshalIndent(configFile{Config: c, Token: c.token}, "", "  ")
+	var v jsontext.Value
+	raw, err := json.Marshal(configFile{Config: c, Token: c.token})
 	if err != nil {
 		return fmt.Errorf("序列化失败: %w", err)
 	}
+	if err := v.UnmarshalJSON(raw); err != nil {
+		return fmt.Errorf("序列化失败: %w", err)
+	}
+	if err := v.Indent(jsontext.WithIndent("  ")); err != nil {
+		return fmt.Errorf("序列化失败: %w", err)
+	}
+	out := []byte(v)
 	return os.WriteFile(c.path, out, 0644)
 }

@@ -2,7 +2,7 @@ package drive
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -58,7 +58,7 @@ func (c *Client) DeleteTask(ctx context.Context, infoHash string, deleteFiles bo
 		delSource = "1"
 	}
 	// 成功时 data=[]（空数组），用 RawMessage 容错（只关心 state，不消费 data）。
-	_, dur, err := Post[json.RawMessage](ctx, c, "/open/offline/del_task",
+	_, dur, err := Post[jsontext.Value](ctx, c, "/open/offline/del_task",
 		Form{"info_hash": infoHash, "del_source_file": delSource})
 	logCloud("删除离线任务", err, dur, "info_hash", infoHash)
 	return err
@@ -68,7 +68,7 @@ func (c *Client) DeleteTask(ctx context.Context, infoHash string, deleteFiles bo
 // flag：0 已完成，1 全部，2 失败，3 进行中，4 已完成且删源文件，5 全部且删源文件。
 func (c *Client) ClearTasks(ctx context.Context, flag int) error {
 	// 成功时 data=[]（空数组），用 RawMessage 容错（只关心 state，不消费 data）。
-	_, dur, err := Post[json.RawMessage](ctx, c, "/open/offline/clear_task",
+	_, dur, err := Post[jsontext.Value](ctx, c, "/open/offline/clear_task",
 		Form{"flag": strconv.Itoa(flag)})
 	logCloud("批量清除任务", err, dur, "flag", flag)
 	return err

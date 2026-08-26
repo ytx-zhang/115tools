@@ -2,7 +2,7 @@ package drive
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"fmt"
 	"slices"
 	"strconv"
@@ -121,7 +121,7 @@ func (c *Client) CreateFolder(ctx context.Context, pid, name, path string) (stri
 // path 为日志定位用的路径（批量时传代表路径），仅用于 exec 动作日志。
 // 成功时 115 返回 data=[]（空数组），用 RawMessage 容错（只关心 state，不消费 data）。
 func (c *Client) MoveFile(ctx context.Context, fid, cid, path string) error {
-	_, dur, err := Post[json.RawMessage](ctx, c, "/open/ufile/move", Form{"file_ids": fid, "to_cid": cid})
+	_, dur, err := Post[jsontext.Value](ctx, c, "/open/ufile/move", Form{"file_ids": fid, "to_cid": cid})
 	logCloud("云端移动文件", err, dur, "路径", path, "数量", fidCount(fid))
 	return err
 }
@@ -130,7 +130,7 @@ func (c *Client) MoveFile(ctx context.Context, fid, cid, path string) error {
 // path 为日志定位用的路径（批量时传代表路径），仅用于动作日志。
 // 成功时 115 返回 data=[]（空数组），用 RawMessage 容错（只关心 state，不消费 data）。
 func (c *Client) DeleteFile(ctx context.Context, fid, path string) error {
-	_, dur, err := Post[json.RawMessage](ctx, c, "/open/ufile/delete", Form{"file_ids": fid})
+	_, dur, err := Post[jsontext.Value](ctx, c, "/open/ufile/delete", Form{"file_ids": fid})
 	logCloud("云端删除文件", err, dur, "路径", path, "数量", fidCount(fid))
 	return err
 }

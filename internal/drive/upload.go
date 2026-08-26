@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"os"
@@ -212,7 +213,7 @@ func (c *Client) initUpload(ctx context.Context, req UploadInitReq, path string)
 		formData["sign_key"] = req.SignKey
 		formData["sign_val"] = req.SignVal
 	}
-	trimmed, dur, err := Post[json.RawMessage](ctx, c, "/open/upload/init", formData)
+	trimmed, dur, err := Post[jsontext.Value](ctx, c, "/open/upload/init", formData)
 	if err != nil {
 		logCloud("上传初始化", err, dur, "路径", path)
 		return nil, err
@@ -223,7 +224,7 @@ func (c *Client) initUpload(ctx context.Context, req UploadInitReq, path string)
 		return nil, fmt.Errorf("上传初始化失败: data 字段缺失, 响应体: %s", prettyJSON(trimmed))
 	}
 	var data uploadInitResp
-	if err := json.Unmarshal(trimmed, &data); err != nil {
+	if err := json.Unmarshal(trimmed, &data, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
 		logCloud("上传初始化", err, dur, "路径", path)
 		return nil, fmt.Errorf("解析初始化响应失败: %w, 响应体: %s", err, prettyJSON(trimmed))
 	}
@@ -354,7 +355,7 @@ func uploadByOSS(ctx context.Context, c *Client, pathStr string, fileSize int64,
 	var cb struct {
 		Data UploadCallbackData `json:"data"`
 	}
-	if err := json.Unmarshal(raw, &cb); err != nil {
+	if err := json.Unmarshal(raw, &cb, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
 		return nil, "", fmt.Errorf("OSS上传回调解析失败: %w, cbResp=%s", err, prettyJSON(raw))
 	}
 	fid, pc := cb.Data.FileID, cb.Data.PickCode

@@ -2,7 +2,8 @@ package drive
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -94,7 +95,7 @@ func refreshAccessToken(ctx context.Context, cfg *config.Config, overrideRT stri
 			RefreshToken string `json:"refresh_token"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(body, &res); err != nil {
+	if err := json.Unmarshal(body, &res, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
 		return fmt.Errorf("解析响应失败: %w", err)
 	}
 	if res.State != 1 {

@@ -8,7 +8,7 @@ import (
 	"crypto/sha1"
 	"embed"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -144,7 +144,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+	if err := json.MarshalWrite(w, v); err != nil {
 		// 客户端已断开等场景编码/写出失败：连接不可恢复，仅告警
 		logs.Warn(logs.ModuleSystem, "写入JSON响应失败", "状态码", code, "错误", err)
 	}
@@ -160,8 +160,7 @@ func writeErr(w http.ResponseWriter, code int, format string, a ...any) {
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, v any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	return dec.Decode(v)
+	return json.UnmarshalRead(http.MaxBytesReader(w, r.Body, 1<<20), v)
 }
 
 // clientIP 返回真实客户端 IP（支持反代：XFF/X-Real-IP/X-Client-IP → RemoteAddr）。
