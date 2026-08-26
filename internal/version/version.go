@@ -5,4 +5,4 @@
 package version
 
 // Version 为当前版本（SemVer，https://semver.org/lang/zh-CN/）。
-var Version = "0.1.1"
+var Version = "0.1.2"
