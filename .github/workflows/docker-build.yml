@@ -51,8 +51,6 @@ jobs:
           else
             echo "tags=${BASE}:latest" >> $GITHUB_OUTPUT
           fi
-          # 版本号注入二进制（git tag → VERSION build-arg），无 tag 时回退 dev
-          [ -n "$VER" ] && echo "ver=$VER" >> $GITHUB_OUTPUT || echo "ver=dev" >> $GITHUB_OUTPUT
 
       - name: 构建并推送
         id: push
@@ -62,8 +60,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.tags }}
-          build-args: |
-            VERSION=${{ steps.tags.outputs.ver }}
 
       - name: 清理无标签旧版本
         run: |

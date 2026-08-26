@@ -1,0 +1,43 @@
+name: 发版（代码版本驱动）
+
+# 代码即真相：push 到 main 时读取 internal/version.Version，
+# 若与最近 tag 不同则自动打 vX.Y.Z 并推送；tag 推送会触发 docker-build.yml 构建镜像。
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码（含标签历史）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 读取代码中的版本号
+        id: ver
+        run: |
+          V=$(grep -oP 'Version\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' internal/version/version.go)
+          if [ -z "$V" ]; then echo "未在 internal/version/version.go 找到版本号"; exit 1; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "代码版本: $V"
+
+      - name: 与最近 tag 比较，必要时打 tag
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "最近 tag: $LATEST"
+          if [ "$LATEST" != "v$V" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "v$V"
+            git push origin "v$V"
+            echo "已创建并推送 tag v$V（将触发镜像构建）"
+          else
+            echo "版本未变化，跳过打 tag"
+          fi

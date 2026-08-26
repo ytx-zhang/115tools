@@ -8,12 +8,9 @@ RUN go mod download
 
 COPY . .
 
-# 版本号由构建时注入（来源 git tag）：make up 传 --build-arg VERSION，CI 传 build-arg。
-# 缺省 "dev" 用于未提供版本信息的构建（如本地无 git）。
-ARG VERSION=dev
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-    go build -ldflags="all=-w -s -X github.com/ytx-zhang/115tools/internal/version.Version=${VERSION}" \
+    go build -ldflags="all=-w -s" \
     -trimpath -buildvcs=false -o server ./cmd/115tools \
     && mkdir -p /out/data
 
