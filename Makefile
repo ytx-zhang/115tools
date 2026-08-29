@@ -28,12 +28,12 @@ build:
 frontend-check:
 	@if command -v node >/dev/null 2>&1; then \
 		echo "使用本机 node 做语法自检"; \
-		for f in $$(find internal/web/static/js -name '*.js'); do \
+		for f in $$(find internal/webui/static/js -name '*.js'); do \
 			node --check "$$f" || exit 1; \
 		done; \
 	else \
 		echo "本机无 node，使用容器 $(NODE_IMAGE) 做语法自检"; \
-		docker run --rm -v "$(CURDIR)/internal/web/static/js:/js:ro" $(NODE_IMAGE) \
+		docker run --rm -v "$(CURDIR)/internal/webui/static/js:/js:ro" $(NODE_IMAGE) \
 			sh -c 'for f in $$(find /js -name "*.js"); do node --check "$$f" || exit 1; done'; \
 	fi
 

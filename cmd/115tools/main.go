@@ -1,7 +1,6 @@
-// 115tools 主程序：115 网盘 ↔ 本地媒体库 同步工具。
+// 115tools 主程序：115 网盘 ↔ 本地媒体库 同步工具（v2 全新重写）。
 //
-// 组合根（Composition Root）：main 只负责「装配一切」，不含任何业务逻辑。
-// 程序运行流程看下方组装顺序——每个步骤上方一行注释说明「为什么按此顺序」。
+// 组合根（Composition Root）：main 只负责「装配一切」，不含业务逻辑。
 package main
 
 import (
@@ -12,104 +11,125 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 	_ "time/tzdata" // 内嵌时区数据库：Docker alpine 下 TZ 生效依赖它
 
-	"github.com/ytx-zhang/115tools/internal/app"
-	"github.com/ytx-zhang/115tools/internal/cache"
-	"github.com/ytx-zhang/115tools/internal/config"
-	"github.com/ytx-zhang/115tools/internal/drive"
-	"github.com/ytx-zhang/115tools/internal/logs"
-	"github.com/ytx-zhang/115tools/internal/store"
-	"github.com/ytx-zhang/115tools/internal/version"
-	"github.com/ytx-zhang/115tools/internal/web"
+	"github.com/ytx-zhang/115tools/internal/conf"
+	"github.com/ytx-zhang/115tools/internal/engine"
+	"github.com/ytx-zhang/115tools/internal/journal"
+	"github.com/ytx-zhang/115tools/internal/pan"
+	"github.com/ytx-zhang/115tools/internal/stash"
+	"github.com/ytx-zhang/115tools/internal/vault"
+	"github.com/ytx-zhang/115tools/internal/webui"
 )
 
 func main() {
-	// 1. 信号上下文：整个程序的生命周期都挂在它上面（Ctrl+C / SIGTERM 触发优雅退出）
 	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 2. 命令行参数（数据目录 / 端口）
-	dataDir := flag.String("data", "/app/data", "数据目录（配置文件与索引库存放处）")
+	dataDir := flag.String("data", "/app/data", "数据目录（配置与数据库存放处）")
 	port := flag.String("port", "8080", "Web 管理面板端口")
 	flag.Parse()
-	configPath := *dataDir + "/config.json"
-	dbPath := *dataDir + "/files.db"
 
-	// 3. 先建日志中心（Hub），再 Setup 全局 slog——日志要在装配早期就可用
-	hub := logs.NewHub()
-	logs.Setup(hub)
-
-	// 4. 加载配置（配置文件损坏才致命退出；不存在则自动创建空白骨架）
-	cfg, err := config.New(configPath)
+	// 1. 配置（全局设置 + 任务集合）
+	cfg, err := conf.New(filepath.Join(*dataDir, "config.json"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "配置加载失败:", err)
 		os.Exit(1)
 	}
 
-	// 5. 初始化索引存储（bbolt），启动时压缩一次回收空洞页
-	database, err := store.New(dbPath)
+	// 2. 执行历史库（journal.db）+ 日志门面安装
+	hist, err := journal.New(filepath.Join(*dataDir, "journal.db"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "历史库初始化失败:", err)
+		os.Exit(1)
+	}
+	journal.Setup(hist)
+	defer hist.Close()
+
+	// 3. 路径索引库（index.db）
+	index, err := vault.New(filepath.Join(*dataDir, "index.db"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "索引库初始化失败:", err)
 		os.Exit(1)
 	}
-	defer database.Close()
-	if err := database.Compact(); err != nil {
-		logs.Warn(logs.ModuleSystem, "数据库压缩失败", "错误信息", err)
+	defer index.Close()
+	if err := index.Compact(appCtx); err != nil {
+		journal.Warn(appCtx, "索引库压缩失败", "错误", err)
 	}
 
-	// 6. 创建 115 驱动（开放平台 refresh_token，纯装配无网络请求）
-	api := drive.NewClient(cfg)
+	// 4. 115 客户端（纯装配，无网络请求）
+	api := pan.NewClient(cfg)
 
-	// 6.5 创建透传本地缓存层：上传完成的视频按 pickcode 分目录暂存于 <SyncPath>/.cache。
-	// ⚠️ 必须落在 SyncPath 同挂载点内：cache.Move 才能走原子 rename（否则跨 Docker 卷是 EXDEV → 整文件拷贝）。
-	// 监听与扫描均按 .cache 根目录忽略，避免被当成新增视频重新上传。透传命中本地可跳过 115 上游回源
-	// （保留 cache.Retention，到期由清理协程回收）。
-	cacheDir := filepath.Join(cfg.SyncPath, ".cache")
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	// 5. 透传缓存（cache_dir 全局可配；未配置时兜底 <dataDir>/cache）
+	cacheDir := cfg.Settings.CacheDir
+	if cacheDir == "" {
+		cacheDir = filepath.Join(*dataDir, "cache")
+	}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "缓存目录创建失败:", err)
 		os.Exit(1)
 	}
-	localCache := cache.New(cacheDir, cfg.CacheRetention())
-	go localCache.StartCleaner(appCtx, cache.SweepInterval) // 绑定 appCtx 生命周期，ctx 取消即退出
+	localCache := stash.New(cacheDir, time.Duration(cfg.Settings.CacheRetentionDays)*24*time.Hour)
+	go localCache.StartCleaner(appCtx, stash.SweepInterval)
 
-	// 7. 组装应用编排层（组合根本体：持全部全局依赖，串联 config/db/api/sync/logs）
+	// 6. 任务引擎 + 状态广播中心
+	hub := webui.NewHub()
 	var wg sync.WaitGroup
-	application := app.New(cfg, api, database, hub, appCtx, &wg, localCache)
+	eng := engine.New(api, index, cfg, hist, localCache, hub.Publish, appCtx, &wg)
 
-	// 8. 注册 HTTP 路由并启动监听（管理面板 + /download 直链）
+	// 7. Web 服务
 	mux := http.NewServeMux()
-	web.Register(mux, web.Deps{App: application, AppCtx: appCtx, Cache: localCache})
-	server := &http.Server{
-		Addr:    ":" + *port,
-		Handler: mux,
+	server := webui.Register(mux, webui.Deps{
+		AppCtx:  appCtx,
+		Conf:    cfg,
+		Engine:  eng,
+		Journal: hist,
+		Pan:     api,
+		Stash:   localCache,
+		Vault:   index,
+		Hub:     hub,
+	})
+
+	// 8. 初始化（配置完备且凭证有效才启动引擎）
+	if err := bootstrap(appCtx, cfg, api, eng); err != nil {
+		server.SetInitError(err.Error())
+		journal.Error(appCtx, "初始化失败", "错误", err)
 	}
+
+	httpServer := &http.Server{Addr: ":" + *port, Handler: mux}
 	go func() {
-		logs.Info(logs.ModuleSystem, "Web 服务启动", "地址", server.Addr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logs.Error(logs.ModuleSystem, "Web 服务异常退出", "错误", err)
+		journal.Info(appCtx, "Web 服务启动", "地址", httpServer.Addr)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			journal.Error(appCtx, "Web 服务异常退出", "错误", err)
 		}
 	}()
 
-	// 9. 应用初始化：配置校验 → 凭证验证 → 同步器构建（建目录/索引 → 启动 watch+cron 任务）
-	if err := application.Initialize(); err != nil {
-		logs.Error(logs.ModuleSystem, "初始化失败", "错误", err)
-	} else {
-		logs.Info(logs.ModuleSystem, "115tools 启动完成", "版本", version.Version)
-	}
-
-	// 10. 等待退出信号，优雅关闭：先停 HTTP（拒绝新请求），再取消应用 ctx 停同步任务
+	// 9. 等待退出信号，优雅关闭
 	<-appCtx.Done()
-	logs.Info(logs.ModuleSystem, "正在优雅关闭...")
+	journal.Info(appCtx, "正在优雅关闭...")
+	eng.Shutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logs.Warn(logs.ModuleSystem, "HTTP 关闭超时", "错误", err)
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		journal.Warn(appCtx, "HTTP 关闭超时", "错误", err)
 	}
 	wg.Wait()
-	logs.Info(logs.ModuleSystem, "已退出")
+	journal.Info(appCtx, "已退出")
+}
+
+// bootstrap 启动时的完整初始化：配置校验 → 凭证验证 → 刷新守护 → 引擎启动。
+func bootstrap(ctx context.Context, cfg *conf.Config, api *pan.Client, eng *engine.Engine) error {
+	if !cfg.Status().Ready {
+		return fmt.Errorf("配置不完整：%s", strings.Join(cfg.Status().Missing, "、"))
+	}
+	if _, err := api.Verify(ctx, ""); err != nil {
+		return fmt.Errorf("登录凭证验证失败: %w", err)
+	}
+	pan.StartRefreshDaemon(ctx, cfg)
+	return eng.EnsureRunning()
 }

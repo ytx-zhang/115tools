@@ -7,7 +7,10 @@ data/
 cookie.txt
 
 # 测试样本（record/replay 抓取的真实 115 响应，含 token/直链/账户信息，勿打进镜像）
-internal/drive/testdata/
+internal/pan/testdata/
+
+# 开发期测试截图与验证脚本（Playwright 生成，非镜像所需）
+screenshots/
 
 # Go 编译产物（本机 go build ./cmd/115tools 生成的二进制；锚定根目录，勿误伤 cmd/115tools 源码）
 /115tools

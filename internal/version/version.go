@@ -5,4 +5,5 @@
 package version
 
 // Version 为当前版本（SemVer，https://semver.org/lang/zh-CN/）。
-var Version = "0.1.2"
+// v2 全新重写（任务中心多任务架构）起于 0.2.0。
+var Version = "0.2.0"

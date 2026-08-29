@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>115 Tools</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/css/app.css?v=3">
+  <!-- 防主题闪烁：CSS 加载前先恢复本地主题（亮/暗/自动） -->
+  <script>
+    try {
+      var t = localStorage.getItem('115tools-theme');
+      if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
+  </script>
+  <!-- 注意：main.js 不带 query，与模块内部 import './tasks.js' 解析的 URL 保持一致，避免同一模块被加载两份 -->
+  <script type="module" src="/static/js/main.js"></script>
+</head>
+<body>
+  <!-- 图标库（内联 SVG，Feather/Lucide 风格，随主题着色） -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+      </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+      </symbol>
+      <symbol id="i-cog" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </symbol>
+      <symbol id="i-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </symbol>
+      <symbol id="i-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20z"/>
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+      </symbol>
+      <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M7 4.5a1 1 0 0 1 1.5-.87l12 7a1 1 0 0 1 0 1.74l-12 7A1 1 0 0 1 7 18.5z"/>
+      </symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24" fill="currentColor">
+        <rect x="6" y="6" width="12" height="12" rx="2"/>
+      </symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+      </symbol>
+      <symbol id="i-drive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+      </symbol>
+      <symbol id="i-cloud" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"/>
+      </symbol>
+      <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+      </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+      </symbol>
+      <symbol id="i-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+      </symbol>
+      <symbol id="i-puzzle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19.44 12.99a1.5 1.5 0 0 1-1.38-1.5 1.5 1.5 0 0 1 1.5-1.5 1.5 1.5 0 0 0 1.44-2.02A1.99 1.99 0 0 0 18.06 6.5H15.5a2 2 0 0 1-4 0H9.5a1.99 1.99 0 0 0-1.87 1.46A1.5 1.5 0 0 0 9 10.06a1.5 1.5 0 0 1 0 3 1.5 1.5 0 0 0-1.43 2.1A1.99 1.99 0 0 0 9.5 16.5h1.88a2 2 0 0 1 4 0h1.5a1.99 1.99 0 0 0 1.88-1.5 1.5 1.5 0 0 0-1.32-2.01z"/>
+      </symbol>
+      <symbol id="i-cloudup" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 13v8"/><path d="m8 17 4-4 4 4"/><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <!-- 登录页 -->
+  <div id="login" class="login-wrap" hidden>
+    <div class="login-orb orb-a"></div>
+    <div class="login-orb orb-b"></div>
+    <button id="theme-toggle-login" class="theme-toggle" title="切换主题（亮 / 暗 / 自动）">
+      <svg class="ic"><use href="#i-auto"/></svg>
+    </button>
+    <form id="login-form" name="login" class="login-card">
+      <div class="login-logo">
+        <svg viewBox="0 0 48 48" aria-hidden="true">
+          <defs><linearGradient id="lg-brand" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#5b8dff"/><stop offset="1" stop-color="#8b5cf6"/>
+          </linearGradient></defs>
+          <path fill="url(#lg-brand)" opacity=".92" d="M33.5 38h-19A10.5 10.5 0 1 1 16 17.1 13.2 13.2 0 0 1 41 24.4 8.4 8.4 0 0 1 33.5 38z"/>
+          <path fill="#fff" d="M24.4 14.5l5.8 5.8h-3.6v6.2h-4.4v-6.2h-3.6z"/>
+        </svg>
+      </div>
+      <h1>115 Tools</h1>
+      <p class="login-sub">网盘与本地媒体库的双向桥梁</p>
+      <input name="username" placeholder="账号" autocomplete="username" required>
+      <input name="password" type="password" placeholder="密码" autocomplete="current-password" required>
+      <button type="submit" class="btn primary block">登 录</button>
+    </form>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="app-view" class="layout" hidden>
+    <aside class="sidebar">
+      <div class="brand">
+        <svg class="brand-logo" viewBox="0 0 48 48" aria-hidden="true">
+          <defs><linearGradient id="lg-side" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#5b8dff"/><stop offset="1" stop-color="#8b5cf6"/>
+          </linearGradient></defs>
+          <path fill="url(#lg-side)" opacity=".92" d="M33.5 38h-19A10.5 10.5 0 1 1 16 17.1 13.2 13.2 0 0 1 41 24.4 8.4 8.4 0 0 1 33.5 38z"/>
+          <path fill="#fff" d="M24.4 14.5l5.8 5.8h-3.6v6.2h-4.4v-6.2h-3.6z"/>
+        </svg>
+        <span class="brand-text">115 Tools</span>
+        <span class="brand-ver"></span>
+      </div>
+      <nav id="nav">
+        <button class="nav-item active" data-view="tasks"><svg class="ic"><use href="#i-grid"/></svg> <span>任务中心</span></button>
+        <button class="nav-item" data-view="offline"><svg class="ic"><use href="#i-download"/></svg> <span>离线下载</span></button>
+        <button class="nav-item" data-view="stash"><svg class="ic"><use href="#i-folder"/></svg> <span>本地缓存</span></button>
+        <button class="nav-item" data-view="settings"><svg class="ic"><use href="#i-cog"/></svg> <span>设置</span></button>
+      </nav>
+      <div class="sidebar-foot">
+        <button id="theme-toggle" class="theme-toggle" title="切换主题（亮 / 暗 / 自动）">
+          <svg class="ic"><use href="#i-auto"/></svg>
+        </button>
+        <button id="logout-btn" class="nav-item" hidden><svg class="ic"><use href="#i-logout"/></svg> <span>退出登录</span></button>
+      </div>
+    </aside>
+
+    <main class="content">
+      <!-- 任务中心 -->
+      <section id="view-tasks" class="view">
+        <div class="view-head">
+          <h2><svg class="ic"><use href="#i-grid"/></svg>任务中心</h2>
+          <button class="btn primary" id="task-new"><svg class="ic"><use href="#i-plus"/></svg> 新建任务</button>
+        </div>
+        <div id="banners" class="banners"></div>
+        <div id="task-grid" class="task-grid"></div>
+        <div id="task-empty" class="empty-card" hidden>
+          <svg class="empty-art" viewBox="0 0 120 90" aria-hidden="true">
+            <defs>
+              <linearGradient id="le-a" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#5b8dff"/><stop offset="1" stop-color="#8b5cf6"/>
+              </linearGradient>
+            </defs>
+            <path fill="url(#le-a)" opacity=".18" d="M78 68H38a20 20 0 1 1 4.2-39.5A25 25 0 0 1 91 41a16 16 0 0 1-13 27z"/>
+            <path fill="url(#le-a)" opacity=".55" d="M78 68H38a20 20 0 1 1 4.2-39.5A25 25 0 0 1 91 41a16 16 0 0 1-13 27z" transform="scale(.62) translate(34 30)"/>
+            <circle cx="88" cy="30" r="5" fill="#fbbf24" opacity=".7"/>
+            <circle cx="28" cy="56" r="4" fill="#a78bfa" opacity=".6"/>
+            <path d="M58 46v14" stroke="#5b8dff" stroke-width="3" stroke-linecap="round"/>
+            <path d="m52 53 6 7 6-7" stroke="#5b8dff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+          <p class="empty-title">还没有同步任务</p>
+          <p class="muted">绑定一对本地目录与云端目录，即可开启自动同步</p>
+          <button class="btn primary" id="empty-new"><svg class="ic"><use href="#i-plus"/></svg> 新建任务</button>
+        </div>
+        <!-- 系统级错误/警告日志：单独展示，与顶部配置横幅区分 -->
+        <div class="card" id="system-logs">
+          <div class="card-head">
+            <h3><span class="hl-dot"></span>错误警告日志</h3>
+            <button class="btn sm danger" id="system-logs-clear">清空</button>
+          </div>
+          <div id="system-log-list" class="log-box"></div>
+        </div>
+      </section>
+
+      <!-- 离线下载 -->
+      <section id="view-offline" class="view" hidden>
+        <div class="view-head">
+          <h2><svg class="ic"><use href="#i-download"/></svg>离线下载 <small class="muted" id="offline-quota"></small></h2>
+        </div>
+        <form id="offline-add-form" name="offline-add" class="card add-card">
+          <div class="card-title"><span class="hl-dot"></span>新建离线任务</div>
+          <div class="form-grid">
+            <label class="col-2">下载链接
+              <small class="muted">每行一条，支持 http / magnet / ed2k</small>
+              <textarea id="offline-urls" name="urls" rows="4" placeholder="magnet:?xt=urn:btih:..."></textarea>
+            </label>
+            <label>种子文件（.torrent）
+              <small class="muted">上传 .torrent，与链接二选一</small>
+              <input id="offline-torrent" type="file" name="torrent" accept=".torrent">
+            </label>
+            <label>保存到云端目录
+              <small class="muted">留空默认云端根 /</small>
+              <input id="offline-save-path" name="save_path" placeholder="/影视/下载">
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn primary"><svg class="ic"><use href="#i-plus"/></svg> 添加任务</button>
+          </div>
+        </form>
+        <div class="card">
+          <div class="card-head">
+            <h3><span class="hl-dot"></span>任务列表</h3>
+            <div class="row">
+              <button class="btn sm" id="offline-refresh"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
+              <button class="btn sm" data-clear="0">清除已完成</button>
+              <button class="btn sm" data-clear="2">清除失败</button>
+              <button class="btn sm danger" data-clear="1">清空全部</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>名称</th><th>大小</th><th>进度</th><th>状态</th><th class="ta-r">操作</th></tr>
+              </thead>
+              <tbody id="offline-tbody"></tbody>
+            </table>
+          </div>
+          <div class="row pager">
+            <button class="btn sm" id="page-prev">上一页</button>
+            <span id="page-info" class="muted"></span>
+            <button class="btn sm" id="page-next">下一页</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 本地缓存 -->
+      <section id="view-stash" class="view" hidden>
+        <div class="view-head">
+          <h2><svg class="ic"><use href="#i-folder"/></svg>本地缓存 <small class="muted" id="stash-summary"></small></h2>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h3><span class="hl-dot"></span>缓存列表</h3>
+            <div class="row">
+              <button class="btn sm" id="stash-refresh"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
+              <button class="btn sm danger" id="stash-delete-selected" disabled>删除选中</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th style="width:40px"><input type="checkbox" id="stash-check-all"></th>
+                  <th>文件名</th><th>大小</th><th>过期时间</th></tr>
+              </thead>
+              <tbody id="stash-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section id="view-settings" class="view" hidden>
+        <div class="view-head">
+          <h2><svg class="ic"><use href="#i-cog"/></svg>设置</h2>
+        </div>
+        <form id="config-form" name="config" class="config-form">
+          <fieldset>
+            <legend>账号凭证 <small class="muted">保存后重建任务</small></legend>
+            <div class="form-grid">
+              <label class="col-2"><span class="req">*</span> refresh_token
+                <small class="muted">115 开放平台刷新令牌，换取访问令牌</small>
+                <input name="refresh_token" type="password" autocomplete="off">
+              </label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>同步配置 <small class="muted">* 为必填项，缺一同步不会启动</small></legend>
+            <div class="form-grid">
+              <label><span class="req">*</span> strm_url
+                <small class="muted">STRM 链接前缀（/download 直链地址）</small>
+                <input name="strm_url" placeholder="http://设备IP:端口号">
+              </label>
+              <label><span class="req">*</span> temp_dir
+                <small class="muted">云端回收目录（清理视频时移入，可找回）</small>
+                <input name="temp_dir" placeholder="/Temp">
+              </label>
+              <label><span class="req">*</span> cache_dir
+                <small class="muted">本地透传缓存目录（上传视频暂存，命中直读）</small>
+                <input name="cache_dir" placeholder="/mnt/cache">
+              </label>
+              <label>缓存保留天数
+                <small class="muted">本地缓存视频保留 N 天；0=默认1</small>
+                <input name="cache_retention_days" type="number" min="0">
+              </label>
+              <label>离线下载默认目录
+                <small class="muted">离线任务保存目录，留空默认云端根 /</small>
+                <input name="offline_dir" placeholder="/影视/下载">
+              </label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>视频文件扩展名</legend>
+            <div class="form-grid">
+              <label class="col-2">扩展名
+                <small class="muted">逗号分隔，如 .mp4, .mkv</small>
+                <input name="video_exts" placeholder=".mp4, .mkv, ...">
+              </label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>上传排除</legend>
+            <div class="form-grid">
+              <label class="col-2">后缀
+                <small class="muted">逗号分隔，如 .part, .crdownload, .DS_Store</small>
+                <input name="upload_exclude" placeholder=".part, .crdownload, ...">
+              </label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>登录验证 <small class="muted">用户名留空则关闭验证</small></legend>
+            <div class="form-grid">
+              <label>用户名
+                <input name="auth_username" autocomplete="off">
+              </label>
+              <label>密码
+                <small class="muted">设置用户名后必填</small>
+                <input name="auth_password" type="password" placeholder="留空则保持不变" autocomplete="new-password">
+              </label>
+            </div>
+          </fieldset>
+          <div class="form-actions">
+            <button type="submit" class="btn primary">保存配置</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <!-- 任务编辑弹窗 -->
+  <dialog id="task-dialog">
+    <form method="dialog" id="task-form">
+      <div class="dlg-head">
+        <h3 id="task-dialog-title">新建任务</h3>
+        <button type="button" class="btn ghost icon-only" data-close="task-dialog"><svg class="ic"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="dlg-body">
+        <fieldset>
+          <legend><span class="hl-dot"></span>基础信息</legend>
+          <div class="form-grid">
+            <label>任务名<input name="name" required placeholder="如：媒体库"></label>
+            <label>类型
+              <select name="kind">
+                <option value="push">本地同步（本地 → 云端）</option>
+                <option value="pull">云端同步（云端 → 本地）</option>
+              </select>
+            </label>
+            <label class="col-2">本地目录
+              <small class="muted">本地文件系统绝对路径</small>
+              <input name="local_dir" placeholder="/媒体库" required>
+            </label>
+            <label class="col-2">云端目录
+              <small class="muted">115 网盘绝对路径，以 / 开头</small>
+              <input name="cloud_dir" placeholder="/媒体库" required>
+            </label>
+            <label class="chk col-2"><input type="checkbox" name="enabled" checked> 启用任务</label>
+          </div>
+        </fieldset>
+
+        <fieldset data-group="push">
+          <legend><span class="hl-dot"></span>本地方向（本地 → 云端）</legend>
+          <div class="form-grid">
+            <label class="chk"><input type="checkbox" name="watch_enabled" checked> 文件事件监听</label>
+            <label>监听静默时间
+              <small class="muted">分钟；0=默认10</small>
+              <input name="debounce_minutes" type="number" min="0" value="10">
+            </label>
+            <label class="chk"><input type="checkbox" name="strm_now"> .strm 立即同步</label>
+            <label class="chk"><input type="checkbox" name="video_now" checked> 视频立即同步</label>
+            <label class="chk"><input type="checkbox" name="rescan_enabled" checked> 定时全量扫描</label>
+            <label>扫描间隔
+              <small class="muted">小时；0=默认12</small>
+              <input name="rescan_interval_hours" type="number" min="0" value="12">
+            </label>
+            <label class="chk col-2"><input type="checkbox" name="rescan_then_pull"> 全量扫描后扫描云端</label>
+            <label class="chk"><input type="checkbox" name="to_strm" checked> 生成 STRM 文件
+              <small class="muted">关=保留原视频（纯云端备份）</small>
+            </label>
+            <label class="chk"><input type="checkbox" name="to_cache" checked> 上传后移入 cache 目录
+              <small class="muted">关=删除原视频</small>
+            </label>
+          </div>
+        </fieldset>
+
+        <!-- 附带云端扫描：仅 push 任务勾选「全量扫描后扫描云端」时显示；触发时机与间隔随上方全量扫描走 -->
+        <fieldset data-group="attach" hidden>
+          <legend><span class="hl-dot"></span>附带云端扫描（随全量扫描执行）</legend>
+          <div class="form-grid">
+            <label class="chk"><input type="checkbox" name="drop_redundant"> 冗余文件删除
+              <small class="muted">本地已有记录但云端同名文件不一致时，删除云端多余副本</small>
+            </label>
+            <label class="chk"><input type="checkbox" name="attach_to_strm" checked> 生成 STRM 文件
+              <small class="muted">关=下载原视频</small>
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset data-group="pull" hidden>
+          <legend><span class="hl-dot"></span>云端方向（云端 → 本地）</legend>
+          <div class="form-grid">
+            <label class="chk"><input type="checkbox" name="pull_cron_enabled"> 定时同步</label>
+            <label>同步间隔
+              <small class="muted">小时；0=默认12</small>
+              <input name="pull_cron_interval_hours" type="number" min="0" value="12">
+            </label>
+            <label class="chk"><input type="checkbox" name="pull_to_strm" checked> 生成 STRM 文件
+              <small class="muted">关=下载原视频</small>
+            </label>
+            <label class="chk"><input type="checkbox" name="archive_to_temp"> 同步后移动到 temp 目录
+              <small class="muted">完成后把云端顶层项移入回收目录</small>
+            </label>
+          </div>
+        </fieldset>
+      </div>
+      <div class="form-actions dlg-foot">
+        <button type="button" class="btn ghost" data-close="task-dialog">取消</button>
+        <button type="submit" class="btn primary" id="task-save">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 执行历史弹窗 -->
+  <dialog id="history-dialog">
+    <div class="dlg-head">
+      <h3 id="history-dialog-title">执行历史</h3>
+      <button type="button" class="btn ghost icon-only" data-close="history-dialog"><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="dlg-body">
+      <div id="history-list" class="history-list"></div>
+      <div id="run-log" class="run-log" hidden></div>
+    </div>
+    <div class="form-actions dlg-foot">
+      <button type="button" class="btn sm danger" id="history-clear">清空该任务日志</button>
+      <button type="button" class="btn primary" data-close="history-dialog">关闭</button>
+    </div>
+  </dialog>
+
+  <div id="toast-box"></div>
+</body>
+</html>
