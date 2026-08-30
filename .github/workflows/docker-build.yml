@@ -3,6 +3,12 @@ name: Docker 镜像构建
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      version:
+        description: '版本号（如 0.1.0，不填则只用 latest）'
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       version:
@@ -44,12 +50,13 @@ jobs:
           BASE="ghcr.io/${{ github.repository }}"
           if [ "${{ github.event_name }}" = "push" ]; then
             VER="${GITHUB_REF_NAME#v}"
-            echo "tags=${BASE}:${VER},${BASE}:latest" >> $GITHUB_OUTPUT
-          elif [ -n "${{ inputs.version }}" ]; then
-            VER="${{ inputs.version }}"
-            echo "tags=${BASE}:${VER},${BASE}:latest" >> $GITHUB_OUTPUT
           else
-            echo "tags=${BASE}:latest" >> $GITHUB_OUTPUT
+            VER="${{ inputs.version }}"
+          fi
+          if [ -n "$VER" ]; then
+            echo "tags=${BASE}:${VER},${BASE}:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${BASE}:latest" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 构建并推送

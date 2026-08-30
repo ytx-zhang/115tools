@@ -1,7 +1,10 @@
 name: 发版（代码版本驱动）
 
-# 代码即真相：push 到 main 时读取 internal/version.Version，
-# 若与最近 tag 不同则自动打 vX.Y.Z 并推送；tag 推送会触发 docker-build.yml 构建镜像。
+# 代码即真相：push 到 main 时读取 internal/version.Version，若与最近 tag 不同则自动打 vX.Y.Z。
+# 注意：用 GITHUB_TOKEN 推送的 tag 不会再触发其它工作流（GitHub 明确行为，例外只有
+# workflow_dispatch / repository_dispatch），所以这里打完 tag 后改用 workflow_call 直接调用
+# docker-build.yml 构建镜像。若自己用本人凭据 push tag，则由 tag push 事件触发构建，
+# release 任务会判定「版本未变化」跳过，不会重复构建。
 on:
   push:
     branches: [main]
@@ -12,6 +15,9 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tagged: ${{ steps.tag.outputs.tagged }}
     steps:
       - name: 检出代码（含标签历史）
         uses: actions/checkout@v6
@@ -27,6 +33,7 @@ jobs:
           echo "代码版本: $V"
 
       - name: 与最近 tag 比较，必要时打 tag
+        id: tag
         env:
           V: ${{ steps.ver.outputs.version }}
         run: |
@@ -37,7 +44,19 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git tag "v$V"
             git push origin "v$V"
-            echo "已创建并推送 tag v$V（将触发镜像构建）"
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+            echo "已创建并推送 tag v$V（随后直接调用镜像构建）"
           else
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
             echo "版本未变化，跳过打 tag"
           fi
+
+  build:
+    needs: release
+    if: needs.release.outputs.tagged == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
