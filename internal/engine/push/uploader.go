@@ -52,25 +52,21 @@ type upJob struct {
 	path      string
 }
 
-// AddUpFile 投递一个已判定「需上传」的任务并计数。batch 非 nil 时入批并上报进度。
-func (u *Uploader) AddUpFile(ctx context.Context, batch *sync.WaitGroup, parentFid, fPath string) {
+// AddUpFile 投递一个已判定「需上传」的任务：同文件已在传/排队则跳过。
+// 入本批（可 Wait 等完成）；是否计入任务进度由 batch 自身的 count 决定。
+func (u *Uploader) AddUpFile(ctx context.Context, batch *UpBatch, parentFid, fPath string) {
 	if _, loaded := inFlight.LoadOrStore(fPath, struct{}{}); loaded {
 		return
 	}
-	quiet := batch == nil
-	if !quiet {
+	if batch.count {
 		u.prog.AddTotal(1)
 	}
-	if batch != nil {
-		batch.Add(1)
-	}
+	batch.add()
 	go func() {
 		defer inFlight.Delete(fPath)
-		if batch != nil {
-			defer batch.Done()
-		}
+		defer batch.done()
 		u.DoUpload(upJob{ctx: ctx, parentFid: parentFid, path: fPath})
-		if !quiet {
+		if batch.count {
 			u.prog.AddCompleted(1)
 		}
 	}()

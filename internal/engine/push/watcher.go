@@ -22,7 +22,8 @@ type Watcher struct {
 	dirPool *DirPool
 	running func() bool // 本任务 pull 是否运行中（互斥判定）
 	opts    Opts
-	arm     func(string) // 登记父目录进防抖合集（Pump 构造 batcher 后注入）
+	arm     func(string)                  // 登记父目录进防抖合集（Pump 构造 batcher 后注入）
+	direct  func(context.Context, string) // 监听直传执行器（任务单元注入：开一条执行历史承载直传日志）
 }
 
 // NewWatcher 构造监听模块。
@@ -36,6 +37,9 @@ func (w *Watcher) armParent(p string) {
 		w.arm(filepath.Dir(p))
 	}
 }
+
+// OnDirect 注入监听直传执行器：由任务单元提供，负责为单次直传开一条执行历史。
+func (w *Watcher) OnDirect(fn func(context.Context, string)) { w.direct = fn }
 
 // cacheExcludeFilter 实现 fswatcher.PathFilter：按路径前缀忽略本地缓存目录子树。
 type cacheExcludeFilter struct {
@@ -73,7 +77,7 @@ func (w *Watcher) Pump(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-batcher.Kick():
-				w.flushDirs(batcher.Take(), batcher.Arm)
+				w.flushDirs(ctx, batcher.Take(), batcher.Arm)
 			}
 		}
 	}()
@@ -95,41 +99,45 @@ func (w *Watcher) Pump(ctx context.Context) {
 
 // dispatch 分流单个事件：视频/strm 按立即同步开关直传；其余收集父目录进防抖合集。
 func (w *Watcher) dispatch(ctx context.Context, p string) {
-	if w.opts.VideoNow && w.rules.IsVideoExt(p) {
-		go w.uploadVideo(ctx, p)
-		return
-	}
-	if w.opts.StrmNow && shared.IsStrmPath(p) {
-		go w.uploadVideo(ctx, p)
+	if (w.opts.VideoNow && w.rules.IsVideoExt(p)) || (w.opts.StrmNow && shared.IsStrmPath(p)) {
+		go w.uploadNow(ctx, p)
 		return
 	}
 	w.arm(filepath.Dir(p))
 }
 
-// uploadVideo 单文件直传：确保父目录 + 投递给上传模块；防双传交给 uploader 的 inFlight 去重。
-func (w *Watcher) uploadVideo(ctx context.Context, fPath string) {
+// uploadNow 触发单文件直传：交给注入的执行器（任务单元为它单开一条执行历史）。
+func (w *Watcher) uploadNow(ctx context.Context, fPath string) {
 	// 本任务 pull 运行中让路：登记父目录进防抖合集，pull 结束后随目录扫描统一处理。
 	if w.running() {
 		w.arm(filepath.Dir(fPath))
 		return
 	}
+	if w.direct == nil {
+		return
+	}
+	w.direct(ctx, fPath)
+}
+
+// DirectFile 直传单个文件：取本地现状 + 索引记录，判定与动作交给扫描器的统一收敛点
+// （与全量扫描同一条路径），再等本次上传完成。
+// 由任务单元在一条执行历史的上下文中调用（故日志归入该次执行）；防双传交给 uploader 的 inFlight 去重。
+func (w *Watcher) DirectFile(ctx context.Context, batch *UpBatch, fPath string) {
 	fileInfo, err := os.Stat(fPath)
 	if err != nil {
+		// 本地已不存在：登记父目录走防抖扫描，并把「已删」交给统一判定点处理
 		w.armParent(fPath)
 		dbFid, dbSize := w.sc.idx.Get(ctx, fPath)
-		w.sc.HandleFile(ctx, nil, fPath, dbFid, dbSize, nil)
-		return
+		w.sc.HandleEntry(ctx, batch, fPath, dbFid, dbSize, nil)
+	} else {
+		dbFid, dbSize := w.sc.idx.Get(ctx, fPath)
+		w.sc.HandleEntry(ctx, batch, fPath, dbFid, dbSize, fileInfoEntry{name: filepath.Base(fPath), info: fileInfo})
 	}
-	if _, err := w.co.AddCloudFolder(ctx, filepath.Dir(fPath)); err != nil {
-		journal.Warn(ctx, "视频直传跳过：无法获取父目录 FID", "路径", fPath, "错误", err)
-		return
-	}
-	dbFid, dbSize := w.sc.idx.Get(ctx, fPath)
-	w.sc.HandleFile(ctx, nil, fPath, dbFid, dbSize, fileInfo)
+	batch.Wait() // 等本次投递的上传完成，保证收尾时日志已齐全
 }
 
 // flushDirs 防抖批量处理一批目录：逐个投进目录池，由任务单元消费循环串行消化。
-func (w *Watcher) flushDirs(folders []string, rearm func(string)) {
+func (w *Watcher) flushDirs(ctx context.Context, folders []string, rearm func(string)) {
 	if w.running() {
 		for _, f := range folders {
 			rearm(f)
@@ -138,7 +146,7 @@ func (w *Watcher) flushDirs(folders []string, rearm func(string)) {
 	}
 	for _, f := range folders {
 		if _, statErr := os.Stat(f); statErr != nil {
-			journal.Debug(context.Background(), "待处理目录本地已不存在", "路径", f, "错误", statErr)
+			journal.Debug(ctx, "待处理目录本地已不存在", "路径", f, "错误", statErr)
 			if f != w.paths.LocalDir {
 				if parent := filepath.Dir(f); parent != "." {
 					rearm(parent)
