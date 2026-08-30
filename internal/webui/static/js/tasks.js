@@ -90,24 +90,32 @@ function renderGrid() {
   empty.hidden = taskConfigs.length > 0;
 }
 
+// cardState 由运行时快照推出卡片展示态：初始化中优先于运行中/空闲，此时禁止执行。
+function cardState(rt) {
+  if (rt?.initializing) return { cls: 'init', text: '初始化中', running: false, disabled: true };
+  if (rt?.running) return { cls: 'run', text: '运行中', running: true, disabled: false };
+  return { cls: '', text: '空闲', running: false, disabled: false };
+}
+
 // updateCard 只更新卡片动态部分（状态徽章/进度/数字/运行按钮）。
 function updateCard(e, rt) {
-  const running = rt?.running;
+  const st = cardState(rt);
   const total = rt?.total || 0;
   const done = rt?.completed || 0;
-  e.badge.className = 'badge' + (running ? ' run' : '');
-  e.badge.textContent = running ? '运行中' : '空闲';
+  e.badge.className = ('badge ' + st.cls).trim();
+  e.badge.textContent = st.text;
   e.fill.style.width = total ? Math.min(100, done / total * 100) + '%' : '0%';
   e.nums.textContent = `${done} / ${total}`;
   // 按钮文本就地更新（保留 SVG 图标；不可用 textContent 赋值——会清空子节点导致 use 丢失）
-  const label = running ? '停止' : '执行';
+  const label = st.running ? '停止' : '执行';
   const last = e.runBtn.lastChild;
   if (last && last.nodeType === Node.TEXT_NODE) last.textContent = label;
   else e.runBtn.appendChild(document.createTextNode(label));
-  e.runBtn.className = 'btn sm ' + (running ? 'danger' : 'primary');
-  e.runBtn.dataset.action = running ? 'stop' : 'start';
+  e.runBtn.className = 'btn sm ' + (st.running ? 'danger' : 'primary');
+  e.runBtn.disabled = st.disabled;
+  e.runBtn.dataset.action = st.running ? 'stop' : 'start';
   const use = e.runBtn.querySelector('use');
-  use.setAttribute('href', running ? '#i-stop' : '#i-play');
+  use.setAttribute('href', st.running ? '#i-stop' : '#i-play');
 }
 
 // ──── 程序日志（无任务上下文的系统级日志：落库、筛选、跟随、向上加载更早） ────
@@ -230,11 +238,11 @@ function createCard(t, rt) {
   dirs.append(dirSpan('#i-cloud', '云端', t.cloud_dir));
 
   // 状态
-  const running = rt?.running;
+  const st = cardState(rt);
   const total = rt?.total || 0;
   const done = rt?.completed || 0;
   const status = el('div', 'tc-status');
-  const badge = el('span', 'badge ' + (running ? 'run' : ''), running ? '运行中' : '空闲');
+  const badge = el('span', ('badge ' + st.cls).trim(), st.text);
   const bar = el('div', 'progress');
   const fill = el('i');
   fill.style.width = total ? Math.min(100, done / total * 100) + '%' : '0%';
@@ -244,8 +252,9 @@ function createCard(t, rt) {
 
   // 操作（SVG 图标按钮）
   const actions = el('div', 'tc-actions');
-  const runBtn = btnWithIcon('btn sm ' + (running ? 'danger' : 'primary'), running ? '停止' : '执行',
-    running ? '#i-stop' : '#i-play', { action: running ? 'stop' : 'start', id: t.id });
+  const runBtn = btnWithIcon('btn sm ' + (st.running ? 'danger' : 'primary'), st.running ? '停止' : '执行',
+    st.running ? '#i-stop' : '#i-play', { action: st.running ? 'stop' : 'start', id: t.id });
+  runBtn.disabled = st.disabled; // 初始化中不可执行（单元未就绪）
   const logBtn = btnWithIcon('btn sm', '日志', '#i-clock', { action: 'history', id: t.id });
   const editBtn = btnWithIcon('btn sm', '编辑', '#i-edit', { action: 'edit', id: t.id });
   const delBtn = btnWithIcon('btn sm danger', '删除', '#i-trash', { action: 'delete', id: t.id });

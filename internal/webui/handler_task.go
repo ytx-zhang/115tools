@@ -18,14 +18,16 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	type item struct {
 		conf.Task
-		Running   bool  `json:"running"`
-		Completed int64 `json:"completed"`
-		Total     int64 `json:"total"`
+		Running      bool  `json:"running"`
+		Initializing bool  `json:"initializing"`
+		Completed    int64 `json:"completed"`
+		Total        int64 `json:"total"`
 	}
 	out := make([]item, 0, len(tasks))
 	for _, t := range tasks {
 		rt := runtime[t.ID]
-		out = append(out, item{Task: t, Running: rt.Running, Completed: rt.Completed, Total: rt.Total})
+		out = append(out, item{Task: t, Running: rt.Running, Initializing: rt.Initializing,
+			Completed: rt.Completed, Total: rt.Total})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tasks": out})
 }

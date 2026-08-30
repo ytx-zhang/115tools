@@ -230,6 +230,7 @@
   .badge.ok   { background: var(--green-soft);   color: var(--green); }
   .badge.err  { background: var(--red-soft);     color: var(--red); }
   .badge.warn { background: var(--yellow-soft);  color: var(--yellow); }
+  .badge.init { background: var(--yellow-soft);  color: var(--yellow);  animation: pulse 1.5s ease-in-out infinite; }
   .badge.push { background: var(--accent-soft);  color: var(--accent); }
   .badge.pull { background: var(--purple-soft);  color: var(--purple); }
 

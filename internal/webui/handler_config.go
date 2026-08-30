@@ -61,17 +61,8 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		writeOK(w, http.StatusOK)
 		return
 	}
-	// 幂等启动引擎（首次完备时 Init + Start）
-	if err := s.Engine.EnsureRunning(); err != nil {
-		s.SetInitError(err.Error())
-		writeErr(w, http.StatusInternalServerError, "初始化失败: %v", err)
-		return
-	}
-	// 全局设置变更 → 重建全部任务单元（规则/strm_url/temp_dir 可能变化）
-	if err := s.Engine.ReloadAll(); err != nil {
-		s.SetInitError(err.Error())
-		writeErr(w, http.StatusInternalServerError, "重建任务失败: %v", err)
-		return
-	}
+	// 幂等启动引擎（首次完备时 Init + Start）+ 重建全部任务单元（规则/strm_url/temp_dir 可能变化）。
+	// 二者都可能耗时数分钟 → 后台执行，保存立即返回；失败走 SSE 横幅与程序日志。
+	s.startEngineAsync()
 	writeOK(w, http.StatusOK)
 }

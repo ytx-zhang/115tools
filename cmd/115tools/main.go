@@ -94,12 +94,7 @@ func main() {
 		Hub:     hub,
 	})
 
-	// 8. 初始化（配置完备且凭证有效才启动引擎）
-	if err := bootstrap(appCtx, cfg, api, eng); err != nil {
-		server.SetInitError(err.Error())
-		journal.Error(appCtx, "初始化失败", "错误", err)
-	}
-
+	// 8. Web 服务先启动：初始化可能耗时数分钟（首次构建云端索引），不能挡住端口监听
 	httpServer := &http.Server{Addr: ":" + *port, Handler: mux}
 	go func() {
 		journal.Info(appCtx, "Web 服务启动", "地址", httpServer.Addr)
@@ -108,7 +103,14 @@ func main() {
 		}
 	}()
 
-	// 9. 等待退出信号，优雅关闭
+	// 9. 初始化（后台执行：配置完备且凭证有效才启动引擎，过程与失败都进程序日志）
+	go func() {
+		if err := bootstrap(appCtx, cfg, api, eng); err != nil {
+			server.ReportInitError("初始化失败: " + err.Error())
+		}
+	}()
+
+	// 10. 等待退出信号，优雅关闭
 	<-appCtx.Done()
 	journal.Info(appCtx, "正在优雅关闭...")
 	eng.Shutdown()

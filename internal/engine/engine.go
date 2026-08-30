@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/ytx-zhang/115tools/internal/conf"
 	"github.com/ytx-zhang/115tools/internal/engine/shared"
@@ -23,12 +24,13 @@ import (
 
 // TaskRuntime 单任务运行时状态（供 webui 的 SSE 推送）。
 type TaskRuntime struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Type      string `json:"type"`
-	Running   bool   `json:"running"`
-	Completed int64  `json:"completed"`
-	Total     int64  `json:"total"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Type         string `json:"type"`
+	Running      bool   `json:"running"`
+	Initializing bool   `json:"initializing"` // 初始化中：已登记但未就绪，此时不可执行
+	Completed    int64  `json:"completed"`
+	Total        int64  `json:"total"`
 }
 
 // Engine 任务引擎（组合根：管理全部任务单元）。
@@ -77,15 +79,44 @@ func (e *Engine) Init(ctx context.Context) error {
 		if !t.Enabled {
 			continue
 		}
-		u := e.newUnit(t)
-		if err := u.init(ctx); err != nil {
-			return fmt.Errorf("初始化任务 %s 失败: %w", t.Name, err)
+		if _, err := e.initUnit(ctx, t); err != nil {
+			return err
 		}
-		e.mu.Lock()
-		e.units[t.ID] = u
-		e.mu.Unlock()
 	}
 	return nil
+}
+
+// initUnit 登记并初始化一个任务单元：期间单元在状态里带「初始化中」标记（前端卡片据此显示），
+// 前后各广播一次；失败则摘除单元并带上任务名。
+func (e *Engine) initUnit(ctx context.Context, t conf.Task) (*TaskUnit, error) {
+	u := e.newUnit(t)
+	u.initializing.Store(true)
+	e.mu.Lock()
+	e.units[t.ID] = u
+	e.mu.Unlock()
+	e.notify()
+
+	start := time.Now()
+	journal.Info(ctx, "任务初始化开始", "任务", t.Name, "本地", t.LocalDir, "云端", t.CloudDir)
+	err := u.init(ctx)
+	u.initializing.Store(false)
+	if err != nil {
+		e.popUnit(t.ID)
+		journal.Error(ctx, "任务初始化失败", "任务", t.Name, "耗时", time.Since(start), "错误", err)
+	}
+	e.notify()
+	if err != nil {
+		return nil, fmt.Errorf("初始化任务 %s 失败: %w", t.Name, err)
+	}
+	journal.Info(ctx, "任务初始化完成", "任务", t.Name, "耗时", time.Since(start))
+	return u, nil
+}
+
+// notify 广播状态变更（SSE 推给前端）。
+func (e *Engine) notify() {
+	if e.onChange != nil {
+		e.onChange()
+	}
 }
 
 // resolveTempFid 解析全局回收目录 FID：已存在直接取，否则逐级创建。
@@ -184,22 +215,17 @@ func (e *Engine) ReloadTask(task conf.Task) error {
 		return nil
 	}
 
-	u := e.newUnit(task)
-	if err := u.init(e.appCtx); err != nil {
-		return fmt.Errorf("初始化任务 %s 失败: %w", task.Name, err)
+	u, err := e.initUnit(e.appCtx, task)
+	if err != nil {
+		return err
 	}
-	e.mu.Lock()
-	e.units[task.ID] = u
-	e.mu.Unlock()
 
 	if started {
 		var wg sync.WaitGroup
 		u.start(e.appCtx, &wg)
 		e.appWg.Go(wg.Wait)
 	}
-	if e.onChange != nil {
-		e.onChange()
-	}
+	e.notify()
 	return nil
 }
 

@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/ytx-zhang/115tools/internal/cache"
@@ -43,6 +44,9 @@ type Server struct {
 	Deps
 	sessions sessionStore
 	initErr  atomic.Pointer[string]
+
+	reloadMu      sync.Mutex // 串行化后台的「启动引擎 + 重建任务」
+	reloadPending bool       // 已有待执行的重建（连续保存合并为一轮）
 }
 
 // Register 注册全部路由到 mux。
@@ -94,6 +98,45 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 
 // SetInitError 设置初始化错误（供 SSE 推送）。
 func (s *Server) SetInitError(msg string) { s.initErr.Store(&msg) }
+
+// ReportInitError 上报初始化/重建失败：落横幅文案 + 进程序日志 + 广播（前端顶部立即显示）。
+func (s *Server) ReportInitError(msg string) {
+	s.SetInitError(msg)
+	journal.Error(s.AppCtx, msg)
+	if s.Hub != nil {
+		s.Hub.Publish()
+	}
+}
+
+// startEngineAsync 后台启动引擎并重建任务单元（保存配置后调用，不阻塞 HTTP 请求）。
+//
+// 引擎初始化/重建可能耗时数分钟（首次构建云端索引），挂在保存请求上会让页面卡死；
+// 进度与结果走程序日志 + SSE（任务卡片显示「初始化中」，失败时顶部横幅）。
+// 已有待执行的重建时直接合并返回——配置已落盘，待执行那轮会读到最新配置。
+func (s *Server) startEngineAsync() {
+	s.reloadMu.Lock()
+	if s.reloadPending {
+		s.reloadMu.Unlock()
+		return
+	}
+	s.reloadPending = true
+	s.reloadMu.Unlock()
+
+	go func() {
+		defer func() {
+			s.reloadMu.Lock()
+			s.reloadPending = false
+			s.reloadMu.Unlock()
+		}()
+		if err := s.Engine.EnsureRunning(); err != nil {
+			s.ReportInitError("初始化失败: " + err.Error())
+			return
+		}
+		if err := s.Engine.ReloadAll(); err != nil {
+			s.ReportInitError("重建任务失败: " + err.Error())
+		}
+	}()
+}
 
 func (s *Server) getInitError() string {
 	if p := s.initErr.Load(); p != nil {
