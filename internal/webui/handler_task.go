@@ -146,7 +146,7 @@ func (s *Server) handleTaskRunLogs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "seq 非法")
 		return
 	}
-	logs, err := s.Journal.Logs(seq)
+	logs, err := s.Journal.Logs(r.PathValue("id"), seq)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "读取执行日志失败: %v", err)
 		return

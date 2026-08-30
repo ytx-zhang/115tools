@@ -83,7 +83,7 @@ func (h *handler) Handle(ctx context.Context, r slog.Record) error {
 		attrs := formatAttrs(r)
 		if tc, ok := taskFromCtx(ctx); ok {
 			if s := store.Load(); s != nil {
-				s.AppendLog(tc.runSeq, r.Level.String(), r.Message, attrs)
+				s.AppendLog(tc.taskID, tc.runSeq, r.Level.String(), r.Message, attrs)
 			}
 		} else if r.Level >= slog.LevelWarn {
 			pushBanner(r.Level.String(), r.Message, attrs)

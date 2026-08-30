@@ -15,10 +15,24 @@ import (
 // 每 run 明细日志落盘上限：超出丢弃最旧，避免一次超大执行撑爆 journal.db。
 const maxRunLogs = 1000
 
+// seqKeyLen run 键（8 字节大端 uint64）长度。
+const seqKeyLen = 8
+
 var (
 	runsBucket    = []byte("runs")
 	runLogsBucket = []byte("runlogs")
+	metaBucket    = []byte("meta")
 )
+
+var (
+	schemaKey     = []byte("schema")
+	seqCounterKey = []byte("run_seq")
+)
+
+// schemaV2 库结构版本 v2：run 序号全局唯一。
+// v1 的 seq 取自各任务桶自己的 NextSequence，跨任务必然重复（A、B 都有 seq=1），
+// 而明细日志以 seq 为全局键 → 后结束的 run 覆盖前一个的日志，任务日志串号。
+const schemaV2 = "2"
 
 // Store 执行历史与明细日志库（独立 bbolt 文件 journal.db）。
 // 运行中的 run 的明细日志驻留内存（running map），结束时整批落盘并释放。
@@ -51,14 +65,19 @@ func New(path string) (*Store, error) {
 	}
 	s := &Store{db: db, path: path, runs: make(map[uint64]*runBuffer)}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		if _, err := tx.CreateBucketIfNotExists(runsBucket); err != nil {
-			return err
+		for _, name := range [][]byte{runsBucket, runLogsBucket, metaBucket} {
+			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
+				return err
+			}
 		}
-		_, err := tx.CreateBucketIfNotExists(runLogsBucket)
-		return err
+		return nil
 	}); err != nil {
 		closeQuiet(db)
 		return nil, fmt.Errorf("初始化历史库失败: %w", err)
+	}
+	if err := s.applySchema(); err != nil {
+		closeQuiet(db)
+		return nil, err
 	}
 	if err := s.markInterrupted(); err != nil {
 		closeQuiet(db)
@@ -110,16 +129,112 @@ func (s *Store) markInterrupted() error {
 	})
 }
 
-// Begin 开始一次执行：分配 seq、落一条 running 记录、建立内存日志缓冲。返回 seq。
+// applySchema 保障库结构版本：初始化全局 seq 计数器，并在首次升级到 v2 时校正历史数据。
+func (s *Store) applySchema() error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		// 计数器必须始终不低于历史最大 seq，否则新 run 会撞上 v1 遗留的重复键。
+		if err := syncSeqCounter(tx); err != nil {
+			return err
+		}
+		if string(tx.Bucket(metaBucket).Get(schemaKey)) == schemaV2 {
+			return nil
+		}
+		if err := dropAmbiguousLogs(tx); err != nil {
+			return err
+		}
+		return tx.Bucket(metaBucket).Put(schemaKey, []byte(schemaV2))
+	})
+}
+
+// dropAmbiguousLogs 删除被多个任务的 run 共用的明细日志。
+// v1 下不同任务会有相同 seq，共用同一条 runlogs 记录（内容属于最后结束的那个 run），
+// 归属已不可判定，直接丢弃——宁可看不到，也不能把别的任务的日志显示出来。
+func dropAmbiguousLogs(tx *bbolt.Tx) error {
+	rb := tx.Bucket(runsBucket)
+	lb := tx.Bucket(runLogsBucket)
+	claims := make(map[uint64]int)
+	var dups [][]byte
+	err := rb.ForEach(func(taskK, _ []byte) error {
+		tb := rb.Bucket(taskK)
+		if tb == nil {
+			return nil
+		}
+		return tb.ForEach(func(k, _ []byte) error {
+			if len(k) != seqKeyLen {
+				return nil
+			}
+			seq := binary.BigEndian.Uint64(k)
+			claims[seq]++
+			if claims[seq] > 1 {
+				dups = append(dups, append([]byte(nil), k...))
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return err
+	}
+	for _, k := range dups {
+		if err := lb.Delete(k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// syncSeqCounter 把全局 seq 计数器抬升到不低于现有 run 的最大 seq。
+func syncSeqCounter(tx *bbolt.Tx) error {
+	rb := tx.Bucket(runsBucket)
+	mb := tx.Bucket(metaBucket)
+	var max uint64
+	if err := rb.ForEach(func(taskK, _ []byte) error {
+		tb := rb.Bucket(taskK)
+		if tb == nil {
+			return nil
+		}
+		return tb.ForEach(func(k, _ []byte) error {
+			if len(k) != seqKeyLen {
+				return nil
+			}
+			if seq := binary.BigEndian.Uint64(k); seq > max {
+				max = seq
+			}
+			return nil
+		})
+	}); err != nil {
+		return err
+	}
+	if v := mb.Get(seqCounterKey); len(v) == seqKeyLen && binary.BigEndian.Uint64(v) >= max {
+		return nil
+	}
+	var b [seqKeyLen]byte
+	binary.BigEndian.PutUint64(b[:], max)
+	return mb.Put(seqCounterKey, b[:])
+}
+
+// nextSeq 在写事务内分配一个全局唯一的 run 序号（计数器存于 meta 桶）。
+func nextSeq(tx *bbolt.Tx) (uint64, error) {
+	mb := tx.Bucket(metaBucket)
+	var n uint64
+	if v := mb.Get(seqCounterKey); len(v) == seqKeyLen {
+		n = binary.BigEndian.Uint64(v)
+	}
+	n++
+	var b [seqKeyLen]byte
+	binary.BigEndian.PutUint64(b[:], n)
+	return n, mb.Put(seqCounterKey, b[:])
+}
+
+// Begin 开始一次执行：分配全局唯一 seq、落一条 running 记录、建立内存日志缓冲。返回 seq。
 func (s *Store) Begin(r Run) (uint64, error) {
 	var seq uint64
 	err := s.db.Update(func(tx *bbolt.Tx) error {
-		rb := tx.Bucket(runsBucket)
-		tb, err := rb.CreateBucketIfNotExists([]byte(r.TaskID))
+		id, err := nextSeq(tx)
 		if err != nil {
 			return err
 		}
-		id, err := tb.NextSequence()
+		rb := tx.Bucket(runsBucket)
+		tb, err := rb.CreateBucketIfNotExists([]byte(r.TaskID))
 		if err != nil {
 			return err
 		}
@@ -206,12 +321,14 @@ func (s *Store) Finish(seq uint64, state State, c Counters, errMsg string) error
 	})
 }
 
-// AppendLog 向运行中的 run 追加一条明细日志（无对应 run 时静默忽略，例如 run 已结束后迟到的日志）。
-func (s *Store) AppendLog(seq uint64, level, msg, attrs string) {
+// AppendLog 向运行中的 run 追加一条明细日志。
+// taskID 用于校验归属：无对应 run 或 run 属于别的任务时静默忽略
+// （例如 run 已结束后迟到的日志，或 seq 意外撞号）。
+func (s *Store) AppendLog(taskID string, seq uint64, level, msg, attrs string) {
 	s.mu.Lock()
 	buf := s.runs[seq]
 	s.mu.Unlock()
-	if buf == nil {
+	if buf == nil || buf.taskID != taskID {
 		return
 	}
 	buf.mu.Lock()
@@ -248,18 +365,27 @@ func (s *Store) List(taskID string, limit int) ([]Run, error) {
 	return out, err
 }
 
-// Logs 返回某次执行的明细日志：运行中从内存取，已结束从 journal.db 取。
-func (s *Store) Logs(seq uint64) ([]LogEntry, error) {
+// Logs 返回某任务某次执行的明细日志：运行中从内存取，已结束从 journal.db 取。
+// taskID 用于校验归属，不属于该任务的 seq 一律返回空，杜绝任务间日志串号。
+func (s *Store) Logs(taskID string, seq uint64) ([]LogEntry, error) {
 	s.mu.Lock()
 	buf := s.runs[seq]
 	s.mu.Unlock()
 	if buf != nil {
+		if buf.taskID != taskID {
+			return nil, nil
+		}
 		buf.mu.Lock()
 		defer buf.mu.Unlock()
 		return append([]LogEntry(nil), buf.logs...), nil
 	}
 	var out []LogEntry
 	err := s.db.View(func(tx *bbolt.Tx) error {
+		rb := tx.Bucket(runsBucket)
+		tb := rb.Bucket([]byte(taskID))
+		if tb == nil || tb.Get(seqKey(seq)) == nil {
+			return nil // 该 seq 不属于本任务
+		}
 		raw := tx.Bucket(runLogsBucket).Get(seqKey(seq))
 		if raw == nil {
 			return nil
@@ -348,7 +474,7 @@ func (s *Store) maybePrune() {
 
 // seqKey 把 uint64 编码为 8 字节大端 key。
 func seqKey(seq uint64) []byte {
-	var b [8]byte
+	var b [seqKeyLen]byte
 	binary.BigEndian.PutUint64(b[:], seq)
 	return b[:]
 }
