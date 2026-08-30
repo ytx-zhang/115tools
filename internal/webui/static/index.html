@@ -397,11 +397,14 @@
         <fieldset data-group="attach" hidden>
           <legend><span class="hl-dot"></span>附带云端扫描（随全量扫描执行）</legend>
           <div class="form-grid">
+            <label class="chk"><input type="checkbox" name="attach_fetch" checked> 下载云端独有文件
+              <small class="muted">关=只做冗余检查，不下载</small>
+            </label>
+            <label class="chk" id="attach-strm-row"><input type="checkbox" name="attach_to_strm" checked> 生成 STRM 文件
+              <small class="muted">关=下载原视频</small>
+            </label>
             <label class="chk"><input type="checkbox" name="drop_redundant"> 冗余文件删除
               <small class="muted">本地已有记录但云端同名文件不一致时，删除云端多余副本</small>
-            </label>
-            <label class="chk"><input type="checkbox" name="attach_to_strm" checked> 生成 STRM 文件
-              <small class="muted">关=下载原视频</small>
             </label>
           </div>
         </fieldset>

@@ -2,7 +2,8 @@
 //
 // 配置分为三层：
 //   - Settings：全局设置（strm 直链前缀、云端回收目录、透传缓存目录等），对所有任务生效；
-//   - Task：同步任务，分 push（本地→云端）与 pull（云端→本地）两类，各自绑定一对目录并携带独立开关；
+//   - Task：同步任务，分 push（本地→云端）与 pull（云端→本地）两类，各自绑定一对目录，
+//     方向开关按类型分组存放（push 段 / pull 段，另一段为 nil 且不落盘）；
 //   - Token：115 访问/刷新令牌（敏感字段，运行时轮换，独立成段持久化）。
 //
 // 本文件定义任务模型与目录重叠校验；config.go 定义全局段与文件读写；dto.go 定义 Web 传输 DTO。
@@ -43,11 +44,40 @@ type CronOpts struct {
 	IntervalHours int  `json:"interval_hours"` // 间隔（小时）；<=0 回退默认 12
 }
 
-// Task 单个同步任务。Kind 决定哪些字段生效：
-//   - push：Watch / Rescan / RescanThenPull / ToStrm / ToCache；
-//   - pull：PullCron / PullToStrm / DropRedundant / FetchMissing / ArchiveToTemp。
+// PushOpts 本地同步（push）方向配置。
+type PushOpts struct {
+	Watch   WatchOpts `json:"watch"`    // 文件事件监听
+	Rescan  CronOpts  `json:"rescan"`   // 定时全量扫描
+	ToStrm  bool      `json:"to_strm"`  // 视频上传后本地替换为 .strm（关 = 保留原视频，纯云端备份）
+	ToCache bool      `json:"to_cache"` // 上传后原视频移入透传缓存（关 = 删除原视频）
+
+	// AfterPull 全量扫描后连带一次云端扫描（nil = 不连带）。
+	// 时机与触发方式随全量扫描走（手动/定时），故不单独设定时。
+	AfterPull *AttachOpts `json:"after_pull,omitempty"`
+}
+
+// AttachOpts push 任务「全量扫描后连带云端扫描」的子配置。
+// 附带扫描是可选的辅助动作：是否下载云端独有文件由 FetchMissing 控制（关 = 只做冗余检查）；
+// 「云端冗余删除」只在有完整本地索引时才有意义，故仅 push 任务可配（pull 任务恒关，引擎层归一）。
+type AttachOpts struct {
+	FetchMissing  bool `json:"fetch_missing"`  // 下载云端独有文件（关 = 不下载，只做冗余检查）
+	ToStrm        bool `json:"to_strm"`        // 视频落地为 .strm（关 = 下载原视频；仅在 FetchMissing 时生效）
+	DropRedundant bool `json:"drop_redundant"` // 删除云端同名冗余文件
+}
+
+// PullOpts 云端同步（pull）方向配置。
+type PullOpts struct {
+	Cron          CronOpts `json:"cron"`            // 定时同步
+	ToStrm        bool     `json:"to_strm"`         // 视频落地为 .strm（关 = 下载原视频）
+	ArchiveToTemp bool     `json:"archive_to_temp"` // 全部成功后把顶层项移入云端回收目录
+}
+
+// Task 单个同步任务。方向配置按 Kind 分组，另一段恒为 nil 且不会落盘：
+//   - push：Push（含可选的 AfterPull 连带云端扫描）；
+//   - pull：Pull。
 //
 // 两类任务共用 LocalDir/CloudDir 这一对目录映射与 Enabled 开关。
+// 读取方向配置统一走 PushCfg/PullCfg/AttachCfg，避免调用方到处判 nil。
 type Task struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`
@@ -56,19 +86,66 @@ type Task struct {
 	LocalDir string   `json:"local_dir"` // 本地绝对路径
 	CloudDir string   `json:"cloud_dir"` // 115 云端绝对路径（以 / 开头）
 
-	// ── push 方向 ──
-	Watch      WatchOpts `json:"watch"`
-	Rescan     CronOpts  `json:"rescan"`           // 定时全量扫描
-	RescanPull bool      `json:"rescan_then_pull"` // 全量扫描后是否连带云端扫描
-	ToStrm     bool      `json:"to_strm"`          // 视频上传后本地替换为 .strm（关 = 保留原视频，纯云端备份）
-	ToCache    bool      `json:"to_cache"`         // 上传后原视频移入透传缓存（关 = 删除原视频）
+	Push *PushOpts `json:"push,omitempty"`
+	Pull *PullOpts `json:"pull,omitempty"`
+}
 
-	// ── pull 方向 ──
-	PullCron      CronOpts `json:"pull_cron"`       // 定时同步
-	PullToStrm    bool     `json:"pull_to_strm"`    // 视频落地为 .strm（关 = 下载原视频）
-	DropRedundant bool     `json:"drop_redundant"`  // 删除云端同名冗余文件
-	FetchMissing  bool     `json:"fetch_missing"`   // 下载云端存在、本地不存在的文件
-	ArchiveToTemp bool     `json:"archive_to_temp"` // 全部成功后把顶层项移入云端回收目录
+// PushCfg 返回本地同步配置；非 push 任务或未配置时返回零值。
+func (t Task) PushCfg() PushOpts {
+	if t.Push == nil {
+		return PushOpts{}
+	}
+	return *t.Push
+}
+
+// PullCfg 返回云端同步配置；非 pull 任务或未配置时返回零值。
+func (t Task) PullCfg() PullOpts {
+	if t.Pull == nil {
+		return PullOpts{}
+	}
+	return *t.Pull
+}
+
+// AttachCfg 返回 push 任务「全量扫描后连带云端扫描」的配置；未启用返回零值。
+func (t Task) AttachCfg() AttachOpts {
+	if t.Push == nil || t.Push.AfterPull == nil {
+		return AttachOpts{}
+	}
+	return *t.Push.AfterPull
+}
+
+// AttachEnabled 是否启用了「全量扫描后连带云端扫描」（仅 push 任务）。
+func (t Task) AttachEnabled() bool { return t.Push != nil && t.Push.AfterPull != nil }
+
+// normalize 按 Kind 规范化配置段：补齐缺失段、清理不适用段、填默认值。Kind 非法时原样返回。
+func (t *Task) normalize() {
+	switch t.Kind {
+	case KindPush:
+		if t.Push == nil {
+			t.Push = &PushOpts{}
+		}
+		t.Pull = nil
+		if t.Push.Watch.QuietMinutes <= 0 {
+			t.Push.Watch.QuietMinutes = defaultQuietMinutes
+		}
+		if t.Push.Rescan.IntervalHours <= 0 {
+			t.Push.Rescan.IntervalHours = defaultCronHours
+		}
+		// 附带云端扫描「无事可做」时自动去掉「全量扫描后扫描云端」（AfterPull=nil，不落盘、不触发连带扫描）。
+		// 有效动作 = 下载云端独有（FetchMissing）或删冗余（DropRedundant）；
+		// to_strm 只是下载的子选项（引擎里不下载就不会生成 strm），单独勾选不算有效动作。
+		if ap := t.Push.AfterPull; ap != nil && !ap.FetchMissing && !ap.DropRedundant {
+			t.Push.AfterPull = nil
+		}
+	case KindPull:
+		if t.Pull == nil {
+			t.Pull = &PullOpts{}
+		}
+		t.Push = nil
+		if t.Pull.Cron.IntervalHours <= 0 {
+			t.Pull.Cron.IntervalHours = defaultCronHours
+		}
+	}
 }
 
 // NewID 生成稳定唯一的任务 ID（t_ + 8 字节随机 hex）。
@@ -101,6 +178,17 @@ func (t *Task) Validate() error {
 	}
 	if !isCloudAbs(t.CloudDir) {
 		return fmt.Errorf("云端目录必须以 / 开头: %s", t.CloudDir)
+	}
+	// 方向配置段必须与其类型匹配（缺段由 normalize 补齐，走到这里仍缺即为非法）。
+	switch t.Kind {
+	case KindPush:
+		if t.Push == nil {
+			return fmt.Errorf("本地同步任务缺少 push 配置段")
+		}
+	case KindPull:
+		if t.Pull == nil {
+			return fmt.Errorf("云端同步任务缺少 pull 配置段")
+		}
 	}
 	return nil
 }

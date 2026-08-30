@@ -55,11 +55,12 @@ type TaskUnit struct {
 func (e *Engine) newUnit(task conf.Task) *TaskUnit {
 	paths := kit.NewTaskPaths(e.conf, task)
 	deps := &kit.Deps{Pan: e.pan, Vault: e.vault, Paths: paths, Rules: e.rules, Cache: e.cache}
+	pc := task.PushCfg()
 	opts := push.Opts{
-		GenStrm:  task.ToStrm,
-		ToCache:  task.ToCache,
-		StrmNow:  task.Watch.StrmNow,
-		VideoNow: task.Watch.VideoNow,
+		GenStrm:  pc.ToStrm,
+		ToCache:  pc.ToCache,
+		StrmNow:  pc.Watch.StrmNow,
+		VideoNow: pc.Watch.VideoNow,
 	}
 
 	u := &TaskUnit{
@@ -75,19 +76,21 @@ func (e *Engine) newUnit(task conf.Task) *TaskUnit {
 	u.co = push.NewCloudOps(deps)
 	u.sc = push.NewScanner(deps, u.up, u.co)
 	u.watcher = push.NewWatcher(deps, u.sc, u.co, u.dirPool, func() bool { return u.pullRunning.Load() }, opts)
-	pullOpts := pull.Options{
-		FetchMissing:  task.FetchMissing,
-		DropRedundant: task.DropRedundant,
-		GenStrm:       task.PullToStrm,
-		ArchiveToTemp: task.ArchiveToTemp,
-	}
+	// 下载云端独有是云端扫描的本职，恒开（不暴露开关）。
+	pullOpts := pull.Options{FetchMissing: true}
 	if task.Kind == conf.KindPull {
-		// pull 任务语义归一（不依赖配置值）：
-		//   - 下载云端独有是 pull 的本职，恒开；
-		//   - 冗余删除仅在 push 上下文有意义（本地有完整同步记录才能判定「云端同名但内容不符」），
-		//     pull 任务以云端为准拉取，不存在冗余概念，恒关。
-		pullOpts.FetchMissing = true
-		pullOpts.DropRedundant = false
+		// pull 任务：以云端为准拉取，不存在冗余概念（本地无完整索引可判定「云端同名但内容不符」），恒关。
+		pu := task.PullCfg()
+		pullOpts.GenStrm = pu.ToStrm
+		pullOpts.ArchiveToTemp = pu.ArchiveToTemp
+	} else {
+		// push 任务的「全量扫描后连带云端扫描」：是否下载云端独有由 FetchMissing 控制（关 = 只做冗余检查）；
+		// 冗余删除依赖本任务完整的本地索引，故仅此处可配；
+		// 归档到回收目录是 pull 任务的收尾动作，连带扫描不做。
+		ap := task.AttachCfg()
+		pullOpts.FetchMissing = ap.FetchMissing
+		pullOpts.GenStrm = ap.ToStrm
+		pullOpts.DropRedundant = ap.DropRedundant
 	}
 	u.pull = pull.NewRunner(deps, u.wk, u.strm, pullOpts)
 	u.pullDone = make(chan struct{})
@@ -162,13 +165,14 @@ func (u *TaskUnit) buildIndex(ctx context.Context) error {
 }
 
 // start 启动常驻协程：push 消费者循环 + 监听（仅 push 任务）+ 定时（按类型走 cronLoop）。
-// ⚠️ 必须按 Kind 限定：pull 任务若残留 watch.enabled 也会启 watcher + pushLoop，
-// 会把本地文件误当 push 上传到云端（测试实测发现的坑）。
+// ⚠️ 必须按 Kind 限定：pull 任务启 watcher + pushLoop 会把本地文件误当 push 上传到云端
+// （v1 扁平配置下「pull 任务残留 watch.enabled」就踩过这个坑；v2 由 conf 按类型清理配置段，
+// 这里保留 Kind 判定作为运行时兜底）。
 func (u *TaskUnit) start(ctx context.Context, wg *sync.WaitGroup) {
 	u.residentCtx, u.residentCancel = context.WithCancel(ctx)
 	if u.task.Kind == conf.KindPush {
 		wg.Go(func() { u.pushLoop(u.residentCtx) })
-		if u.task.Watch.Enabled {
+		if u.task.PushCfg().Watch.Enabled {
 			wg.Go(func() { u.watcher.Pump(u.residentCtx) })
 		}
 	}
@@ -189,9 +193,9 @@ func (u *TaskUnit) stop() {
 // cronEnabled 判断本任务是否启用定时（push 看 Rescan，pull 看 PullCron）。
 func (u *TaskUnit) cronEnabled() bool {
 	if u.task.Kind == conf.KindPush {
-		return u.task.Rescan.Enabled
+		return u.task.PushCfg().Rescan.Enabled
 	}
-	return u.task.PullCron.Enabled
+	return u.task.PullCfg().Cron.Enabled
 }
 
 // pushLoop 常驻消费者：逐目录串行处理，每个目录批次记一条执行历史。
@@ -252,7 +256,7 @@ func (u *TaskUnit) runPushBatch(residentCtx context.Context, dir string, trigger
 	u.prog.SetRunning(false)
 
 	// 全量扫描（cron/手动）后附带云端扫描
-	if u.task.RescanPull && (trigger == journal.TriggerCron || trigger == journal.TriggerManual) {
+	if u.task.AttachEnabled() && (trigger == journal.TriggerCron || trigger == journal.TriggerManual) {
 		u.startPull(residentCtx, trigger)
 	}
 }
@@ -375,9 +379,9 @@ func (u *TaskUnit) pushBaseCtx() context.Context {
 
 // cronLoop 定时触发本任务（push=全量扫描，pull=云端同步）。
 func (u *TaskUnit) cronLoop(ctx context.Context) {
-	interval := time.Duration(u.task.Rescan.IntervalHours) * time.Hour
+	interval := time.Duration(u.task.PushCfg().Rescan.IntervalHours) * time.Hour
 	if u.task.Kind == conf.KindPull {
-		interval = time.Duration(u.task.PullCron.IntervalHours) * time.Hour
+		interval = time.Duration(u.task.PullCfg().Cron.IntervalHours) * time.Hour
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

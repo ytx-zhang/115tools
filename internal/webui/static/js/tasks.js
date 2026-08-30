@@ -233,6 +233,8 @@ function bindOnce() {
   form.elements.kind.addEventListener('change', () => updateDlgGroups(form));
   // rescan_then_pull 勾选 → 显隐 pull 组
   form.elements.rescan_then_pull.addEventListener('change', () => updateDlgGroups(form));
+  // 附带扫描勾选「下载文件」→ 显隐「生成 STRM 文件」
+  form.elements.attach_fetch.addEventListener('change', () => updateAttachStrm(form));
   document.querySelectorAll('[data-close]').forEach((b) =>
     b.addEventListener('click', () => document.getElementById(b.dataset.close).close()));
 
@@ -291,6 +293,16 @@ function updateDlgGroups(form) {
   // 附带云端扫描：仅 push 任务勾选「全量扫描后扫描云端」后显示（时机与间隔随全量扫描走）
   attach.hidden = !(isPush && form.elements.rescan_then_pull.checked);
   pull.hidden = isPush;
+  updateAttachStrm(form);
+}
+
+// updateAttachStrm 未勾选「下载文件」时隐藏「生成 STRM 文件」并自动取消其勾选
+// （不下载就没有 strm 可言；隐藏状态下残留 checked 会导致保存时误提交空附带扫描）。
+function updateAttachStrm(form) {
+  const row = form.querySelector('#attach-strm-row');
+  const fetchChecked = form.elements.attach_fetch.checked;
+  if (row) row.hidden = !fetchChecked;
+  if (!fetchChecked) form.elements.attach_to_strm.checked = false;
 }
 
 function openDialog(id) {
@@ -313,31 +325,38 @@ function taskToForm(form, t) {
   e.local_dir.value = t.local_dir || '';
   e.cloud_dir.value = t.cloud_dir || '';
   e.enabled.checked = !!t.enabled;
-  e.watch_enabled.checked = !!t.watch?.enabled;
-  e.debounce_minutes.value = t.watch?.quiet_minutes ?? 10;
-  e.strm_now.checked = !!t.watch?.strm_now;
-  e.video_now.checked = !!t.watch?.video_now;
-  e.rescan_enabled.checked = !!t.rescan?.enabled;
-  e.rescan_interval_hours.value = t.rescan?.interval_hours ?? 12;
-  e.rescan_then_pull.checked = !!t.rescan_then_pull;
-  e.to_strm.checked = !!t.to_strm;
-  e.to_cache.checked = !!t.to_cache;
-  // 附带云端扫描组（仅 push 任务展示）
-  e.drop_redundant.checked = !!t.drop_redundant;
-  e.attach_to_strm.checked = t.kind !== 'pull' ? !!t.pull_to_strm : false;
+  // 方向配置按类型分组：push 段（含可选的 after_pull 连带云端扫描）/ pull 段
+  const push = t.push || {};
+  const watch = push.watch || {};
+  const rescan = push.rescan || {};
+  const attach = push.after_pull || {};
+  const pull = t.pull || {};
+  const cron = pull.cron || {};
+  e.watch_enabled.checked = !!watch.enabled;
+  e.debounce_minutes.value = watch.quiet_minutes ?? 10;
+  e.strm_now.checked = !!watch.strm_now;
+  e.video_now.checked = !!watch.video_now;
+  e.rescan_enabled.checked = !!rescan.enabled;
+  e.rescan_interval_hours.value = rescan.interval_hours ?? 12;
+  e.rescan_then_pull.checked = !!push.after_pull;
+  e.to_strm.checked = !!push.to_strm;
+  e.to_cache.checked = !!push.to_cache;
+  // 附带云端扫描组（仅 push 任务 + 勾选「全量扫描后扫描云端」时展示）
+  e.attach_fetch.checked = !!attach.fetch_missing;
+  e.attach_to_strm.checked = !!attach.to_strm;
+  e.drop_redundant.checked = !!attach.drop_redundant;
   // 云端方向组（仅 pull 任务展示）
-  e.pull_cron_enabled.checked = !!t.pull_cron?.enabled;
-  e.pull_cron_interval_hours.value = t.pull_cron?.interval_hours ?? 12;
-  e.pull_to_strm.checked = !!t.pull_to_strm;
-  e.archive_to_temp.checked = !!t.archive_to_temp;
+  e.pull_cron_enabled.checked = !!cron.enabled;
+  e.pull_cron_interval_hours.value = cron.interval_hours ?? 12;
+  e.pull_to_strm.checked = !!pull.to_strm;
+  e.archive_to_temp.checked = !!pull.archive_to_temp;
 }
 
-// formToTask 按任务类型组装：fetch_missing 恒为 true（云端扫描的本职，不暴露开关）；
-// drop_redundant 仅 push 任务的附带扫描有意义（pull 任务无法判定冗余，恒 false，引擎层同样归一）。
+// formToTask 只组装与当前类型匹配的那一段方向配置：
+// 下载云端独有是云端扫描的本职（恒开，不暴露开关）；冗余删除只有 push 的连带扫描可配。
 function formToTask(form, id) {
   const e = form.elements;
   const num = (v) => Math.max(0, parseInt(v, 10) || 0);
-  const isPush = e.kind.value === 'push';
   const t = {
     id,
     name: e.name.value.trim(),
@@ -345,24 +364,31 @@ function formToTask(form, id) {
     enabled: e.enabled.checked,
     local_dir: e.local_dir.value.trim(),
     cloud_dir: e.cloud_dir.value.trim(),
-    watch: { enabled: e.watch_enabled.checked, quiet_minutes: num(e.debounce_minutes.value), strm_now: e.strm_now.checked, video_now: e.video_now.checked },
-    rescan: { enabled: e.rescan_enabled.checked, interval_hours: num(e.rescan_interval_hours.value) },
-    rescan_then_pull: e.rescan_then_pull.checked,
-    to_strm: e.to_strm.checked,
-    to_cache: e.to_cache.checked,
-    pull_cron: { enabled: false, interval_hours: 12 },
-    pull_to_strm: false,
-    drop_redundant: false,
-    fetch_missing: true,
-    archive_to_temp: false,
   };
-  if (isPush) {
-    t.pull_to_strm = e.attach_to_strm.checked;
-    t.drop_redundant = e.drop_redundant.checked;
+  if (t.kind === 'push') {
+    t.push = {
+      watch: { enabled: e.watch_enabled.checked, quiet_minutes: num(e.debounce_minutes.value), strm_now: e.strm_now.checked, video_now: e.video_now.checked },
+      rescan: { enabled: e.rescan_enabled.checked, interval_hours: num(e.rescan_interval_hours.value) },
+      to_strm: e.to_strm.checked,
+      to_cache: e.to_cache.checked,
+    };
+    if (e.rescan_then_pull.checked) {
+      const after = {
+        fetch_missing: e.attach_fetch.checked,
+        to_strm: e.attach_to_strm.checked,
+        drop_redundant: e.drop_redundant.checked,
+      };
+      // 三个子选项都没勾时附带扫描无事可做，自动去掉「全量扫描后扫描云端」（不提交 after_pull）
+      if (after.fetch_missing || after.to_strm || after.drop_redundant) {
+        t.push.after_pull = after;
+      }
+    }
   } else {
-    t.pull_cron = { enabled: e.pull_cron_enabled.checked, interval_hours: num(e.pull_cron_interval_hours.value) };
-    t.pull_to_strm = e.pull_to_strm.checked;
-    t.archive_to_temp = e.archive_to_temp.checked;
+    t.pull = {
+      cron: { enabled: e.pull_cron_enabled.checked, interval_hours: num(e.pull_cron_interval_hours.value) },
+      to_strm: e.pull_to_strm.checked,
+      archive_to_temp: e.archive_to_temp.checked,
+    };
   }
   return t;
 }

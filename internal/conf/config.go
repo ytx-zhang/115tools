@@ -110,16 +110,7 @@ func (c *Config) normalizeLocked() {
 		c.Settings.CacheRetentionDays = DefaultCacheRetentionDays
 	}
 	for i := range c.Tasks {
-		t := &c.Tasks[i]
-		if t.Watch.QuietMinutes <= 0 {
-			t.Watch.QuietMinutes = defaultQuietMinutes
-		}
-		if t.Rescan.IntervalHours <= 0 {
-			t.Rescan.IntervalHours = defaultCronHours
-		}
-		if t.PullCron.IntervalHours <= 0 {
-			t.PullCron.IntervalHours = defaultCronHours
-		}
+		c.Tasks[i].normalize()
 	}
 }
 
@@ -195,6 +186,7 @@ func (c *Config) AddTask(t Task) error {
 	if t.ID == "" {
 		t.ID = NewID()
 	}
+	t.normalize()
 	if err := c.validateTasksLocked(append(slices.Clone(c.Tasks), t)); err != nil {
 		return err
 	}
@@ -211,6 +203,7 @@ func (c *Config) UpdateTask(t Task) error {
 	if idx < 0 {
 		return fmt.Errorf("任务不存在: %s", t.ID)
 	}
+	t.normalize()
 	next := slices.Clone(c.Tasks)
 	next[idx] = t
 	if err := c.validateTasksLocked(next); err != nil {

@@ -52,7 +52,7 @@ func NewTaskPaths(cfg *conf.Config, task conf.Task) *TaskPaths {
 		TempDir:  cfg.Settings.TempDir,
 		StrmURL:  cfg.Settings.StrmURL,
 		CacheDir: cfg.Settings.CacheDir,
-		Debounce: time.Duration(task.Watch.QuietMinutes) * time.Minute,
+		Debounce: time.Duration(task.PushCfg().Watch.QuietMinutes) * time.Minute,
 	}
 }
 
