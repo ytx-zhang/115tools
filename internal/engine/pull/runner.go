@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ytx-zhang/115tools/internal/engine/kit"
+	"github.com/ytx-zhang/115tools/internal/engine/shared"
+	"github.com/ytx-zhang/115tools/internal/index"
 	"github.com/ytx-zhang/115tools/internal/journal"
 	"github.com/ytx-zhang/115tools/internal/pan"
-	"github.com/ytx-zhang/115tools/internal/vault"
 )
 
 // Options 云端同步选项。
@@ -27,16 +27,16 @@ type Options struct {
 // Runner 云端→本地同步任务。
 type Runner struct {
 	api   *pan.Client
-	vault *vault.Index
-	paths *kit.TaskPaths
-	wk    *kit.Walker
-	strm  *kit.StrmIO
+	idx   *index.Index
+	paths *shared.TaskPaths
+	wk    *shared.Walker
+	strm  *shared.StrmIO
 	opts  Options
 }
 
 // NewRunner 构造云端同步任务。
-func NewRunner(deps *kit.Deps, wk *kit.Walker, strm *kit.StrmIO, opts Options) *Runner {
-	return &Runner{api: deps.Pan, vault: deps.Vault, paths: deps.Paths, wk: wk, strm: strm, opts: opts}
+func NewRunner(deps *shared.Deps, wk *shared.Walker, strm *shared.StrmIO, opts Options) *Runner {
+	return &Runner{api: deps.Pan, idx: deps.Index, paths: deps.Paths, wk: wk, strm: strm, opts: opts}
 }
 
 // Run 执行一轮完整云端同步，统计写入 c。
@@ -51,33 +51,34 @@ func (r *Runner) Run(ctx context.Context, c *journal.Counters) error {
 		return errors.New("云端同步根 FID 未就绪")
 	}
 
-	var topFids []string
-	err := r.wk.Walk(ctx, r.paths.CloudDir, r.paths.CloudFid, kit.Visitor{
+	// 仅「归档到回收目录」需要收集顶层 FID，未开启时不做无谓判断
+	topFids := make([]string, 0, 8)
+	err := r.wk.Walk(ctx, r.paths.CloudDir, r.paths.CloudFid, shared.Visitor{
 		SkipByCount: true,
 		EnterDir: func(ctx context.Context, path, fid string) (bool, error) {
-			localPath := kit.MapCloudToLocal(r.paths.LocalDir, r.paths.CloudDir, path)
-			if isTopLevel(r.paths.CloudDir, path) {
+			localPath := shared.MapCloudToLocal(r.paths.LocalDir, r.paths.CloudDir, path)
+			if r.opts.ArchiveToTemp && isTopLevel(r.paths.CloudDir, path) {
 				topFids = append(topFids, fid)
 			}
-			if r.vault.GetFid(ctx, localPath) == "" {
+			if r.idx.GetFid(ctx, localPath) == "" {
 				if err := os.MkdirAll(localPath, 0o755); err != nil {
 					journal.Error(ctx, "创建目录失败", "路径", localPath, "错误", err)
 					return false, nil
 				}
-				r.vault.Put(ctx, localPath, fid, vault.SizeDir)
+				r.idx.Put(ctx, localPath, fid, index.SizeDir)
 			}
 			return true, nil
 		},
-		VisitFile: func(ctx context.Context, path, fid, pickCode string, e kit.Entry) error {
-			localPath := kit.MapCloudToLocal(r.paths.LocalDir, r.paths.CloudDir, path)
+		VisitFile: func(ctx context.Context, path, fid, pickCode string, e shared.Entry) error {
+			localPath := shared.MapCloudToLocal(r.paths.LocalDir, r.paths.CloudDir, path)
 			genStrm := e.IsVideo && r.opts.GenStrm
 			savePath := localPath
 			if genStrm {
-				savePath = kit.VideoToStrmPath(localPath)
+				savePath = shared.VideoToStrmPath(localPath)
 			}
 
-			dbFid := r.vault.GetFid(ctx, savePath)
-			if dbFid != "" || localExists(savePath) {
+			dbFid := r.idx.GetFid(ctx, savePath)
+			if _, serr := os.Stat(savePath); dbFid != "" || serr == nil {
 				if r.opts.DropRedundant && dbFid != "" && dbFid != fid {
 					if err := r.api.DeleteFile(ctx, fid, savePath); err != nil {
 						journal.Error(ctx, "清理云端冗余项失败", "路径", savePath, "错误", err)
@@ -92,20 +93,17 @@ func (r *Runner) Run(ctx context.Context, c *journal.Counters) error {
 			}
 
 			c.Scanned++
-			var size int64
-			var err error
-			if genStrm {
-				size, err = r.strm.FetchAndSave(ctx, pickCode, savePath, true)
-				c.StrmGenerated++
-			} else {
-				size, err = r.strm.FetchAndSave(ctx, pickCode, savePath, false)
-				c.Downloaded++
-			}
+			size, err := r.strm.FetchAndSave(ctx, pickCode, savePath, genStrm)
 			if err != nil {
 				c.Failed++
 				return nil
 			}
-			r.vault.Put(ctx, savePath, fid, size)
+			if genStrm {
+				c.StrmGenerated++
+			} else {
+				c.Downloaded++
+			}
+			r.idx.Put(ctx, savePath, fid, size)
 			return nil
 		},
 	}, nil)
@@ -137,10 +135,4 @@ func (r *Runner) archiveToTemp(ctx context.Context, fids []string) error {
 // 云端路径统一以 / 分隔，用 path 包而非 filepath（与本地文件系统无关）。
 func isTopLevel(cloudRoot, cloudPath string) bool {
 	return path.Dir(path.Clean(cloudPath)) == path.Clean(cloudRoot)
-}
-
-// localExists 本地文件是否已存在（兼容旧 strmgen 的 os.Stat 语义）。
-func localExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

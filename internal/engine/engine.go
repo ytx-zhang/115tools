@@ -4,9 +4,9 @@
 //   - Engine：任务单元集合（map[taskID]*TaskUnit）的编排——Init/Start/ReloadTask/启停/状态汇总；
 //   - TaskUnit：单个任务的双方向运行时（push/pull），见 taskunit.go；
 //   - push/pull：两个方向的具体实现子包；
-//   - kit：双方向共享的底层能力。
+//   - shared：双方向共享的底层能力。
 //
-// 依赖方向：engine → pan / vault / conf / journal / kit；engine 不 import webui。
+// 依赖方向：engine → pan / index / conf / journal / shared；engine 不 import webui。
 package engine
 
 import (
@@ -15,10 +15,10 @@ import (
 	"sync"
 
 	"github.com/ytx-zhang/115tools/internal/conf"
-	"github.com/ytx-zhang/115tools/internal/engine/kit"
+	"github.com/ytx-zhang/115tools/internal/engine/shared"
+	"github.com/ytx-zhang/115tools/internal/index"
 	"github.com/ytx-zhang/115tools/internal/journal"
 	"github.com/ytx-zhang/115tools/internal/pan"
-	"github.com/ytx-zhang/115tools/internal/vault"
 )
 
 // TaskRuntime 单任务运行时状态（供 webui 的 SSE 推送）。
@@ -34,11 +34,11 @@ type TaskRuntime struct {
 // Engine 任务引擎（组合根：管理全部任务单元）。
 type Engine struct {
 	pan      *pan.Client
-	vault    *vault.Index
+	idx      *index.Index
 	conf     *conf.Config
 	journal  *journal.Store
-	cache    kit.CacheMover
-	rules    kit.Rules
+	cache    shared.CacheMover
+	rules    shared.Rules
 	onChange func()
 	appCtx   context.Context
 	appWg    *sync.WaitGroup
@@ -52,14 +52,14 @@ type Engine struct {
 }
 
 // New 构造引擎（不启动，调用方再调 Init + Start）。
-func New(api *pan.Client, v *vault.Index, cfg *conf.Config, j *journal.Store, cache kit.CacheMover, onChange func(), appCtx context.Context, appWg *sync.WaitGroup) *Engine {
+func New(api *pan.Client, v *index.Index, cfg *conf.Config, j *journal.Store, cache shared.CacheMover, onChange func(), appCtx context.Context, appWg *sync.WaitGroup) *Engine {
 	return &Engine{
 		pan:      api,
-		vault:    v,
+		idx:      v,
 		conf:     cfg,
 		journal:  j,
 		cache:    cache,
-		rules:    kit.NewRules(cfg),
+		rules:    shared.NewRules(cfg),
 		onChange: onChange,
 		appCtx:   appCtx,
 		appWg:    appWg,
@@ -69,15 +69,8 @@ func New(api *pan.Client, v *vault.Index, cfg *conf.Config, j *journal.Store, ca
 
 // Init 完成运行时初始化：解析全局回收目录 FID，并为每个启用任务构建并初始化单元。
 func (e *Engine) Init(ctx context.Context) error {
-	info, err := e.pan.GetDirInfo(ctx, e.conf.Settings.TempDir)
-	if err != nil {
-		fid, ferr := e.ensureTemp(ctx)
-		if ferr != nil {
-			return ferr
-		}
-		e.tempFid = fid
-	} else {
-		e.tempFid = info.Fid
+	if err := e.resolveTempFid(ctx); err != nil {
+		return err
 	}
 
 	for _, t := range e.conf.ListTasks() {
@@ -95,24 +88,28 @@ func (e *Engine) Init(ctx context.Context) error {
 	return nil
 }
 
-// ensureTemp 逐级创建全局回收目录并返回 FID。
-func (e *Engine) ensureTemp(ctx context.Context) (string, error) {
-	return kit.EnsureCloudDir(ctx, e.pan, e.conf.Settings.TempDir)
+// resolveTempFid 解析全局回收目录 FID：已存在直接取，否则逐级创建。
+func (e *Engine) resolveTempFid(ctx context.Context) error {
+	info, err := e.pan.GetDirInfo(ctx, e.conf.Settings.TempDir)
+	if err != nil {
+		fid, ferr := shared.EnsureCloudDir(ctx, e.pan, e.conf.Settings.TempDir)
+		if ferr != nil {
+			return ferr
+		}
+		e.tempFid = fid
+		return nil
+	}
+	e.tempFid = info.Fid
+	return nil
 }
 
 // EnsureRunning 幂等启动引擎：首次调用时 Init + Start（配置完备且 token 有效后），后续调用直接返回。
 func (e *Engine) EnsureRunning() error {
-	e.mu.Lock()
-	started := e.started
-	e.mu.Unlock()
-	if started {
-		return nil
-	}
 	e.bootstrapMu.Lock()
 	defer e.bootstrapMu.Unlock()
 
 	e.mu.Lock()
-	started = e.started
+	started := e.started
 	e.mu.Unlock()
 	if started {
 		return nil
@@ -128,17 +125,10 @@ func (e *Engine) EnsureRunning() error {
 
 // ReloadAll 全局设置变更后重建全部任务单元：重新读取规则、重解析回收目录 FID。
 func (e *Engine) ReloadAll() error {
-	e.rules = kit.NewRules(e.conf)
+	e.rules = shared.NewRules(e.conf)
 
-	info, err := e.pan.GetDirInfo(e.appCtx, e.conf.Settings.TempDir)
-	if err != nil {
-		fid, ferr := e.ensureTemp(e.appCtx)
-		if ferr != nil {
-			return ferr
-		}
-		e.tempFid = fid
-	} else {
-		e.tempFid = info.Fid
+	if err := e.resolveTempFid(e.appCtx); err != nil {
+		return err
 	}
 
 	for _, t := range e.conf.ListTasks() {
@@ -153,25 +143,40 @@ func (e *Engine) ReloadAll() error {
 func (e *Engine) Start(ctx context.Context, wg *sync.WaitGroup) {
 	e.mu.Lock()
 	e.started = true
+	e.mu.Unlock()
+
+	for _, u := range e.snapshotUnits() {
+		u.start(ctx, wg)
+	}
+}
+
+// snapshotUnits 返回任务单元快照（加锁拷贝，遍历时不持锁）。
+func (e *Engine) snapshotUnits() []*TaskUnit {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	units := make([]*TaskUnit, 0, len(e.units))
 	for _, u := range e.units {
 		units = append(units, u)
 	}
-	e.mu.Unlock()
+	return units
+}
 
-	for _, u := range units {
-		u.start(ctx, wg)
-	}
+// popUnit 摘除并返回任务单元（不存在返回 nil）。
+func (e *Engine) popUnit(id string) *TaskUnit {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	old := e.units[id]
+	delete(e.units, id)
+	return old
 }
 
 // ReloadTask 热重建单个任务：停旧单元，按新配置重建并启动（不影响其他任务）。
 func (e *Engine) ReloadTask(task conf.Task) error {
 	e.mu.Lock()
-	old := e.units[task.ID]
-	delete(e.units, task.ID)
 	started := e.started
 	e.mu.Unlock()
 
+	old := e.popUnit(task.ID)
 	if old != nil {
 		old.stop()
 	}
@@ -200,11 +205,7 @@ func (e *Engine) ReloadTask(task conf.Task) error {
 
 // RemoveTask 停止并移除单个任务单元（配合 conf.RemoveTask 使用）。
 func (e *Engine) RemoveTask(id string) {
-	e.mu.Lock()
-	old := e.units[id]
-	delete(e.units, id)
-	e.mu.Unlock()
-	if old != nil {
+	if old := e.popUnit(id); old != nil {
 		old.stop()
 	}
 	if e.onChange != nil {
@@ -252,13 +253,7 @@ func (e *Engine) Status() []TaskRuntime {
 
 // Shutdown 停止所有任务单元。
 func (e *Engine) Shutdown() {
-	e.mu.Lock()
-	units := make([]*TaskUnit, 0, len(e.units))
-	for _, u := range e.units {
-		units = append(units, u)
-	}
-	e.mu.Unlock()
-	for _, u := range units {
+	for _, u := range e.snapshotUnits() {
 		u.stop()
 	}
 }

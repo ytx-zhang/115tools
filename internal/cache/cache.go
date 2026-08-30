@@ -1,8 +1,8 @@
-// Package stash 是透传本地缓存层：上传完成的视频按 pickcode 分目录暂存
+// Package cache 是透传本地缓存层：上传完成的视频按 pickcode 分目录暂存
 // （<dir>/<pickcode>/<原名>），供 /download 透传在保留期内直读本地、跳过 115 上游回源。
 //
 // 缓存本质是「副本」：移动失败不影响云端已存视频与 .strm。保留期由配置控制，到期由清理协程回收。
-package stash
+package cache
 
 import (
 	"context"
@@ -50,8 +50,12 @@ func (c *Cache) SetDir(dir string) error {
 	return nil
 }
 
-// Dir 返回缓存根目录。
-func (c *Cache) Dir() string { return c.dir }
+// cacheDir 返回缓存根目录（读锁收口，SetDir 热更新时并发安全）。
+func (c *Cache) cacheDir() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.dir
+}
 
 func (c *Cache) retentionLocked() time.Duration {
 	c.mu.RLock()
@@ -64,18 +68,12 @@ func (c *Cache) LocalPath(pickCode string) (string, bool) {
 	if !validPickCode(pickCode) {
 		return "", false
 	}
-	dir := filepath.Join(c.dir, pickCode)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	dir := filepath.Join(c.cacheDir(), pickCode)
+	name, _, ok := firstFileEntry(dir)
+	if !ok {
 		return "", false
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		return filepath.Join(dir, e.Name()), true
-	}
-	return "", false
+	return filepath.Join(dir, name), true
 }
 
 // Item 缓存条目（供 WebUI 展示）。
@@ -90,11 +88,12 @@ type Item struct {
 // List 枚举全部缓存项（按文件名升序）。
 func (c *Cache) List() []Item {
 	var items []Item
-	if c.dir == "" {
+	dir := c.cacheDir()
+	if dir == "" {
 		return items
 	}
 	retention := c.retentionLocked()
-	entries, err := os.ReadDir(c.dir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return items
 	}
@@ -102,13 +101,15 @@ func (c *Cache) List() []Item {
 		if !e.IsDir() {
 			continue
 		}
-		pcDir := filepath.Join(c.dir, e.Name())
-		info, serr := os.Stat(pcDir)
-		if serr != nil {
+		pcDir := filepath.Join(dir, e.Name())
+		name, size, ok := firstFileEntry(pcDir)
+		if !ok {
 			continue
 		}
-		name, size := firstFile(pcDir)
-		cachedAt := info.ModTime()
+		cachedAt := time.Now()
+		if info, serr := e.Info(); serr == nil {
+			cachedAt = info.ModTime()
+		}
 		items = append(items, Item{
 			PickCode:  e.Name(),
 			Name:      name,
@@ -127,7 +128,7 @@ func (c *Cache) Move(srcPath, pickCode string) (string, error) {
 	if !validPickCode(pickCode) {
 		return "", os.ErrInvalid
 	}
-	dstDir := filepath.Join(c.dir, pickCode)
+	dstDir := filepath.Join(c.cacheDir(), pickCode)
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		return "", err
 	}
@@ -153,7 +154,7 @@ func (c *Cache) Delete(pickCodes []string) int {
 		if !validPickCode(pc) {
 			continue
 		}
-		dir := filepath.Join(c.dir, pc)
+		dir := filepath.Join(c.cacheDir(), pc)
 		if _, err := os.Stat(dir); err != nil {
 			continue
 		}
@@ -170,7 +171,7 @@ func (c *Cache) Delete(pickCodes []string) int {
 func (c *Cache) StartCleaner(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	journal.Info(ctx, "本地缓存清理协程启动", "缓存路径", c.dir, "保留期", c.retentionLocked().Round(time.Minute).String())
+	journal.Info(ctx, "本地缓存清理协程启动", "缓存路径", c.cacheDir(), "保留期", c.retentionLocked().Round(time.Minute).String())
 	c.sweep()
 	for {
 		select {
@@ -184,23 +185,24 @@ func (c *Cache) StartCleaner(ctx context.Context, interval time.Duration) {
 
 // sweep 删除所有过期缓存项。
 func (c *Cache) sweep() {
-	if c.dir == "" {
+	dir := c.cacheDir()
+	if dir == "" {
 		return
 	}
-	entries, err := os.ReadDir(c.dir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	cutoff := time.Now().Add(-c.retentionLocked())
 	for _, e := range entries {
-		pcDir := filepath.Join(c.dir, e.Name())
+		pcDir := filepath.Join(dir, e.Name())
 		if !e.IsDir() {
 			if rerr := os.Remove(pcDir); rerr != nil && !os.IsNotExist(rerr) {
 				journal.Debug(context.Background(), "清理缓存散落文件失败", "路径", pcDir, "错误", rerr)
 			}
 			continue
 		}
-		info, serr := os.Stat(pcDir)
+		info, serr := e.Info()
 		if serr != nil {
 			continue
 		}
@@ -240,22 +242,22 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-func firstFile(dir string) (string, int64) {
+// firstFileEntry 返回目录内第一个非目录文件（名称 + 大小）；无则 ok=false。
+func firstFileEntry(dir string) (name string, size int64, ok bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", 0
+		return "", 0, false
 	}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		size := int64(0)
 		if info, serr := e.Info(); serr == nil {
 			size = info.Size()
 		}
-		return e.Name(), size
+		return e.Name(), size, true
 	}
-	return "", 0
+	return "", 0, false
 }
 
 // validPickCode 校验 pickcode 可作缓存目录名（防路径穿越）。

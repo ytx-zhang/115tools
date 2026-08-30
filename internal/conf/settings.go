@@ -24,6 +24,13 @@ type Editable struct {
 	HasRefreshToken    bool     `json:"has_refresh_token,omitempty"`
 }
 
+// CacheDir 返回缓存目录（轻量读，供保存设置时对比变更，避免构建整份快照）。
+func (c *Config) CacheDir() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Settings.CacheDir
+}
+
 // Snapshot 返回全局设置快照（不回显密码明文与 refresh_token 明文）。
 func (c *Config) Snapshot() Editable {
 	c.mu.RLock()
@@ -45,7 +52,7 @@ func (c *Config) Snapshot() Editable {
 // 返回需要触发引擎重建的信息由调用方（app 层）根据变更自行判断。
 func (c *Config) Update(e Editable) error {
 	if e.AuthUsername != "" && e.AuthPassword == "" {
-		if c.GetAuthUsername() == "" {
+		if u, _ := c.GetAuth(); u == "" {
 			return fmt.Errorf("启用登录验证时必须设置密码")
 		}
 	}
@@ -80,13 +87,6 @@ func (c *Config) Update(e Editable) error {
 
 	c.normalizeLocked()
 	return c.persistLocked()
-}
-
-// GetAuthUsername 返回登录用户名（空 = 未启用验证）。
-func (c *Config) GetAuthUsername() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.Settings.Auth.Username
 }
 
 // GetAuth 返回登录凭据（username, bcrypt 哈希）。

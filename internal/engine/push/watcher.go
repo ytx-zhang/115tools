@@ -8,15 +8,15 @@ import (
 	"time"
 
 	"github.com/sgtdi/fswatcher"
-	"github.com/ytx-zhang/115tools/internal/engine/kit"
+	"github.com/ytx-zhang/115tools/internal/engine/shared"
 	"github.com/ytx-zhang/115tools/internal/journal"
 )
 
 // Watcher 本地实时监听任务（常驻协程）。事件按选项分流：
 // 视频/strm 立即同步（对应开关开启时）→ 直传；其余 → 收集父目录进防抖合集后批量扫描。
 type Watcher struct {
-	paths   *kit.TaskPaths
-	rules   kit.Rules
+	paths   *shared.TaskPaths
+	rules   shared.Rules
 	sc      *Scanner
 	co      *CloudOps
 	dirPool *DirPool
@@ -26,7 +26,7 @@ type Watcher struct {
 }
 
 // NewWatcher 构造监听模块。
-func NewWatcher(deps *kit.Deps, sc *Scanner, co *CloudOps, dirPool *DirPool, running func() bool, opts Opts) *Watcher {
+func NewWatcher(deps *shared.Deps, sc *Scanner, co *CloudOps, dirPool *DirPool, running func() bool, opts Opts) *Watcher {
 	return &Watcher{paths: deps.Paths, rules: deps.Rules, sc: sc, co: co, dirPool: dirPool, running: running, opts: opts}
 }
 
@@ -99,7 +99,7 @@ func (w *Watcher) dispatch(ctx context.Context, p string) {
 		go w.uploadVideo(ctx, p)
 		return
 	}
-	if w.opts.StrmNow && kit.IsStrmPath(p) {
+	if w.opts.StrmNow && shared.IsStrmPath(p) {
 		go w.uploadVideo(ctx, p)
 		return
 	}
@@ -116,7 +116,7 @@ func (w *Watcher) uploadVideo(ctx context.Context, fPath string) {
 	fileInfo, err := os.Stat(fPath)
 	if err != nil {
 		w.armParent(fPath)
-		dbFid, dbSize := w.sc.vault.Get(ctx, fPath)
+		dbFid, dbSize := w.sc.idx.Get(ctx, fPath)
 		w.sc.HandleFile(ctx, nil, fPath, dbFid, dbSize, nil)
 		return
 	}
@@ -124,7 +124,7 @@ func (w *Watcher) uploadVideo(ctx context.Context, fPath string) {
 		journal.Warn(ctx, "视频直传跳过：无法获取父目录 FID", "路径", fPath, "错误", err)
 		return
 	}
-	dbFid, dbSize := w.sc.vault.Get(ctx, fPath)
+	dbFid, dbSize := w.sc.idx.Get(ctx, fPath)
 	w.sc.HandleFile(ctx, nil, fPath, dbFid, dbSize, fileInfo)
 }
 

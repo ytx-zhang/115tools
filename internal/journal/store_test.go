@@ -2,6 +2,7 @@ package journal
 
 import (
 	"encoding/json/v2"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -73,6 +74,97 @@ func assertLogs(t *testing.T, s *Store, taskID string, seq uint64, wantMsg strin
 	if len(logs) != 1 || logs[0].Msg != wantMsg {
 		t.Fatalf("%s/%d 日志不符，实得 %+v", taskID, seq, logs)
 	}
+}
+
+// TestSystemLogs 系统程序日志：落库、分页（向上加载更早）、上限淘汰、清空。
+func TestSystemLogs(t *testing.T) {
+	s := newTestStore(t)
+
+	// 写入 5 条
+	for i := 1; i <= 5; i++ {
+		entry, err := s.AppendSystemLog("INFO", fmt.Sprintf("msg%d", i), "")
+		if err != nil {
+			t.Fatalf("写入系统日志失败: %v", err)
+		}
+		if entry.Seq != uint64(i) {
+			t.Fatalf("seq 应递增：第 %d 条 seq=%d", i, entry.Seq)
+		}
+	}
+
+	// 最新 3 条（正序）
+	logs, more, err := s.ListSystemLogs(3, 0)
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	if len(logs) != 3 || logs[0].Msg != "msg3" || logs[2].Msg != "msg5" {
+		t.Fatalf("最新批次错误: %+v", msgsOf(logs))
+	}
+	if !more {
+		t.Fatal("还有更旧日志，应 has_more=true")
+	}
+
+	// 向上加载更早：before=msg3 的 seq（3）→ 应返回 msg1、msg2
+	older, more2, err := s.ListSystemLogs(10, 3)
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	if len(older) != 2 || older[0].Msg != "msg1" || older[1].Msg != "msg2" {
+		t.Fatalf("更早批次错误: %+v", msgsOf(older))
+	}
+	if more2 {
+		t.Fatal("已到最早，不应 has_more")
+	}
+
+	// 清空
+	if err := s.ClearSystemLogs(); err != nil {
+		t.Fatalf("清空失败: %v", err)
+	}
+	logs, _, err = s.ListSystemLogs(10, 0)
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("清空后仍有日志: %+v", msgsOf(logs))
+	}
+	// 清空后 seq 不回绕（继续递增，前端 SSE 去重不受影响）
+	entry, err := s.AppendSystemLog("WARN", "after-clear", "")
+	if err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+	if entry.Seq != 6 {
+		t.Fatalf("清空后 seq 应继续递增，实得 %d", entry.Seq)
+	}
+}
+
+// TestSystemLogsPrune 超出 maxSystemLogs 时自动淘汰最旧。
+func TestSystemLogsPrune(t *testing.T) {
+	s := newTestStore(t)
+	for i := 0; i < maxSystemLogs+50; i++ {
+		if _, err := s.AppendSystemLog("INFO", fmt.Sprintf("m%d", i), ""); err != nil {
+			t.Fatalf("写入失败: %v", err)
+		}
+	}
+	logs, more, err := s.ListSystemLogs(maxSystemLogs, 0)
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	if len(logs) != maxSystemLogs {
+		t.Fatalf("应保留 %d 条，实得 %d", maxSystemLogs, len(logs))
+	}
+	if logs[0].Msg != "m50" || logs[len(logs)-1].Msg != fmt.Sprintf("m%d", maxSystemLogs+49) {
+		t.Fatalf("淘汰范围错误：首=%s 尾=%s", logs[0].Msg, logs[len(logs)-1].Msg)
+	}
+	if more {
+		t.Fatal("已淘汰到上限，不应 has_more")
+	}
+}
+
+func msgsOf(logs []LogEntry) []string {
+	out := make([]string, len(logs))
+	for i, l := range logs {
+		out[i] = l.Msg
+	}
+	return out
 }
 
 // TestSeqKeepsIncreasingAfterReopen 重启后新 run 的 seq 不能撞上已有记录。

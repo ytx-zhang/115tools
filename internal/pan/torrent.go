@@ -27,7 +27,8 @@ func ParseTorrentInfo(data []byte) (infoHash, name string, err error) {
 	return info.InfoHash, info.Name, nil
 }
 
-// parseTorrent 定位顶层 dict 的 info 键，取 value 原始区间，并读取 name。
+// parseTorrent 定位顶层 dict 的 info 键，取 value 原始区间。名称只从 info dict 内读取
+// （BT 规范顶层无 name 键），故命中 info 后即可提前结束扫描。
 func parseTorrent(data []byte) (*torrentInfo, error) {
 	pos := 0
 	if pos >= len(data) || data[pos] != 'd' {
@@ -36,9 +37,8 @@ func parseTorrent(data []byte) (*torrentInfo, error) {
 	pos++
 
 	infoStart, infoEnd := -1, -1
-	name := ""
 
-	for pos < len(data) {
+	for pos < len(data) && infoStart < 0 {
 		if data[pos] == 'e' {
 			break
 		}
@@ -50,14 +50,6 @@ func parseTorrent(data []byte) (*torrentInfo, error) {
 		if key == "info" {
 			infoStart = pos
 			infoEnd = skipValue(data, pos)
-			pos = infoEnd
-		} else if key == "name" && name == "" {
-			if v, np, e := readBString(data, pos); e == nil {
-				name = v
-				pos = np
-			} else {
-				pos = skipValue(data, pos)
-			}
 		} else {
 			pos = skipValue(data, pos)
 		}
@@ -66,11 +58,7 @@ func parseTorrent(data []byte) (*torrentInfo, error) {
 	if infoStart < 0 || infoEnd <= infoStart {
 		return nil, fmt.Errorf("种子格式错误: 缺少 info 字典")
 	}
-	infoHash := sha1Hex(data[infoStart:infoEnd])
-	if n := parseInfoName(data[infoStart:infoEnd]); n != "" {
-		name = n
-	}
-	return &torrentInfo{InfoHash: infoHash, Name: name}, nil
+	return &torrentInfo{InfoHash: sha1Hex(data[infoStart:infoEnd]), Name: parseInfoName(data[infoStart:infoEnd])}, nil
 }
 
 // parseInfoName 在 info dict 原始字节内找 name 键。

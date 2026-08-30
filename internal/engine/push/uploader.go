@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ytx-zhang/115tools/internal/engine/kit"
+	"github.com/ytx-zhang/115tools/internal/engine/shared"
+	"github.com/ytx-zhang/115tools/internal/index"
 	"github.com/ytx-zhang/115tools/internal/journal"
 	"github.com/ytx-zhang/115tools/internal/pan"
-	"github.com/ytx-zhang/115tools/internal/vault"
 )
 
 // uploadMu 与 inFlight 为包级：多任务后每个任务一个 Uploader，锁留实例里上传会变成任务间并行、
@@ -25,11 +25,11 @@ var (
 // Uploader 上传执行模块（只执行上传，判定归 Scanner.HandleFile / Watcher）。
 type Uploader struct {
 	api   *pan.Client
-	vault *vault.Index
-	paths *kit.TaskPaths
-	rules kit.Rules
-	cache kit.CacheMover
-	prog  *kit.Progress
+	idx   *index.Index
+	paths *shared.TaskPaths
+	rules shared.Rules
+	cache shared.CacheMover
+	prog  *shared.Progress
 	opts  Opts
 }
 
@@ -42,8 +42,8 @@ type Opts struct {
 }
 
 // NewUploader 构造上传模块。
-func NewUploader(deps *kit.Deps, prog *kit.Progress, opts Opts) *Uploader {
-	return &Uploader{api: deps.Pan, vault: deps.Vault, paths: deps.Paths, rules: deps.Rules, cache: deps.Cache, prog: prog, opts: opts}
+func NewUploader(deps *shared.Deps, prog *shared.Progress, opts Opts) *Uploader {
+	return &Uploader{api: deps.Pan, idx: deps.Index, paths: deps.Paths, rules: deps.Rules, cache: deps.Cache, prog: prog, opts: opts}
 }
 
 type upJob struct {
@@ -87,7 +87,7 @@ func (u *Uploader) DoUpload(job upJob) {
 		return
 	}
 	upStart := time.Now()
-	if kit.IsStrmPath(job.path) {
+	if shared.IsStrmPath(job.path) {
 		err = u.upStrmTask(job.ctx, job.parentFid, job.path)
 	} else {
 		err = u.upFileTask(job.ctx, job.parentFid, job.path, fileInfo)
@@ -113,17 +113,17 @@ func (u *Uploader) upFileTask(ctx context.Context, parentFid, fPath string, file
 	if u.rules.CheckVideo(ext, size) {
 		if !u.opts.GenStrm {
 			// 不生成 strm：保留原视频（纯云端备份），按原路径 + 真实 size 记索引。
-			u.vault.Put(ctx, savePath, cloudFid, size)
+			u.idx.Put(ctx, savePath, cloudFid, size)
 			return nil
 		}
-		savePath = kit.VideoToStrmPath(fPath)
+		savePath = shared.VideoToStrmPath(fPath)
 		// 旧同名 strm 在库 → 旧云端视频移入回收目录（同名视频覆盖 v3）
-		if dbFid := u.vault.GetFid(ctx, savePath); dbFid != "" {
+		if dbFid := u.idx.GetFid(ctx, savePath); dbFid != "" {
 			if err := u.api.MoveFile(ctx, dbFid, u.paths.TempFid, savePath); err != nil {
 				return fmt.Errorf("[%s]: 清理旧视频失败: %w", savePath, err)
 			}
 		}
-		if err := kit.WriteStrmFile(u.paths.StrmURL, info.PickCode, savePath); err != nil {
+		if err := shared.WriteStrmFile(u.paths.StrmURL, info.PickCode, savePath); err != nil {
 			return fmt.Errorf("[%s]: 写入 strm 失败: %w", savePath, err)
 		}
 		// 索引 size 用写盘后实际 mtime（与 HandleFile 比对口径一致）。
@@ -143,13 +143,13 @@ func (u *Uploader) upFileTask(ctx context.Context, parentFid, fPath string, file
 		}
 	}
 
-	u.vault.Put(ctx, savePath, cloudFid, size)
+	u.idx.Put(ctx, savePath, cloudFid, size)
 	return nil
 }
 
 // upStrmTask 处理本地新增的 .strm：按 pickcode 定位云端视频 → 移入目标目录 → 改回原名 → 重写本地 strm。
 func (u *Uploader) upStrmTask(ctx context.Context, parentFid, fPath string) error {
-	pickcode, fid := kit.ParseStrmFile(fPath)
+	pickcode, fid := shared.ParseStrmFile(fPath)
 	if pickcode == "" {
 		return fmt.Errorf("[%s]: 无 pickcode", fPath)
 	}
@@ -173,13 +173,13 @@ func (u *Uploader) upStrmTask(ctx context.Context, parentFid, fPath string) erro
 			return fmt.Errorf("[%s]: 云端扩展名修复失败: %w", fPath, err)
 		}
 	}
-	if err := kit.WriteStrmFile(u.paths.StrmURL, pickcode, fPath); err != nil {
+	if err := shared.WriteStrmFile(u.paths.StrmURL, pickcode, fPath); err != nil {
 		return fmt.Errorf("[%s]: 文件写入失败: %w", fPath, err)
 	}
 	size := time.Now().Unix()
 	if st, err := os.Stat(fPath); err == nil {
 		size = st.ModTime().Unix()
 	}
-	u.vault.Put(ctx, fPath, fid, size)
+	u.idx.Put(ctx, fPath, fid, size)
 	return nil
 }

@@ -1,21 +1,20 @@
-package kit
+package shared
 
 import (
 	"context"
 	"fmt"
 	"path/filepath"
 
+	"github.com/ytx-zhang/115tools/internal/index"
 	"github.com/ytx-zhang/115tools/internal/journal"
 	"github.com/ytx-zhang/115tools/internal/pan"
-	"github.com/ytx-zhang/115tools/internal/vault"
 	"golang.org/x/sync/errgroup"
 )
 
-// Entry 是 VisitFile 回调收到的文件元数据。
+// Entry 是 VisitFile 回调收到的文件元数据（pickCode 由回调参数直接给出，不重复携带）。
 type Entry struct {
-	IsVideo  bool
-	Size     int64
-	PickCode string
+	IsVideo bool
+	Size    int64
 }
 
 // Visitor 定义云端遍历回调。Walk 负责递归/并发/取消，使用方通过回调决定动作。
@@ -26,16 +25,16 @@ type Visitor struct {
 	SkipByCount bool
 }
 
-// Walker 云端递归遍历。依赖：pan（列表）、vault（计数跳过）、rules（isv 兜底判视频）。
+// Walker 云端递归遍历。依赖：pan（列表）、index（计数跳过）、rules（isv 兜底判视频）。
 type Walker struct {
 	api   *pan.Client
-	vault *vault.Index
+	idx   *index.Index
 	rules Rules
 }
 
 // NewWalker 构造 walker。
 func NewWalker(deps *Deps) *Walker {
-	return &Walker{api: deps.Pan, vault: deps.Vault, rules: deps.Rules}
+	return &Walker{api: deps.Pan, idx: deps.Index, rules: deps.Rules}
 }
 
 // Walk 递归遍历云端目录树：计数跳过（可选）→ 拉子项 → 目录交 EnterDir → 文件交 VisitFile。
@@ -54,7 +53,7 @@ func (w *Walker) Walk(ctx context.Context, rootPath, rootFid string, v Visitor, 
 				journal.Warn(gctx, "GetDirInfo 失败，回退全量同步", "路径", path, "错误", err)
 			} else {
 				cloudTotal := int64(info.FileCount) + int64(info.FolderCount)
-				dbTotal := w.vault.CountRecursive(gctx, path)
+				dbTotal := w.idx.CountRecursive(gctx, path)
 				if dbTotal > 0 && cloudTotal == dbTotal {
 					return nil
 				}
@@ -76,27 +75,19 @@ func (w *Walker) Walk(ctx context.Context, rootPath, rootFid string, v Visitor, 
 			fullPath := filepath.Join(path, item.Name)
 
 			if item.IsDir {
-				descend := true
-				if v.EnterDir != nil {
-					d, derr := v.EnterDir(gctx, fullPath, item.Fid)
-					if derr != nil {
-						journal.Error(gctx, "目录处理失败", "路径", fullPath, "错误", derr)
-					} else {
-						descend = d
-					}
-				}
-				if descend {
+				d, derr := v.EnterDir(gctx, fullPath, item.Fid)
+				if derr != nil {
+					journal.Error(gctx, "目录处理失败", "路径", fullPath, "错误", derr)
+				} else if d {
 					g.Go(func() error { return walk(fullPath, item.Fid) })
 				}
 				continue
 			}
 
-			if v.VisitFile != nil {
-				isVideo := item.IsVideo || w.rules.IsVideoExt(item.Name)
-				if ferr := v.VisitFile(gctx, fullPath, item.Fid, item.PickCode,
-					Entry{IsVideo: isVideo, Size: item.Size, PickCode: item.PickCode}); ferr != nil {
-					journal.Error(gctx, "文件处理失败", "路径", fullPath, "错误", ferr)
-				}
+			isVideo := item.IsVideo || w.rules.IsVideoExt(item.Name)
+			if ferr := v.VisitFile(gctx, fullPath, item.Fid, item.PickCode,
+				Entry{IsVideo: isVideo, Size: item.Size}); ferr != nil {
+				journal.Error(gctx, "文件处理失败", "路径", fullPath, "错误", ferr)
 			}
 		}
 		return nil

@@ -17,27 +17,22 @@ type overview struct {
 	Tasks       []engine.TaskRuntime `json:"tasks"`
 }
 
-// event 是 SSE 推送的帧（type 区分 overview / banner）。
+// event 是 SSE 推送的帧（type 区分 overview / syslog）。
 type event struct {
-	Type     string          `json:"type"`
-	Overview *overview       `json:"overview,omitempty"`
-	Banner   *journal.Banner `json:"banner,omitempty"`
+	Type     string            `json:"type"`
+	Overview *overview         `json:"overview,omitempty"`
+	Log      *journal.LogEntry `json:"log,omitempty"`
 }
 
 // handleOverview 返回当前状态快照（非 SSE，供初次加载兜底）。
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.overview())
+	writeJSON(w, http.StatusOK, s.overviewRef())
 }
 
-// handleClearBanners 清空系统级错误/警告横幅（广播清空信号，SSE 客户端同步清空本地列表）。
-func (s *Server) handleClearBanners(w http.ResponseWriter, r *http.Request) {
-	journal.ClearBanners()
-	writeOK(w, http.StatusOK)
-}
-
-func (s *Server) overview() overview {
+// overviewRef 返回状态快照指针（复用于 HTTP 接口与 SSE 帧）。
+func (s *Server) overviewRef() *overview {
 	st := s.Conf.Status()
-	return overview{
+	return &overview{
 		ConfigReady: st.Ready,
 		Missing:     st.Missing,
 		InitError:   s.getInitError(),
@@ -66,21 +61,18 @@ func sseConnect(w http.ResponseWriter) (*sseWriter, bool) {
 	return sw, true
 }
 
-func (s *sseWriter) writeData(payload string) bool {
-	if _, err := s.w.Write([]byte("data: " + payload + "\n\n")); err != nil {
+// writeChunk 写出一个 SSE 块（data 或注释）并立即 flush；写失败返回 false。
+func (s *sseWriter) writeChunk(prefix, payload string) bool {
+	if _, err := s.w.Write([]byte(prefix + payload + "\n\n")); err != nil {
 		return false
 	}
 	s.flusher.Flush()
 	return true
 }
 
-func (s *sseWriter) comment(msg string) bool {
-	if _, err := s.w.Write([]byte(":" + msg + "\n\n")); err != nil {
-		return false
-	}
-	s.flusher.Flush()
-	return true
-}
+func (s *sseWriter) writeData(payload string) bool { return s.writeChunk("data: ", payload) }
+
+func (s *sseWriter) comment(msg string) bool { return s.writeChunk(":", msg) }
 
 // handleEvents SSE 状态流：连接即回放 overview + 最近横幅，之后状态变更/新横幅实时推送。
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -92,8 +84,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	hubCh, unsubHub := s.Hub.Subscribe()
 	defer unsubHub()
-	bannerCh, unsubBanner := journal.Subscribe()
-	defer unsubBanner()
+	sysCh, unsubSys := journal.SubscribeSystemLog()
+	defer unsubSys()
 
 	send := func(e event) bool {
 		data, err := json.Marshal(e)
@@ -103,13 +95,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return sw.writeData(string(data))
 	}
 
-	// 回放：overview + 最近横幅
+	// 回放：overview + 最近 100 条系统程序日志
 	if !send(event{Type: "overview", Overview: s.overviewRef()}) {
 		return
 	}
-	for _, b := range journal.Banners() {
-		b := b
-		if !send(event{Type: "banner", Banner: &b}) {
+	logs, _, err := s.Journal.ListSystemLogs(100, 0)
+	if err != nil {
+		return
+	}
+	for _, l := range logs {
+		if !send(event{Type: "syslog", Log: &l}) {
 			return
 		}
 	}
@@ -130,16 +125,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !send(event{Type: "overview", Overview: s.overviewRef()}) {
 				return
 			}
-		case b := <-bannerCh:
-			if !send(event{Type: "banner", Banner: &b}) {
+		case l := <-sysCh:
+			if !send(event{Type: "syslog", Log: &l}) {
 				return
 			}
 		}
 	}
-}
-
-// overviewRef 返回 overview 的指针（复用于回放与实时推送）。
-func (s *Server) overviewRef() *overview {
-	o := s.overview()
-	return &o
 }

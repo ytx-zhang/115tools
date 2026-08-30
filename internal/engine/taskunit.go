@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/ytx-zhang/115tools/internal/conf"
-	"github.com/ytx-zhang/115tools/internal/engine/kit"
 	"github.com/ytx-zhang/115tools/internal/engine/pull"
 	"github.com/ytx-zhang/115tools/internal/engine/push"
+	"github.com/ytx-zhang/115tools/internal/engine/shared"
+	"github.com/ytx-zhang/115tools/internal/index"
 	"github.com/ytx-zhang/115tools/internal/journal"
-	"github.com/ytx-zhang/115tools/internal/vault"
 )
 
 // TaskUnit 单个任务的运行时单元：持有本任务的路径/规则/进度，组装 push 与 pull 双方向。
@@ -22,11 +22,10 @@ type TaskUnit struct {
 	task conf.Task
 	eng  *Engine
 
-	paths *kit.TaskPaths
-	prog  *kit.Progress
+	paths *shared.TaskPaths
+	prog  *shared.Progress
 
-	wk      *kit.Walker
-	strm    *kit.StrmIO
+	wk      *shared.Walker
 	sc      *push.Scanner
 	co      *push.CloudOps
 	up      *push.Uploader
@@ -53,8 +52,8 @@ type TaskUnit struct {
 
 // newUnit 组装单个任务运行时单元（由 Engine 调用）。
 func (e *Engine) newUnit(task conf.Task) *TaskUnit {
-	paths := kit.NewTaskPaths(e.conf, task)
-	deps := &kit.Deps{Pan: e.pan, Vault: e.vault, Paths: paths, Rules: e.rules, Cache: e.cache}
+	paths := shared.NewTaskPaths(e.conf, task)
+	deps := &shared.Deps{Pan: e.pan, Index: e.idx, Paths: paths, Rules: e.rules, Cache: e.cache}
 	pc := task.PushCfg()
 	opts := push.Opts{
 		GenStrm:  pc.ToStrm,
@@ -67,32 +66,34 @@ func (e *Engine) newUnit(task conf.Task) *TaskUnit {
 		task:    task,
 		eng:     e,
 		paths:   paths,
-		prog:    kit.NewProgress(e.onChange),
+		prog:    shared.NewProgress(e.onChange),
 		dirPool: push.NewDirPool(),
 	}
-	u.wk = kit.NewWalker(deps)
-	u.strm = kit.NewStrmIO(deps)
+	u.wk = shared.NewWalker(deps)
 	u.up = push.NewUploader(deps, u.prog, opts)
 	u.co = push.NewCloudOps(deps)
 	u.sc = push.NewScanner(deps, u.up, u.co)
 	u.watcher = push.NewWatcher(deps, u.sc, u.co, u.dirPool, func() bool { return u.pullRunning.Load() }, opts)
-	// 下载云端独有是云端扫描的本职，恒开（不暴露开关）。
-	pullOpts := pull.Options{FetchMissing: true}
+
+	// 云端扫描选项按任务类型显式组装（pull 本体 vs push 的连带扫描）
+	var pullOpts pull.Options
 	if task.Kind == conf.KindPull {
-		// pull 任务：以云端为准拉取，不存在冗余概念（本地无完整索引可判定「云端同名但内容不符」），恒关。
+		// pull 任务：以云端为准拉取，不存在冗余概念（本地无完整索引可判定「云端同名但内容不符」），恒关；
+		// 下载云端独有是云端扫描的本职，恒开（不暴露开关）。
 		pu := task.PullCfg()
-		pullOpts.GenStrm = pu.ToStrm
-		pullOpts.ArchiveToTemp = pu.ArchiveToTemp
+		pullOpts = pull.Options{FetchMissing: true, GenStrm: pu.ToStrm, ArchiveToTemp: pu.ArchiveToTemp}
 	} else {
 		// push 任务的「全量扫描后连带云端扫描」：是否下载云端独有由 FetchMissing 控制（关 = 只做冗余检查）；
 		// 冗余删除依赖本任务完整的本地索引，故仅此处可配；
 		// 归档到回收目录是 pull 任务的收尾动作，连带扫描不做。
 		ap := task.AttachCfg()
-		pullOpts.FetchMissing = ap.FetchMissing
-		pullOpts.GenStrm = ap.ToStrm
-		pullOpts.DropRedundant = ap.DropRedundant
+		pullOpts = pull.Options{
+			FetchMissing:  ap.FetchMissing,
+			GenStrm:       ap.ToStrm,
+			DropRedundant: ap.DropRedundant,
+		}
 	}
-	u.pull = pull.NewRunner(deps, u.wk, u.strm, pullOpts)
+	u.pull = pull.NewRunner(deps, u.wk, shared.NewStrmIO(deps), pullOpts)
 	u.pullDone = make(chan struct{})
 	close(u.pullDone)
 	return u
@@ -117,15 +118,15 @@ func (u *TaskUnit) init(ctx context.Context) error {
 	} else {
 		u.paths.CloudFid = info.Fid
 		// 根 FID 变更 → 清空旧索引
-		if dbFid := u.eng.vault.GetFid(ctx, u.paths.LocalDir); dbFid != "" && dbFid != info.Fid {
+		if dbFid := u.eng.idx.GetFid(ctx, u.paths.LocalDir); dbFid != "" && dbFid != info.Fid {
 			journal.Info(ctx, "云端目录 FID 变更，清空索引记录", "路径", u.paths.LocalDir)
-			u.eng.vault.ClearPaths(ctx, []string{u.paths.LocalDir})
+			u.eng.idx.ClearPaths(ctx, []string{u.paths.LocalDir})
 		}
-		u.eng.vault.Put(ctx, u.paths.LocalDir, info.Fid, vault.SizeDir)
+		u.eng.idx.Put(ctx, u.paths.LocalDir, info.Fid, index.SizeDir)
 	}
 
 	// 首次（或索引被清空后）构建云端索引
-	if u.eng.vault.CountRecursive(ctx, u.paths.LocalDir) == 0 {
+	if u.eng.idx.CountRecursive(ctx, u.paths.LocalDir) == 0 {
 		journal.Info(ctx, "首次构建云端索引", "路径", u.paths.LocalDir)
 		if err := u.buildIndex(ctx); err != nil {
 			return err
@@ -136,27 +137,27 @@ func (u *TaskUnit) init(ctx context.Context) error {
 
 // buildIndex 遍历云端树构建本地路径索引（只记 fid/size，不落地文件）。
 func (u *TaskUnit) buildIndex(ctx context.Context) error {
-	return u.wk.Walk(ctx, u.paths.CloudDir, u.paths.CloudFid, kit.Visitor{
+	return u.wk.Walk(ctx, u.paths.CloudDir, u.paths.CloudFid, shared.Visitor{
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
-			local := kit.MapCloudToLocal(u.paths.LocalDir, u.paths.CloudDir, path)
-			u.eng.vault.Put(ctx, local, fid, vault.SizeDir)
+			local := shared.MapCloudToLocal(u.paths.LocalDir, u.paths.CloudDir, path)
+			u.eng.idx.Put(ctx, local, fid, index.SizeDir)
 			return true, nil
 		},
-		VisitFile: func(_ context.Context, path, fid, _ string, e kit.Entry) error {
-			local := kit.MapCloudToLocal(u.paths.LocalDir, u.paths.CloudDir, path)
+		VisitFile: func(_ context.Context, path, fid, _ string, e shared.Entry) error {
+			local := shared.MapCloudToLocal(u.paths.LocalDir, u.paths.CloudDir, path)
 			savePath := local
 			saveSize := e.Size
 			if e.IsVideo {
-				savePath = kit.VideoToStrmPath(local)
+				savePath = shared.VideoToStrmPath(local)
 				saveSize = time.Now().Unix()
 				// 本地已存在旧 strm → 校验归属并规范化链接
 				if info, serr := os.Stat(savePath); serr == nil {
-					if matched, _, mt := kit.NormalizeOwnedStrm(u.paths.StrmURL, savePath, fid, info.ModTime().Unix()); matched {
+					if matched, _, mt := shared.NormalizeOwnedStrm(u.paths.StrmURL, savePath, fid, info.ModTime().Unix()); matched {
 						saveSize = mt
 					}
 				}
 			}
-			u.eng.vault.Put(ctx, savePath, fid, saveSize)
+			u.eng.idx.Put(ctx, savePath, fid, saveSize)
 			return nil
 		},
 	}, func(err error) {
@@ -176,7 +177,7 @@ func (u *TaskUnit) start(ctx context.Context, wg *sync.WaitGroup) {
 			wg.Go(func() { u.watcher.Pump(u.residentCtx) })
 		}
 	}
-	if u.cronEnabled() {
+	if enabled, _ := u.cronSpec(); enabled {
 		wg.Go(func() { u.cronLoop(u.residentCtx) })
 	}
 }
@@ -190,12 +191,14 @@ func (u *TaskUnit) stop() {
 	}
 }
 
-// cronEnabled 判断本任务是否启用定时（push 看 Rescan，pull 看 PullCron）。
-func (u *TaskUnit) cronEnabled() bool {
+// cronSpec 返回本任务的定时配置（push 看 Rescan，pull 看 PullCron）。
+func (u *TaskUnit) cronSpec() (enabled bool, intervalHours int) {
 	if u.task.Kind == conf.KindPush {
-		return u.task.PushCfg().Rescan.Enabled
+		c := u.task.PushCfg().Rescan
+		return c.Enabled, c.IntervalHours
 	}
-	return u.task.PullCfg().Cron.Enabled
+	c := u.task.PullCfg().Cron
+	return c.Enabled, c.IntervalHours
 }
 
 // pushLoop 常驻消费者：逐目录串行处理，每个目录批次记一条执行历史。
@@ -336,7 +339,7 @@ func (u *TaskUnit) runPull(ctx context.Context, trigger journal.Trigger) {
 	case context.Cause(ctx) != nil:
 		state = journal.StateCanceled
 	}
-	c.Scanned = u.prog.Total()
+	// 扫描数由 pull.Run 自己累加（progress 只服务于 push 上传计数，此处不可覆盖）
 	if err := u.eng.journal.Finish(seq, state, c, errMsg); err != nil {
 		journal.Error(ctx, "写入执行结果失败", "错误", err)
 	}
@@ -379,11 +382,8 @@ func (u *TaskUnit) pushBaseCtx() context.Context {
 
 // cronLoop 定时触发本任务（push=全量扫描，pull=云端同步）。
 func (u *TaskUnit) cronLoop(ctx context.Context) {
-	interval := time.Duration(u.task.PushCfg().Rescan.IntervalHours) * time.Hour
-	if u.task.Kind == conf.KindPull {
-		interval = time.Duration(u.task.PullCfg().Cron.IntervalHours) * time.Hour
-	}
-	ticker := time.NewTicker(interval)
+	_, hours := u.cronSpec()
+	ticker := time.NewTicker(time.Duration(hours) * time.Hour)
 	defer ticker.Stop()
 	for {
 		select {

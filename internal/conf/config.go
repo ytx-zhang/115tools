@@ -75,13 +75,11 @@ func New(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// 新建实例尚未被任何 goroutine 持有，无需加锁
 			cfg := &Config{path: path}
-			cfg.mu.Lock()
 			if serr := cfg.persistLocked(); serr != nil {
-				cfg.mu.Unlock()
 				return nil, fmt.Errorf("创建配置文件失败: %w", serr)
 			}
-			cfg.mu.Unlock()
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)
@@ -187,12 +185,7 @@ func (c *Config) AddTask(t Task) error {
 		t.ID = NewID()
 	}
 	t.normalize()
-	if err := c.validateTasksLocked(append(slices.Clone(c.Tasks), t)); err != nil {
-		return err
-	}
-	c.Tasks = append(c.Tasks, t)
-	c.normalizeLocked()
-	return c.persistLocked()
+	return c.commitLocked(append(slices.Clone(c.Tasks), t))
 }
 
 // UpdateTask 按 ID 覆盖任务并落盘。任务不存在返回错误。
@@ -206,7 +199,12 @@ func (c *Config) UpdateTask(t Task) error {
 	t.normalize()
 	next := slices.Clone(c.Tasks)
 	next[idx] = t
-	if err := c.validateTasksLocked(next); err != nil {
+	return c.commitLocked(next)
+}
+
+// commitLocked 校验并落盘新任务集合（调用方需持有写锁）。
+func (c *Config) commitLocked(next []Task) error {
+	if err := validateTasks(next); err != nil {
 		return err
 	}
 	c.Tasks = next
@@ -242,9 +240,6 @@ func (c *Config) ListTasks() []Task {
 	defer c.mu.RUnlock()
 	return slices.Clone(c.Tasks)
 }
-
-// validateTasksLocked 校验追加/覆盖后的任务集合（调用方需持有写锁）。
-func (c *Config) validateTasksLocked(tasks []Task) error { return validateTasks(tasks) }
 
 func (c *Config) indexOfLocked(id string) int {
 	for i := range c.Tasks {

@@ -32,33 +32,29 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateTask 新建任务（ID 后端生成）。
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
-	var t conf.Task
-	if err := readJSON(w, r, &t); err != nil {
-		writeErr(w, http.StatusBadRequest, "请求格式错误: %v", err)
-		return
-	}
-	t.ID = conf.NewID()
-	if err := s.Conf.AddTask(t); err != nil {
-		writeErr(w, http.StatusBadRequest, "保存任务失败: %v", err)
-		return
-	}
-	if err := s.Engine.ReloadTask(t); err != nil {
-		writeErr(w, http.StatusInternalServerError, "启动任务失败: %v", err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, t)
+	s.saveTask(w, r, conf.NewID(), true, http.StatusCreated)
 }
 
 // handleUpdateTask 更新任务。
 func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	s.saveTask(w, r, r.PathValue("id"), false, http.StatusOK)
+}
+
+// saveTask 校验 → 落盘 → 热重建任务单元（新建与更新共用）。
+func (s *Server) saveTask(w http.ResponseWriter, r *http.Request, id string, create bool, okCode int) {
 	var t conf.Task
 	if err := readJSON(w, r, &t); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求格式错误: %v", err)
 		return
 	}
 	t.ID = id
-	if err := s.Conf.UpdateTask(t); err != nil {
+	// 新建走 AddTask（追加），更新走 UpdateTask（按 ID 覆盖）
+	if create {
+		if err := s.Conf.AddTask(t); err != nil {
+			writeErr(w, http.StatusBadRequest, "保存任务失败: %v", err)
+			return
+		}
+	} else if err := s.Conf.UpdateTask(t); err != nil {
 		writeErr(w, http.StatusBadRequest, "保存任务失败: %v", err)
 		return
 	}
@@ -66,7 +62,7 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "重建任务失败: %v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, t)
+	writeJSON(w, okCode, t)
 }
 
 // handleDeleteTask 删除任务（?purge=1 同时清理该任务的本地路径索引）。
@@ -86,18 +82,10 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		journal.Warn(r.Context(), "删除任务历史失败", "错误", err)
 	}
 	// 可选清理该任务本地目录下的索引记录
-	if r.URL.Query().Get("purge") == "1" {
-		s.purgeTaskIndex(r, task)
+	if r.URL.Query().Get("purge") == "1" && s.Index != nil {
+		s.Index.ClearPaths(r.Context(), []string{task.LocalDir})
 	}
 	writeOK(w, http.StatusOK)
-}
-
-// purgeTaskIndex 清理某任务本地目录下的全部索引记录。
-func (s *Server) purgeTaskIndex(r *http.Request, task conf.Task) {
-	if s.Vault == nil {
-		return
-	}
-	s.Vault.ClearPaths(r.Context(), []string{task.LocalDir})
 }
 
 // handleStartTask 手动执行任务。
@@ -133,9 +121,6 @@ func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "读取执行历史失败: %v", err)
 		return
 	}
-	if runs == nil {
-		runs = []journal.Run{}
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 }
 
@@ -150,9 +135,6 @@ func (s *Server) handleTaskRunLogs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "读取执行日志失败: %v", err)
 		return
-	}
-	if logs == nil {
-		logs = []journal.LogEntry{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"logs": logs})
 }

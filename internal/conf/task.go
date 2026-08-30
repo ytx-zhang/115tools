@@ -6,7 +6,7 @@
 //     方向开关按类型分组存放（push 段 / pull 段，另一段为 nil 且不落盘）；
 //   - Token：115 访问/刷新令牌（敏感字段，运行时轮换，独立成段持久化）。
 //
-// 本文件定义任务模型与目录重叠校验；config.go 定义全局段与文件读写；dto.go 定义 Web 传输 DTO。
+// 本文件定义任务模型与目录重叠校验；config.go 定义全局段与文件读写；settings.go 定义 Web 传输 DTO。
 package conf
 
 import (
@@ -153,14 +153,9 @@ func NewID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		// crypto/rand 失败属不可恢复的系统级异常；任务 ID 冲突概率可忽略，此处退化为时间戳式兜底。
-		return "t_" + fmt.Sprintf("%x", nowNanos())
+		return "t_" + fmt.Sprintf("%x", now().UnixNano())
 	}
 	return "t_" + hex.EncodeToString(b[:])
-}
-
-// nowNanos 返回当前纳秒时间戳，仅在 crypto/rand 失败时作为 ID 兜底来源。
-func nowNanos() int64 {
-	return now().UnixNano()
 }
 
 // ──── 校验 ────
@@ -176,7 +171,7 @@ func (t *Task) Validate() error {
 	if !filepath.IsAbs(t.LocalDir) {
 		return fmt.Errorf("本地目录必须是绝对路径: %s", t.LocalDir)
 	}
-	if !isCloudAbs(t.CloudDir) {
+	if !strings.HasPrefix(t.CloudDir, "/") {
 		return fmt.Errorf("云端目录必须以 / 开头: %s", t.CloudDir)
 	}
 	// 方向配置段必须与其类型匹配（缺段由 normalize 补齐，走到这里仍缺即为非法）。
@@ -193,32 +188,18 @@ func (t *Task) Validate() error {
 	return nil
 }
 
-// isCloudAbs 判断 115 云端路径是否为绝对路径（以 / 开头）。
-func isCloudAbs(p string) bool { return strings.HasPrefix(p, "/") }
-
-// overlap 判断两个本地绝对路径是否重叠（相等或互为祖先/后代，即嵌套）。
-// 用于禁止两个任务指向同一本地目录或其子目录，否则路径索引会互相污染。
-func overlap(a, b string) bool {
-	ca, cb := filepath.Clean(a), filepath.Clean(b)
-	if ca == cb {
+// overlapClean 判断两个**已规范化**的路径是否重叠（相等或互为祖先/后代，即嵌套）。
+// 用于禁止两个任务指向同一目录或其子目录，否则路径索引会互相污染。
+func overlapClean(a, b string, sep byte) bool {
+	if a == b {
 		return true
 	}
 	// 前缀判定需补分隔符，避免 /a/bb 与 /a/b 误判为嵌套。
-	return strings.HasPrefix(ca, cb+string(filepath.Separator)) ||
-		strings.HasPrefix(cb, ca+string(filepath.Separator))
-}
-
-// cloudOverlap 判断两个云端绝对路径是否重叠（相等或嵌套）。115 路径统一以 / 分隔。
-func cloudOverlap(a, b string) bool {
-	ca, cb := CleanCloudPath(a), CleanCloudPath(b)
-	if ca == cb {
-		return true
-	}
-	return strings.HasPrefix(ca, cb+"/") || strings.HasPrefix(cb, ca+"/")
+	return strings.HasPrefix(a, b+string(sep)) || strings.HasPrefix(b, a+string(sep))
 }
 
 // CleanCloudPath 规范化云端路径：去除尾斜杠（保留根 "/"）。
-// 导出供 engine/kit 等路径映射复用（云端路径统一以 / 分隔，与本地文件系统无关）。
+// 导出供 engine/shared 等路径映射复用（云端路径统一以 / 分隔，与本地文件系统无关）。
 func CleanCloudPath(p string) string {
 	p = strings.TrimRight(p, "/")
 	if p == "" {
@@ -238,14 +219,14 @@ func validateOverlaps(tasks []Task) error {
 	}
 	for i := range locals {
 		for j := i + 1; j < len(locals); j++ {
-			if overlap(locals[i], locals[j]) {
+			if overlapClean(locals[i], locals[j], filepath.Separator) {
 				return fmt.Errorf("本地目录冲突：%s 与 %s 重叠或嵌套", locals[i], locals[j])
 			}
 		}
 	}
 	for i := range clouds {
 		for j := i + 1; j < len(clouds); j++ {
-			if cloudOverlap(clouds[i], clouds[j]) {
+			if overlapClean(clouds[i], clouds[j], '/') {
 				return fmt.Errorf("云端目录冲突：%s 与 %s 重叠或嵌套", clouds[i], clouds[j])
 			}
 		}

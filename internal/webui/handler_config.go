@@ -27,7 +27,8 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oldCacheDir := s.Conf.Settings.CacheDir
+	// 轻量读旧缓存目录（避免构建整份快照），用于对比是否发生变更
+	oldCacheDir := s.Conf.CacheDir()
 
 	// 验证新 refresh_token（非空才验证；空表示不变）
 	if req.RefreshToken != "" {
@@ -43,10 +44,11 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 透传缓存热更新：保留期 + 目录
-	if s.Stash != nil {
-		s.Stash.SetRetention(time.Duration(s.Conf.Settings.CacheRetentionDays) * 24 * time.Hour)
-		if s.Conf.Settings.CacheDir != oldCacheDir {
-			if err := s.Stash.SetDir(s.Conf.Settings.CacheDir); err != nil {
+	if s.Cache != nil {
+		cur := s.Conf.Snapshot()
+		s.Cache.SetRetention(time.Duration(cur.CacheRetentionDays) * 24 * time.Hour)
+		if cur.CacheDir != oldCacheDir {
+			if err := s.Cache.SetDir(cur.CacheDir); err != nil {
 				journal.Error(r.Context(), "更新缓存目录失败", "错误", err)
 			}
 		}

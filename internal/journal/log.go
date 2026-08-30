@@ -2,23 +2,19 @@ package journal
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 )
-
-// bannerCap 横幅环容量（仅保留最近 N 条系统级警告/错误）。
-const bannerCap = 20
 
 var (
 	store atomic.Pointer[Store]
 
-	bannerMu   sync.Mutex
-	banners    []Banner
-	bannerSubs []chan Banner
+	sysMu   sync.Mutex
+	sysSubs []chan LogEntry
 )
 
 type taskKey struct{}
@@ -61,7 +57,7 @@ func envLevel() slog.Level {
 }
 
 // Debug / Info / Warn / Error 是日志唯一入口：ctx 携带任务上下文时写入该 run 明细，
-// 否则仅终端输出（≥Warn 同时进横幅）。
+// 否则写入系统程序日志（落库 + SSE 广播，全部级别）。
 func Debug(ctx context.Context, msg string, kvs ...any) { slog.DebugContext(ctx, msg, kvs...) }
 func Info(ctx context.Context, msg string, kvs ...any)  { slog.InfoContext(ctx, msg, kvs...) }
 func Warn(ctx context.Context, msg string, kvs ...any)  { slog.WarnContext(ctx, msg, kvs...) }
@@ -78,15 +74,16 @@ type handler struct {
 func (h *handler) Enabled(ctx context.Context, lvl slog.Level) bool { return lvl >= h.min }
 
 func (h *handler) Handle(ctx context.Context, r slog.Record) error {
-	// run 明细阈值跟随 LOG_LEVEL：默认 INFO 只记 Info 及以上；DEBUG 级别时调试日志也进任务日志。
+	// 明细阈值跟随 LOG_LEVEL：默认 INFO 只记 Info 及以上；DEBUG 级别时调试日志也进任务日志/系统日志。
 	if r.Level >= h.min {
 		attrs := formatAttrs(r)
 		if tc, ok := taskFromCtx(ctx); ok {
 			if s := store.Load(); s != nil {
 				s.AppendLog(tc.taskID, tc.runSeq, r.Level.String(), r.Message, attrs)
 			}
-		} else if r.Level >= slog.LevelWarn {
-			pushBanner(r.Level.String(), r.Message, attrs)
+		} else {
+			// 无任务上下文：全部级别写入系统程序日志（落库 + SSE 广播）。
+			systemLog(r.Level.String(), r.Message, attrs)
 		}
 	}
 	if r.Level >= slog.LevelWarn {
@@ -126,56 +123,43 @@ func formatAttrs(r slog.Record) string {
 	return b.String()
 }
 
-// pushBanner 写入横幅环并广播给订阅者（慢订阅者丢弃，不阻塞）。
-func pushBanner(level, msg, attrs string) {
-	b := Banner{Level: level, Msg: msg, Attrs: attrs, Time: time.Now()}
-	bannerMu.Lock()
-	banners = append(banners, b)
-	if len(banners) > bannerCap {
-		banners = banners[1:]
+// systemLog 写入系统程序日志库并向订阅者广播（慢订阅者丢弃，不阻塞生产者）。
+func systemLog(level, msg, attrs string) {
+	if s := store.Load(); s != nil {
+		entry, err := s.AppendSystemLog(level, msg, attrs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "写入系统日志失败: %v\n", err)
+			return
+		}
+		pushSyslog(entry)
 	}
-	broadcast(b)
 }
 
-// broadcast 向全部订阅者非阻塞广播一条横幅（慢订阅者丢弃，不阻塞生产者）。
-// 调用方必须已持有 bannerMu；本函数负责解锁。
-func broadcast(b Banner) {
-	subs := append([]chan Banner(nil), bannerSubs...)
-	bannerMu.Unlock()
+// pushSyslog 向全部订阅者非阻塞广播一条系统日志。
+func pushSyslog(e LogEntry) {
+	sysMu.Lock()
+	subs := append([]chan LogEntry(nil), sysSubs...)
+	sysMu.Unlock()
 	for _, ch := range subs {
 		select {
-		case ch <- b:
+		case ch <- e:
 		default:
 		}
 	}
 }
 
-// Banners 返回当前横幅快照（最新在前，供 SSE 连接时回放）。
-func Banners() []Banner {
-	bannerMu.Lock()
-	defer bannerMu.Unlock()
-	return append([]Banner(nil), banners...)
-}
-
-// ClearBanners 清空横幅环并广播清空信号（SSE 客户端据此清空本地列表）。
-func ClearBanners() {
-	bannerMu.Lock()
-	banners = banners[:0]
-	broadcast(Banner{Cleared: true, Time: time.Now()})
-}
-
-// Subscribe 订阅横幅流；返回通道与取消订阅函数。
-func Subscribe() (chan Banner, func()) {
-	ch := make(chan Banner, 8)
-	bannerMu.Lock()
-	bannerSubs = append(bannerSubs, ch)
-	bannerMu.Unlock()
+// SubscribeSystemLog 订阅系统程序日志流；返回通道与取消订阅函数。
+func SubscribeSystemLog() (chan LogEntry, func()) {
+	ch := make(chan LogEntry, 32)
+	sysMu.Lock()
+	sysSubs = append(sysSubs, ch)
+	sysMu.Unlock()
 	return ch, func() {
-		bannerMu.Lock()
-		defer bannerMu.Unlock()
-		for i, c := range bannerSubs {
+		sysMu.Lock()
+		defer sysMu.Unlock()
+		for i, c := range sysSubs {
 			if c == ch {
-				bannerSubs = append(bannerSubs[:i], bannerSubs[i+1:]...)
+				sysSubs = append(sysSubs[:i], sysSubs[i+1:]...)
 				break
 			}
 		}

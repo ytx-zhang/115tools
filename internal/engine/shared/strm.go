@@ -1,4 +1,4 @@
-package kit
+package shared
 
 import (
 	"context"
@@ -32,14 +32,26 @@ func strmContent(strmURL, pickcode string) string {
 	return fmt.Sprintf("%s/download?pickcode=%s", strings.TrimRight(strmURL, "/"), pickcode)
 }
 
+// trimBOM 去掉 UTF-8 BOM 与首尾空白（.strm 可能被外部工具带 BOM 写出）。
+func trimBOM(s string) string {
+	return strings.TrimSpace(strings.TrimPrefix(s, "\xEF\xBB\xBF"))
+}
+
+// statMtime 取文件 mtime（Unix 秒），读取失败返回 0。
+func statMtime(path string) int64 {
+	if st, err := os.Stat(path); err == nil {
+		return st.ModTime().Unix()
+	}
+	return 0
+}
+
 // ParseStrmFile 解析 .strm 内容，返回 pickcode 与本地解码出的 fid。
 func ParseStrmFile(strmPath string) (pickcode, fid string) {
 	data, err := os.ReadFile(strmPath)
 	if err != nil {
 		return "", ""
 	}
-	trimmed := strings.TrimSpace(strings.TrimPrefix(string(data), "\xEF\xBB\xBF"))
-	u, err := url.Parse(trimmed)
+	u, err := url.Parse(trimBOM(string(data)))
 	if err != nil {
 		return "", ""
 	}
@@ -53,30 +65,26 @@ func ParseStrmFile(strmPath string) (pickcode, fid string) {
 // NormalizeStrmFile 把 .strm 重写成本程序直链格式，仅修正 host、pickcode 不变。
 // 返回（是否覆写，写盘后 mtime，错误）；已正确时 rewrote=false。
 func NormalizeStrmFile(strmURL, strmPath string) (bool, int64, error) {
-	pc, _ := ParseStrmFile(strmPath)
-	if pc == "" {
-		if st, e := os.Stat(strmPath); e == nil {
-			return false, st.ModTime().Unix(), nil
+	// 只读一次文件：同时用于解析 pickcode 与比对内容（解析失败即按无 pickcode 处理）
+	raw, rerr := os.ReadFile(strmPath)
+	cur := trimBOM(string(raw))
+	pc := ""
+	if rerr == nil {
+		if u, uerr := url.Parse(cur); uerr == nil {
+			pc = u.Query().Get("pickcode")
 		}
-		return false, 0, nil
+	}
+	if pc == "" {
+		return false, statMtime(strmPath), nil
 	}
 	want := strmContent(strmURL, pc)
-	if raw, rerr := os.ReadFile(strmPath); rerr == nil {
-		cur := strings.TrimSpace(strings.TrimPrefix(string(raw), "\xEF\xBB\xBF"))
-		if cur == want {
-			if st, e := os.Stat(strmPath); e == nil {
-				return false, st.ModTime().Unix(), nil
-			}
-			return false, 0, nil
-		}
+	if rerr == nil && cur == want {
+		return false, statMtime(strmPath), nil
 	}
 	if werr := WriteStrmFile(strmURL, pc, strmPath); werr != nil {
 		return false, 0, werr
 	}
-	if st, e := os.Stat(strmPath); e == nil {
-		return true, st.ModTime().Unix(), nil
-	}
-	return true, 0, nil
+	return true, statMtime(strmPath), nil
 }
 
 // NormalizeOwnedStrm 把旧 strm 规范化为本程序直链，仅当 pickcode 解码出的 fid 与 expectedFid 一致时才重写。
@@ -172,28 +180,32 @@ func NewStrmIO(deps *Deps) *StrmIO {
 
 // FetchAndSave 按文件类型落地，返回落盘后的「版本号」：视频=本地 strm 实际 mtime，普通=真实字节数。
 func (s *StrmIO) FetchAndSave(ctx context.Context, pickCode, savePath string, isVideo bool) (int64, error) {
-	if isVideo {
-		t0 := time.Now()
-		if err := WriteStrmFile(s.paths.StrmURL, pickCode, savePath); err != nil {
-			journal.Error(ctx, "创建 strm 失败", "路径", savePath, "错误", err)
-			return 0, err
-		}
-		journal.Info(ctx, "新增 STRM 文件", "路径", savePath, "耗时", time.Since(t0))
-		st, serr := os.Stat(savePath)
-		if serr != nil {
-			return 0, serr
-		}
-		return st.ModTime().Unix(), nil
-	}
 	t0 := time.Now()
-	if err := DownloadCloudFile(ctx, s.api, pickCode, savePath); err != nil {
-		journal.Error(ctx, "下载文件失败", "路径", savePath, "错误", err)
+	var err error
+	if isVideo {
+		err = WriteStrmFile(s.paths.StrmURL, pickCode, savePath)
+	} else {
+		err = DownloadCloudFile(ctx, s.api, pickCode, savePath)
+	}
+	if err != nil {
+		if isVideo {
+			journal.Error(ctx, "创建 strm 失败", "路径", savePath, "错误", err)
+		} else {
+			journal.Error(ctx, "下载文件失败", "路径", savePath, "错误", err)
+		}
 		return 0, err
 	}
-	journal.Info(ctx, "下载文件成功", "路径", savePath, "耗时", time.Since(t0))
+	if isVideo {
+		journal.Info(ctx, "新增 STRM 文件", "路径", savePath, "耗时", time.Since(t0))
+	} else {
+		journal.Info(ctx, "下载文件成功", "路径", savePath, "耗时", time.Since(t0))
+	}
 	st, serr := os.Stat(savePath)
 	if serr != nil {
 		return 0, serr
+	}
+	if isVideo {
+		return st.ModTime().Unix(), nil
 	}
 	return st.Size(), nil
 }

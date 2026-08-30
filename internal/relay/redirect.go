@@ -16,9 +16,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/journal"
 	"github.com/ytx-zhang/115tools/internal/pan"
-	"github.com/ytx-zhang/115tools/internal/stash"
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
 )
@@ -30,7 +30,7 @@ const passthroughUA = "Fuck115"
 type Redirector struct {
 	api        *pan.Client
 	cache      sync.Map // URL 直链缓存（key=pickcode|ua）
-	localCache *stash.Cache
+	localCache *cache.Cache
 	sf         singleflight.Group
 }
 
@@ -54,7 +54,7 @@ var proxyClient = &http.Client{
 var originSem = semaphore.NewWeighted(2)
 
 // NewRedirector 创建直链重定向器。localCache 为透传本地缓存层（nil 时禁用本地命中）。
-func NewRedirector(api *pan.Client, localCache *stash.Cache) *Redirector {
+func NewRedirector(api *pan.Client, localCache *cache.Cache) *Redirector {
 	return &Redirector{api: api, localCache: localCache}
 }
 

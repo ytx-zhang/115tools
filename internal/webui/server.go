@@ -1,4 +1,4 @@
-// Package webui 提供 HTTP 层：管理面板（登录鉴权、配置、任务中心、离线下载、透传缓存）
+// Package webui 提供 HTTP 层：管理面板（登录鉴权、配置、任务中心、离线下载、本地缓存）
 // 与 SSE 状态流。依赖经组合根注入，不反向依赖其它包。
 package webui
 
@@ -14,13 +14,13 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/conf"
 	"github.com/ytx-zhang/115tools/internal/engine"
+	"github.com/ytx-zhang/115tools/internal/index"
 	"github.com/ytx-zhang/115tools/internal/journal"
 	"github.com/ytx-zhang/115tools/internal/pan"
 	"github.com/ytx-zhang/115tools/internal/relay"
-	"github.com/ytx-zhang/115tools/internal/stash"
-	"github.com/ytx-zhang/115tools/internal/vault"
 )
 
 //go:embed all:static
@@ -33,8 +33,8 @@ type Deps struct {
 	Engine  *engine.Engine
 	Journal *journal.Store
 	Pan     *pan.Client
-	Stash   *stash.Cache
-	Vault   *vault.Index
+	Cache   *cache.Cache
+	Index   *index.Index
 	Hub     *Hub
 }
 
@@ -51,7 +51,7 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 	s.registerStatic(mux)
 
 	// /download 直链（Emby 依赖，免鉴权）
-	redirector := relay.NewRedirector(d.Pan, d.Stash)
+	redirector := relay.NewRedirector(d.Pan, d.Cache)
 	mux.Handle("GET /download", http.HandlerFunc(redirector.RedirectToRealURL))
 
 	// 公开接口
@@ -75,15 +75,16 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 		"GET /api/tasks/{id}/runs":            s.handleTaskRuns,
 		"DELETE /api/tasks/{id}/runs":         s.handleClearTaskRuns,
 		"GET /api/tasks/{id}/runs/{seq}/logs": s.handleTaskRunLogs,
-		"POST /api/banners/clear":             s.handleClearBanners,
+		"GET /api/system-logs":                s.handleSystemLogs,
+		"DELETE /api/system-logs":             s.handleClearSystemLogs,
 		"GET /api/offline/tasks":              s.handleOfflineTasks,
 		"GET /api/offline/quota":              s.handleOfflineQuota,
 		"POST /api/offline/add":               s.handleOfflineAdd,
 		"POST /api/offline/torrent":           s.handleOfflineTorrent,
 		"POST /api/offline/delete":            s.handleOfflineDelete,
 		"POST /api/offline/clear":             s.handleOfflineClear,
-		"GET /api/stash":                      s.handleStashList,
-		"POST /api/stash/delete":              s.handleStashDelete,
+		"GET /api/cache":                      s.handleCacheList,
+		"POST /api/cache/delete":              s.handleCacheDelete,
 	}
 	for pattern, h := range protected {
 		mux.Handle(pattern, s.protect(h))
@@ -114,14 +115,18 @@ func (s *Server) registerStatic(mux *http.ServeMux) {
 		indexData = []byte("<h1>index.html missing</h1>")
 	}
 
+	// index.html 已在上面读过，walk 时直接复用，避免重复 I/O 与重复 SHA-1
 	etags := make(map[string]string, 16)
 	_ = fs.WalkDir(sub, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
-		data, rerr := fs.ReadFile(sub, path)
-		if rerr != nil {
-			return rerr
+		data := indexData
+		if path != "index.html" {
+			var rerr error
+			if data, rerr = fs.ReadFile(sub, path); rerr != nil {
+				return rerr
+			}
 		}
 		h := sha1.Sum(data)
 		etags[path] = `"` + hex.EncodeToString(h[:]) + `"`

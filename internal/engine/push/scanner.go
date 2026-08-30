@@ -7,50 +7,42 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ytx-zhang/115tools/internal/engine/kit"
+	"github.com/ytx-zhang/115tools/internal/engine/shared"
+	"github.com/ytx-zhang/115tools/internal/index"
 	"github.com/ytx-zhang/115tools/internal/journal"
-	"github.com/ytx-zhang/115tools/internal/pan"
-	"github.com/ytx-zhang/115tools/internal/vault"
 )
 
 // Scanner 本地扫描比对模块（纯比对逻辑，不含调度）。
 // ScanDir 必须串行调用（仅 dirpool 单消费者），并发会复活跨目录双传 Bug。
 type Scanner struct {
-	api   *pan.Client
-	vault *vault.Index
-	paths *kit.TaskPaths
-	rules kit.Rules
+	idx   *index.Index
+	paths *shared.TaskPaths
+	rules shared.Rules
 	up    *Uploader
 	co    *CloudOps
 }
 
 // NewScanner 构造扫描模块。
-func NewScanner(deps *kit.Deps, up *Uploader, co *CloudOps) *Scanner {
-	return &Scanner{api: deps.Pan, vault: deps.Vault, paths: deps.Paths, rules: deps.Rules, up: up, co: co}
+func NewScanner(deps *shared.Deps, up *Uploader, co *CloudOps) *Scanner {
+	return &Scanner{idx: deps.Index, paths: deps.Paths, rules: deps.Rules, up: up, co: co}
 }
 
 // ScanDir 比对索引与本地内容，逐项就地执行动作，再等本批上传完成。
 func (sc *Scanner) ScanDir(ctx context.Context, currentPath string, batch *sync.WaitGroup) {
-	sc.scanDirLocked(ctx, currentPath, batch)
-	if batch != nil {
-		batch.Wait() // 等本批投递的上传全部完成
-	}
+	sc.scanDir(ctx, currentPath, batch)
+	batch.Wait() // 等本批投递的上传全部完成
 }
 
-func (sc *Scanner) scanDirLocked(ctx context.Context, currentPath string, batch *sync.WaitGroup) {
-	// 根目录（任务本地同步根）用 Info，保证全量扫描有可见日志；子目录用 Debug 防刷屏。
+// scanDir 扫描单个目录（根目录用 Info 保证全量扫描可见，子目录用 Debug 防刷屏）。
+func (sc *Scanner) scanDir(ctx context.Context, currentPath string, batch *sync.WaitGroup) {
+	logf := journal.Debug
 	if currentPath == sc.paths.LocalDir {
-		journal.Info(ctx, "扫描本地文件", "处理目录", currentPath)
-	} else {
-		journal.Debug(ctx, "扫描本地文件", "处理目录", currentPath)
+		logf = journal.Info
 	}
+	logf(ctx, "扫描本地文件", "处理目录", currentPath)
 	start := time.Now()
 	defer func() {
-		if currentPath == sc.paths.LocalDir {
-			journal.Info(ctx, "本地文件扫描完成", "处理目录", currentPath, "耗时", time.Since(start))
-		} else {
-			journal.Debug(ctx, "本地文件扫描完成", "处理目录", currentPath, "耗时", time.Since(start))
-		}
+		logf(ctx, "本地文件扫描完成", "处理目录", currentPath, "耗时", time.Since(start))
 	}()
 
 	if context.Cause(ctx) != nil {
@@ -70,7 +62,7 @@ func (sc *Scanner) scanDirLocked(ctx context.Context, currentPath string, batch 
 		return
 	}
 
-	dbChildren := sc.vault.Children(ctx, currentPath)
+	dbChildren := sc.idx.Children(ctx, currentPath)
 
 	for _, ch := range dbChildren {
 		if context.Cause(ctx) != nil {
@@ -88,7 +80,7 @@ func (sc *Scanner) scanDirLocked(ctx context.Context, currentPath string, batch 
 		delete(localFiles, name)
 
 		if entry.IsDir() {
-			if dbSize == vault.SizeDir {
+			if dbSize == index.SizeDir {
 				sc.handleDir(ctx, fullPath, batch)
 			}
 			continue
@@ -126,25 +118,24 @@ func (sc *Scanner) handleDir(ctx context.Context, fullPath string, batch *sync.W
 		journal.Error(ctx, "创建云端目录失败", "路径", fullPath, "错误", err)
 		return
 	}
-	sc.scanDirLocked(ctx, fullPath, batch)
+	sc.scanDir(ctx, fullPath, batch)
 }
 
 // HandleFile 比对索引与本地文件并就地执行动作（删云端/上传/刷新索引）。
 // 是「该不该上传」的唯一收敛点，Watcher 直传与 ScanDir 下钻共用。
 func (sc *Scanner) HandleFile(ctx context.Context, batch *sync.WaitGroup, fullPath, dbFid string, dbSize int64, fileInfo os.FileInfo) {
-	ext := filepath.Ext(fullPath)
-	isStrm := kit.IsStrmPath(fullPath)
-	isVideo := sc.rules.IsVideoExt(ext)
-
 	if fileInfo == nil {
 		if dbFid == "" {
 			return // 本地已删且索引无记录，无事可做
 		}
-		if cerr := sc.co.CloudCleanTask(ctx, fullPath); cerr != nil {
-			journal.Error(ctx, "云端删除失败", "路径", fullPath, "错误", cerr)
-		}
+		sc.cleanCloud(ctx, fullPath)
 		return
 	}
+
+	// 扩展名判定只在确认文件存在后才有意义（删除分支用不到）
+	ext := filepath.Ext(fullPath)
+	isStrm := shared.IsStrmPath(fullPath)
+	isVideo := sc.rules.IsVideoExt(ext)
 
 	if dbFid == "" {
 		sc.enqueueUpload(ctx, batch, fullPath) // 本地新增
@@ -152,8 +143,8 @@ func (sc *Scanner) HandleFile(ctx context.Context, batch *sync.WaitGroup, fullPa
 	}
 
 	if isVideo {
-		strmKey := kit.VideoToStrmPath(fullPath)
-		if fid, _ := sc.vault.Get(ctx, strmKey); fid != "" && !sc.rules.CheckVideo(ext, fileInfo.Size()) {
+		strmKey := shared.VideoToStrmPath(fullPath)
+		if fid, _ := sc.idx.Get(ctx, strmKey); fid != "" && !sc.rules.CheckVideo(ext, fileInfo.Size()) {
 			journal.Debug(ctx, "同名 strm 已在库且视频未达体积阈值，跳过上传", "路径", fullPath, "strm", strmKey)
 			return
 		}
@@ -163,16 +154,14 @@ func (sc *Scanner) HandleFile(ctx context.Context, batch *sync.WaitGroup, fullPa
 		if fileInfo.ModTime().Unix() == dbSize {
 			return // mtime 未变
 		}
-		if matched, rewrote, mt := kit.NormalizeOwnedStrm(sc.paths.StrmURL, fullPath, dbFid, fileInfo.ModTime().Unix()); matched {
+		if matched, rewrote, mt := shared.NormalizeOwnedStrm(sc.paths.StrmURL, fullPath, dbFid, fileInfo.ModTime().Unix()); matched {
 			if rewrote {
 				journal.Debug(ctx, "规范化 STRM 链接", "路径", fullPath)
 			}
-			sc.vault.Put(ctx, fullPath, dbFid, mt)
+			sc.idx.Put(ctx, fullPath, dbFid, mt)
 			return
 		}
-		if cerr := sc.co.CloudCleanTask(ctx, fullPath); cerr != nil {
-			journal.Error(ctx, "云端删除失败", "路径", fullPath, "错误", cerr)
-		}
+		sc.cleanCloud(ctx, fullPath)
 		sc.enqueueUpload(ctx, batch, fullPath)
 		return
 	}
@@ -180,10 +169,15 @@ func (sc *Scanner) HandleFile(ctx context.Context, batch *sync.WaitGroup, fullPa
 	if fileInfo.Size() == dbSize {
 		return // size 未变
 	}
-	if cerr := sc.co.CloudCleanTask(ctx, fullPath); cerr != nil {
-		journal.Error(ctx, "云端删除失败", "路径", fullPath, "错误", cerr)
-	}
+	sc.cleanCloud(ctx, fullPath)
 	sc.enqueueUpload(ctx, batch, fullPath)
+}
+
+// cleanCloud 清理云端同名项（删除失败仅记日志，不中断后续上传）。
+func (sc *Scanner) cleanCloud(ctx context.Context, fullPath string) {
+	if err := sc.co.CloudCleanTask(ctx, fullPath); err != nil {
+		journal.Error(ctx, "云端删除失败", "路径", fullPath, "错误", err)
+	}
 }
 
 // enqueueUpload 入队一个已判定「需上传」的文件。
@@ -192,7 +186,7 @@ func (sc *Scanner) enqueueUpload(ctx context.Context, batch *sync.WaitGroup, fPa
 		journal.Warn(ctx, "同步的文件不存在，跳过", "路径", fPath)
 		return
 	}
-	parentFid := sc.vault.GetFid(ctx, filepath.Dir(fPath))
+	parentFid := sc.idx.GetFid(ctx, filepath.Dir(fPath))
 	if parentFid == "" {
 		journal.Warn(ctx, "无法获取父目录 FID，跳过", "路径", fPath)
 		return
@@ -201,7 +195,7 @@ func (sc *Scanner) enqueueUpload(ctx context.Context, batch *sync.WaitGroup, fPa
 }
 
 // readLocalDir 读取目录到 map（跳过上传排除项与本地缓存根目录）。
-func readLocalDir(path string, rules kit.Rules, cacheDir string) (map[string]os.DirEntry, error) {
+func readLocalDir(path string, rules shared.Rules, cacheDir string) (map[string]os.DirEntry, error) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, err

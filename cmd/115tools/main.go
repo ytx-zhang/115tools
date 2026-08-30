@@ -17,12 +17,12 @@ import (
 	"time"
 	_ "time/tzdata" // 内嵌时区数据库：Docker alpine 下 TZ 生效依赖它
 
+	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/conf"
 	"github.com/ytx-zhang/115tools/internal/engine"
+	"github.com/ytx-zhang/115tools/internal/index"
 	"github.com/ytx-zhang/115tools/internal/journal"
 	"github.com/ytx-zhang/115tools/internal/pan"
-	"github.com/ytx-zhang/115tools/internal/stash"
-	"github.com/ytx-zhang/115tools/internal/vault"
 	"github.com/ytx-zhang/115tools/internal/webui"
 )
 
@@ -51,13 +51,13 @@ func main() {
 	defer hist.Close()
 
 	// 3. 路径索引库（index.db）
-	index, err := vault.New(filepath.Join(*dataDir, "index.db"))
+	idx, err := index.New(filepath.Join(*dataDir, "index.db"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "索引库初始化失败:", err)
 		os.Exit(1)
 	}
-	defer index.Close()
-	if err := index.Compact(appCtx); err != nil {
+	defer idx.Close()
+	if err := idx.Compact(appCtx); err != nil {
 		journal.Warn(appCtx, "索引库压缩失败", "错误", err)
 	}
 
@@ -73,13 +73,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "缓存目录创建失败:", err)
 		os.Exit(1)
 	}
-	localCache := stash.New(cacheDir, time.Duration(cfg.Settings.CacheRetentionDays)*24*time.Hour)
-	go localCache.StartCleaner(appCtx, stash.SweepInterval)
+	localCache := cache.New(cacheDir, time.Duration(cfg.Settings.CacheRetentionDays)*24*time.Hour)
+	go localCache.StartCleaner(appCtx, cache.SweepInterval)
 
 	// 6. 任务引擎 + 状态广播中心
 	hub := webui.NewHub()
 	var wg sync.WaitGroup
-	eng := engine.New(api, index, cfg, hist, localCache, hub.Publish, appCtx, &wg)
+	eng := engine.New(api, idx, cfg, hist, localCache, hub.Publish, appCtx, &wg)
 
 	// 7. Web 服务
 	mux := http.NewServeMux()
@@ -89,8 +89,8 @@ func main() {
 		Engine:  eng,
 		Journal: hist,
 		Pan:     api,
-		Stash:   localCache,
-		Vault:   index,
+		Cache:   localCache,
+		Index:   idx,
 		Hub:     hub,
 	})
 

@@ -29,16 +29,17 @@ func PickcodeToID(pickcode string) (string, error) {
 	if pickcode == "" {
 		return "", fmt.Errorf("pickcode 为空")
 	}
-	var prefix, cipher string
-	if pickcode[0] == 'f' && len(pickcode) >= 7 {
-		prefix = pickcode[:2]
-		cipher = pickcode[2 : len(pickcode)-4]
-	} else if strings.ContainsRune("abcde", rune(pickcode[0])) && len(pickcode) >= 6 {
-		prefix = pickcode[:1]
-		cipher = pickcode[1 : len(pickcode)-4]
-	} else {
+	// 前缀长度：'f' 开头为 2 位（fa~fe），其余为 1 位（a~e）。
+	// 剩余结构统一为「前缀 + 中缀 + 4 位校验」，最小长度 = 前缀 + 1 位中缀 + 4。
+	prefixLen := 1
+	if pickcode[0] == 'f' {
+		prefixLen = 2
+	}
+	if len(pickcode) < prefixLen+5 || !strings.ContainsRune("abcdef", rune(pickcode[0])) {
 		return "", fmt.Errorf("pickcode 前缀或长度异常: %q", pickcode)
 	}
+	prefix := pickcode[:prefixLen]
+	cipher := pickcode[prefixLen : len(pickcode)-4]
 	dec, ok := pickcodeTrans[prefix]
 	if !ok {
 		return "", fmt.Errorf("未知 pickcode 前缀: %s", prefix)

@@ -15,18 +15,24 @@ import (
 // 每 run 明细日志落盘上限：超出丢弃最旧，避免一次超大执行撑爆 journal.db。
 const maxRunLogs = 1000
 
+// maxSystemLogs 系统程序日志保留上限：超出删除最旧。
+// 20000 可覆盖十几次全量扫描（一次扫描 115 请求日志约 700~1500 条），db 增量约 5~6MB。
+const maxSystemLogs = 20000
+
 // seqKeyLen run 键（8 字节大端 uint64）长度。
 const seqKeyLen = 8
 
 var (
 	runsBucket    = []byte("runs")
 	runLogsBucket = []byte("runlogs")
+	syslogBucket  = []byte("syslog")
 	metaBucket    = []byte("meta")
 )
 
 var (
 	schemaKey     = []byte("schema")
 	seqCounterKey = []byte("run_seq")
+	sysSeqKey     = []byte("sys_seq")
 )
 
 // schemaV2 库结构版本 v2：run 序号全局唯一。
@@ -38,19 +44,14 @@ const schemaV2 = "2"
 // 运行中的 run 的明细日志驻留内存（running map），结束时整批落盘并释放。
 type Store struct {
 	db    *bbolt.DB
-	path  string
-	mu    sync.Mutex            // 保护 running map
+	mu    sync.Mutex            // 保护 running map 与 prune 计数
 	runs  map[uint64]*runBuffer // seq → 运行中缓冲
-	seq   uint64                // 最近分配的 seq（由 bbolt NextSequence 决定，仅作日志参考）
 	prune int                   // 自上次 prune 后 Begin 次数
 }
 
 // runBuffer 一次执行在运行中的内存态。
 type runBuffer struct {
 	taskID    string
-	taskName  string
-	direction Direction
-	trigger   Trigger
 	startedAt time.Time
 	mu        sync.Mutex
 	logs      []LogEntry
@@ -63,27 +64,31 @@ func New(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("开启历史库失败: %w", err)
 	}
-	s := &Store{db: db, path: path, runs: make(map[uint64]*runBuffer)}
-	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range [][]byte{runsBucket, runLogsBucket, metaBucket} {
+	s := &Store{db: db, runs: make(map[uint64]*runBuffer)}
+	// 建桶 → 结构校正 → 清理残留 running，任一步失败都要关闭库避免句柄泄漏。
+	if err := s.init(); err != nil {
+		closeQuiet(db)
+		return nil, err
+	}
+	return s, nil
+}
+
+// init 创建桶、执行结构校正与残留标记。
+func (s *Store) init() error {
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		for _, name := range [][]byte{runsBucket, runLogsBucket, syslogBucket, metaBucket} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
 		}
 		return nil
 	}); err != nil {
-		closeQuiet(db)
-		return nil, fmt.Errorf("初始化历史库失败: %w", err)
+		return fmt.Errorf("初始化历史库失败: %w", err)
 	}
 	if err := s.applySchema(); err != nil {
-		closeQuiet(db)
-		return nil, err
+		return err
 	}
-	if err := s.markInterrupted(); err != nil {
-		closeQuiet(db)
-		return nil, err
-	}
-	return s, nil
+	return s.markInterrupted()
 }
 
 // closeQuiet 关闭数据库并忽略错误（仅用于初始化失败路径，此时日志系统尚未就绪）。
@@ -132,17 +137,19 @@ func (s *Store) markInterrupted() error {
 // applySchema 保障库结构版本：初始化全局 seq 计数器，并在首次升级到 v2 时校正历史数据。
 func (s *Store) applySchema() error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
-		// 计数器必须始终不低于历史最大 seq，否则新 run 会撞上 v1 遗留的重复键。
+		// 已是 v2：seq 由 nextSeq 单调维护，计数器即权威值，无需再全表扫描校正。
+		mb := tx.Bucket(metaBucket)
+		if string(mb.Get(schemaKey)) == schemaV2 {
+			return nil
+		}
+		// 升级到 v2：先把计数器抬到不低于历史最大 seq，否则新 run 会撞上 v1 遗留的重复键。
 		if err := syncSeqCounter(tx); err != nil {
 			return err
-		}
-		if string(tx.Bucket(metaBucket).Get(schemaKey)) == schemaV2 {
-			return nil
 		}
 		if err := dropAmbiguousLogs(tx); err != nil {
 			return err
 		}
-		return tx.Bucket(metaBucket).Put(schemaKey, []byte(schemaV2))
+		return mb.Put(schemaKey, []byte(schemaV2))
 	})
 }
 
@@ -165,7 +172,8 @@ func dropAmbiguousLogs(tx *bbolt.Tx) error {
 			}
 			seq := binary.BigEndian.Uint64(k)
 			claims[seq]++
-			if claims[seq] > 1 {
+			// 只在首次发现重复时收集一次，避免多任务共用同一 seq 时重复 Delete
+			if claims[seq] == 2 {
 				dups = append(dups, append([]byte(nil), k...))
 			}
 			return nil
@@ -253,15 +261,7 @@ func (s *Store) Begin(r Run) (uint64, error) {
 	}
 
 	s.mu.Lock()
-	s.runs[seq] = &runBuffer{
-		taskID:    r.TaskID,
-		taskName:  r.TaskName,
-		direction: r.Direction,
-		trigger:   r.Trigger,
-		startedAt: r.StartedAt,
-	}
-	s.seq = seq
-	s.prune++
+	s.runs[seq] = &runBuffer{taskID: r.TaskID, startedAt: r.StartedAt}
 	s.mu.Unlock()
 
 	s.maybePrune()
@@ -341,11 +341,13 @@ func (s *Store) AppendLog(taskID string, seq uint64, level, msg, attrs string) {
 }
 
 // List 返回某任务最近 limit 条执行记录（倒序：最新在前）。
+// 默认值与上限对齐存储保留量 perTaskKeepRuns（200），避免「接口能取到、库里早已淘汰」的空区间。
+// 始终返回非 nil 切片。
 func (s *Store) List(taskID string, limit int) ([]Run, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 50
+	if limit <= 0 || limit > perTaskKeepRuns {
+		limit = perTaskKeepRuns
 	}
-	var out []Run
+	out := make([]Run, 0, limit)
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		rb := tx.Bucket(runsBucket)
 		tb := rb.Bucket([]byte(taskID))
@@ -367,19 +369,20 @@ func (s *Store) List(taskID string, limit int) ([]Run, error) {
 
 // Logs 返回某任务某次执行的明细日志：运行中从内存取，已结束从 journal.db 取。
 // taskID 用于校验归属，不属于该任务的 seq 一律返回空，杜绝任务间日志串号。
+// 始终返回非 nil 切片。
 func (s *Store) Logs(taskID string, seq uint64) ([]LogEntry, error) {
 	s.mu.Lock()
 	buf := s.runs[seq]
 	s.mu.Unlock()
 	if buf != nil {
 		if buf.taskID != taskID {
-			return nil, nil
+			return []LogEntry{}, nil
 		}
 		buf.mu.Lock()
 		defer buf.mu.Unlock()
 		return append([]LogEntry(nil), buf.logs...), nil
 	}
-	var out []LogEntry
+	out := make([]LogEntry, 0, 32)
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		rb := tx.Bucket(runsBucket)
 		tb := rb.Bucket([]byte(taskID))
@@ -426,17 +429,22 @@ func (s *Store) DeleteTask(taskID string) error {
 // perTaskKeepRuns 每任务保留的执行记录条数上限。
 const perTaskKeepRuns = 200
 
+// pruneInterval 累计多少次 Begin 触发一次过期清理。
+const pruneInterval = 64
+
 // maybePrune 低频清理过期记录：每任务只保留最近 perTaskKeepRuns 条，同步回收其明细日志。
+// 计数与清零在同一临界区内完成，避免并发 Begin 同时判定达到阈值而重复 prune。
 func (s *Store) maybePrune() {
 	s.mu.Lock()
+	s.prune++
 	n := s.prune
+	if n >= pruneInterval {
+		s.prune = 0
+	}
 	s.mu.Unlock()
-	if n < 64 {
+	if n < pruneInterval {
 		return
 	}
-	s.mu.Lock()
-	s.prune = 0
-	s.mu.Unlock()
 
 	_ = s.db.Update(func(tx *bbolt.Tx) error {
 		rb := tx.Bucket(runsBucket)
@@ -446,13 +454,7 @@ func (s *Store) maybePrune() {
 			if tb == nil {
 				return nil
 			}
-			total := 0
-			if err := tb.ForEach(func(_, _ []byte) error {
-				total++
-				return nil
-			}); err != nil {
-				return err
-			}
+			total := tb.Stats().KeyN
 			if total <= perTaskKeepRuns {
 				return nil
 			}
@@ -477,4 +479,112 @@ func seqKey(seq uint64) []byte {
 	var b [seqKeyLen]byte
 	binary.BigEndian.PutUint64(b[:], seq)
 	return b[:]
+}
+
+// ──── 系统程序日志（无任务上下文的全部级别日志） ────
+
+// AppendSystemLog 追加一条系统日志（seq 取自 meta 计数器，全局单调递增；清空后不回绕）。
+// 超出 maxSystemLogs 上限时删除最旧。返回完整落库条目（含 seq/time）供 SSE 广播。
+func (s *Store) AppendSystemLog(level, msg, attrs string) (LogEntry, error) {
+	var entry LogEntry
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		mb := tx.Bucket(metaBucket)
+		var n uint64
+		if v := mb.Get(sysSeqKey); len(v) == seqKeyLen {
+			n = binary.BigEndian.Uint64(v)
+		}
+		n++
+		var b [seqKeyLen]byte
+		binary.BigEndian.PutUint64(b[:], n)
+		if err := mb.Put(sysSeqKey, b[:]); err != nil {
+			return err
+		}
+		entry = LogEntry{Seq: n, Time: time.Now(), Level: level, Msg: msg, Attrs: attrs}
+		out, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		lb := tx.Bucket(syslogBucket)
+		if err := lb.Put(seqKey(n), out); err != nil {
+			return err
+		}
+		return pruneSystemLogs(lb)
+	})
+	return entry, err
+}
+
+// pruneSystemLogs 超出 maxSystemLogs 时删除最旧（按 key 升序从头删）。
+// syslog 只从尾部追加、只从头部删除，现存 key 恒为连续区间，故用首尾游标 O(1) 计数。
+func pruneSystemLogs(lb *bbolt.Bucket) error {
+	c := lb.Cursor()
+	first, _ := c.First()
+	if first == nil {
+		return nil
+	}
+	last, _ := c.Last()
+	total := int(binary.BigEndian.Uint64(last)-binary.BigEndian.Uint64(first)) + 1
+	drop := total - maxSystemLogs
+	for k, _ := c.First(); k != nil && drop > 0; {
+		if err := c.Delete(); err != nil {
+			return err
+		}
+		drop--
+		k, _ = c.Next()
+	}
+	return nil
+}
+
+// ListSystemLogs 返回系统日志（正序：旧→新）。
+// before=0 返回最新 limit 条；before>0 返回 seq<before 的最新 limit 条（用于向上加载更早）。
+// hasMore 表示在返回批次之前是否还有更旧的日志。
+func (s *Store) ListSystemLogs(limit int, before uint64) (logs []LogEntry, hasMore bool, err error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	err = s.db.View(func(tx *bbolt.Tx) error {
+		lb := tx.Bucket(syslogBucket)
+		c := lb.Cursor()
+		k, v := c.Last()
+		if before > 0 {
+			// Seek 把游标定位到 >= before 的键，再 Prev 取第一个 < before 的（更旧侧）
+			c.Seek(seqKey(before))
+			k, v = c.Prev()
+		}
+		out := make([]LogEntry, 0, limit)
+		for ; k != nil && len(out) < limit; k, v = c.Prev() {
+			var e LogEntry
+			if err := json.Unmarshal(v, &e); err != nil || e.Seq == 0 {
+				continue
+			}
+			out = append(out, e)
+		}
+		// 收集满 limit 后若还有更旧的键 → hasMore
+		if len(out) == limit {
+			if pk, _ := c.Prev(); pk != nil {
+				hasMore = true
+			}
+		}
+		// 倒序收集 → 反转为正序
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
+		}
+		logs = out
+		return nil
+	})
+	return logs, hasMore, err
+}
+
+// ClearSystemLogs 清空全部系统程序日志（seq 计数器不回绕，后续日志 seq 继续递增）。
+func (s *Store) ClearSystemLogs() error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		lb := tx.Bucket(syslogBucket)
+		c := lb.Cursor()
+		for k, _ := c.First(); k != nil; {
+			if err := c.Delete(); err != nil {
+				return err
+			}
+			k, _ = c.Next()
+		}
+		return nil
+	})
 }

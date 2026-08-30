@@ -1,4 +1,4 @@
-// Package vault 提供本地路径 ↔ 云端 FID 的索引存储（bbolt 封装）。
+// Package index 提供本地路径 ↔ 云端 FID 的索引存储（bbolt 封装）。
 //
 // 路径为主键，值为 (fid, size) 二进制编码（1 字节标记 + 8 字节大端 size + fid 字符串）。
 // 提供前缀扫描（子项/递归计数/孤儿检测/strm FID 枚举）与 Compact 压缩。
@@ -7,7 +7,7 @@
 //   - 读事务内禁止写库：Children 在单个短读事务内收集快照后返回，调用方再做事；
 //   - 前缀扫描统一带尾斜杠，避免 "a/b" 误匹配 "a/bc"；
 //   - 错误仅记录日志（journal），调用方以 SizeNotFound 区分「未找到」。
-package vault
+package index
 
 import (
 	"bytes"
@@ -31,6 +31,9 @@ const (
 
 // 值编码标记字节。
 const valueTag byte = 0x01
+
+// strmSuffix 是 STRM 文件后缀（ListStrmFids 大小写不敏感匹配用）。
+var strmSuffix = []byte(".strm")
 
 // Child 某目录直属子项的一条快照。
 type Child struct {
@@ -160,6 +163,37 @@ func dirPrefix(p string) string {
 
 // ──── 前缀扫描 ────
 
+// scanPrefix 在单个读事务内按前缀遍历，逐个 key 调用 fn（带 ctx 取消检查）。
+// fn 返回非 nil 的 next 时，外层改从该位置 Seek（跳层剪枝）；否则正常 Next。
+func scanPrefix(ctx context.Context, c *bbolt.Cursor, prefix []byte, fn func(k, v []byte) (next []byte, err error)) error {
+	k, v := c.Seek(prefix)
+	for k != nil && bytes.HasPrefix(k, prefix) {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		default:
+		}
+		next, err := fn(k, v)
+		if err != nil {
+			return err
+		}
+		if next != nil {
+			k, v = c.Seek(next)
+		} else {
+			k, v = c.Next()
+		}
+	}
+	return nil
+}
+
+// skipSuccessor 构造 k[:n+1]（含分隔符 '/'）的严格后继字节序列，用于整段跳层。
+func skipSuccessor(k []byte, n int) []byte {
+	jump := make([]byte, n+2)
+	copy(jump, k[:n+1])
+	jump[n+1] = 0xff
+	return jump
+}
+
 // Children 读取 workPath 的直属子项快照。单个短读事务内收集后返回，调用方据此做重活。
 func (ix *Index) Children(ctx context.Context, workPath string) []Child {
 	if err := context.Cause(ctx); err != nil {
@@ -169,29 +203,16 @@ func (ix *Index) Children(ctx context.Context, workPath string) []Child {
 	prefixBytes := []byte(prefix)
 	var out []Child
 	if err := ix.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(ix.bucket)
-		c := b.Cursor()
-		k, v := c.Seek(prefixBytes)
-		for k != nil && bytes.HasPrefix(k, prefixBytes) {
-			select {
-			case <-ctx.Done():
-				return context.Cause(ctx)
-			default:
-			}
+		return scanPrefix(ctx, tx.Bucket(ix.bucket).Cursor(), prefixBytes, func(k, v []byte) ([]byte, error) {
 			rel := k[len(prefixBytes):]
 			// 深层子目录：跳到其后继，避免无谓遍历
 			if i := bytes.IndexByte(rel, '/'); i != -1 {
-				jump := make([]byte, len(prefixBytes)+i+2)
-				copy(jump, k[:len(prefixBytes)+i+1])
-				jump[len(jump)-1] = 0xff
-				k, v = c.Seek(jump)
-				continue
+				return skipSuccessor(k, len(prefixBytes)+i), nil
 			}
 			fid, size, _ := decodeValue(v)
 			out = append(out, Child{Name: string(rel), Fid: fid, Size: size})
-			k, v = c.Next()
-		}
-		return nil
+			return nil, nil
+		})
 	}); err != nil {
 		journal.Error(ctx, "扫描子项失败", "路径", workPath, "错误", err)
 	}
@@ -203,12 +224,10 @@ func (ix *Index) CountRecursive(ctx context.Context, path string) int64 {
 	prefixBytes := []byte(dirPrefix(path))
 	var count int64
 	if err := ix.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(ix.bucket)
-		c := b.Cursor()
-		for k, _ := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, _ = c.Next() {
+		return scanPrefix(ctx, tx.Bucket(ix.bucket).Cursor(), prefixBytes, func(k, v []byte) ([]byte, error) {
 			count++
-		}
-		return nil
+			return nil, nil
+		})
 	}); err != nil {
 		journal.Error(ctx, "统计索引失败", "路径", path, "错误", err)
 	}
@@ -217,30 +236,25 @@ func (ix *Index) CountRecursive(ctx context.Context, path string) int64 {
 
 // FindOrphanSubdirs 返回 currentPath 下「子项仍在但目录条目已丢失」的子目录完整路径。
 // 用于本地全量扫描后清理本地已删目录残留的深层记录。
+// 每个首段子目录只访问一次：处理完即整段跳层，避免遍历全部后代。
 func (ix *Index) FindOrphanSubdirs(ctx context.Context, currentPath string) []string {
 	prefix := dirPrefix(currentPath)
 	prefixBytes := []byte(prefix)
 	var orphans []string
-	seen := make(map[string]struct{})
 	if err := ix.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(ix.bucket)
-		c := b.Cursor()
-		for k, _ := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, _ = c.Next() {
-			rel := string(k[len(prefixBytes):])
-			before, _, ok := strings.Cut(rel, "/")
-			if !ok {
-				continue
+		return scanPrefix(ctx, b.Cursor(), prefixBytes, func(k, v []byte) ([]byte, error) {
+			rel := k[len(prefixBytes):]
+			i := bytes.IndexByte(rel, '/')
+			if i == -1 {
+				return nil, nil // 直属子项，非子目录后代
 			}
-			if _, dup := seen[before]; dup {
-				continue
-			}
-			seen[before] = struct{}{}
-			full := prefix + before
+			full := prefix + string(rel[:i])
 			if b.Get([]byte(full)) == nil {
 				orphans = append(orphans, full)
 			}
-		}
-		return nil
+			return skipSuccessor(k, len(prefixBytes)+i), nil
+		})
 	}); err != nil {
 		journal.Error(ctx, "查找孤儿子目录失败", "路径", currentPath, "错误", err)
 	}
@@ -252,17 +266,14 @@ func (ix *Index) ListStrmFids(ctx context.Context, dirPath string) []string {
 	prefixBytes := []byte(dirPrefix(dirPath))
 	var fids []string
 	if err := ix.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(ix.bucket)
-		c := b.Cursor()
-		for k, v := c.Seek(prefixBytes); k != nil && bytes.HasPrefix(k, prefixBytes); k, v = c.Next() {
-			if !strings.HasSuffix(strings.ToLower(string(k)), ".strm") {
-				continue
+		return scanPrefix(ctx, tx.Bucket(ix.bucket).Cursor(), prefixBytes, func(k, v []byte) ([]byte, error) {
+			if len(k) >= len(strmSuffix) && bytes.EqualFold(k[len(k)-len(strmSuffix):], strmSuffix) {
+				if fid, _, ok := decodeValue(v); ok && fid != "" {
+					fids = append(fids, fid)
+				}
 			}
-			if fid, _, ok := decodeValue(v); ok && fid != "" {
-				fids = append(fids, fid)
-			}
-		}
-		return nil
+			return nil, nil
+		})
 	}); err != nil {
 		journal.Error(ctx, "列出 STRM 链接失败", "路径", dirPath, "错误", err)
 	}

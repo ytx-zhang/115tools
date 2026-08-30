@@ -3,15 +3,15 @@ package webui
 import (
 	"net/http"
 
-	"github.com/ytx-zhang/115tools/internal/stash"
+	"github.com/ytx-zhang/115tools/internal/cache"
 )
 
-// handleStashList 返回全部缓存条目 + 汇总。
-func (s *Server) handleStashList(w http.ResponseWriter, r *http.Request) {
-	var items []stash.Item
+// handleCacheList 返回全部缓存条目 + 汇总。
+func (s *Server) handleCacheList(w http.ResponseWriter, r *http.Request) {
+	var items []cache.Item
 	total := int64(0)
-	if s.Stash != nil {
-		items = s.Stash.List()
+	if s.Cache != nil {
+		items = s.Cache.List()
 		for _, it := range items {
 			total += it.Size
 		}
@@ -23,8 +23,8 @@ func (s *Server) handleStashList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleStashDelete 批量删除缓存项。
-func (s *Server) handleStashDelete(w http.ResponseWriter, r *http.Request) {
+// handleCacheDelete 批量删除缓存项。
+func (s *Server) handleCacheDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PickCodes []string `json:"pickcodes"`
 	}
@@ -37,8 +37,8 @@ func (s *Server) handleStashDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deleted := 0
-	if s.Stash != nil {
-		deleted = s.Stash.Delete(req.PickCodes)
+	if s.Cache != nil {
+		deleted = s.Cache.Delete(req.PickCodes)
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
 }
