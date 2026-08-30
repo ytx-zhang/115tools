@@ -1,9 +1,9 @@
 // main.js —— 应用入口：登录、视图切换（hash 记忆）、全局 SSE 状态流。
 
 import { api, connectSSE } from './api.js';
-import { initTasks, stopTasks, renderTasks } from './tasks.js';
+import { initTasks, stopTasks, renderTasks, appendSyslog } from './tasks.js';
 import { initOffline } from './offline.js';
-import { initStash } from './stash.js';
+import { initCache } from './cache.js';
 import { initSettings } from './settings.js';
 
 // 全局状态（SSE 状态流驱动）
@@ -12,7 +12,6 @@ export const state = {
   missing: [],
   initError: '',
   tasks: [],     // [{id,name,type,running,completed,total}]
-  banners: [],   // [{level,msg,attrs,time}]
 };
 
 let closeEvents = null;
@@ -52,7 +51,7 @@ function bindTheme() {
 const views = {
   tasks: { init: initTasks, stop: stopTasks },
   offline: { init: initOffline },
-  stash: { init: initStash },
+  cache: { init: initCache },
   settings: { init: initSettings },
 };
 
@@ -103,19 +102,12 @@ function applyOverview(o) {
   renderTasks();
 }
 
-// 全局 SSE 状态流：overview（配置就绪/任务状态）+ banner（系统横幅）
+// 全局 SSE 状态流：overview（配置就绪/任务状态）+ syslog（系统程序日志实时推送）
 function startEvents() {
   closeEvents = connectSSE('/api/events', {
     onMessage: (en) => {
       if (en.type === 'overview' && en.overview) applyOverview(en.overview);
-      else if (en.type === 'banner' && en.banner) {
-        if (en.banner.cleared) state.banners = [];
-        else {
-          state.banners.unshift(en.banner);
-          if (state.banners.length > 20) state.banners.length = 20;
-        }
-        renderTasks();
-      }
+      else if (en.type === 'syslog' && en.log) appendSyslog(en.log);
     },
   });
 }

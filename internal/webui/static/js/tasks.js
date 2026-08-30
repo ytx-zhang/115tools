@@ -20,6 +20,7 @@ export function initTasks() {
     bound = true;
   }
   loadTasks();
+  loadSyslog();
 }
 
 export function stopTasks() {}
@@ -41,11 +42,10 @@ async function loadTasks() {
 export function renderTasks() {
   renderBanners();
   renderGrid();
-  renderSystemLogs();
 }
 
 // renderBanners 顶部横幅：仅配置状态类（配置不完整 / 初始化失败）。
-// 系统级错误/警告日志只进下方「错误警告日志」卡片（renderSystemLogs），顶部不再重复显示。
+// 系统级日志走下方「程序日志」卡片（renderSyslogs），顶部不再重复显示。
 function renderBanners() {
   const box = document.getElementById('banners');
   box.innerHTML = '';
@@ -107,29 +107,97 @@ function updateCard(e, rt) {
   e.runBtn.className = 'btn sm ' + (running ? 'danger' : 'primary');
   e.runBtn.dataset.action = running ? 'stop' : 'start';
   const use = e.runBtn.querySelector('use');
-  const icon = running ? '#i-stop' : '#i-play';
-  use.setAttribute('href', icon);
-  use.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', icon);
+  use.setAttribute('href', running ? '#i-stop' : '#i-play');
 }
 
-// renderSystemLogs 渲染系统级错误/警告日志卡片（独立于顶部配置横幅）。
-function renderSystemLogs() {
-  const box = document.getElementById('system-log-list');
+// ──── 程序日志（无任务上下文的系统级日志：落库、筛选、跟随、向上加载更早） ────
+let syslogs = [];      // 正序（旧→新），含 {seq,time,level,msg,attrs}
+let sysLatest = 0;     // 已见最大 seq（SSE 去重）
+let sysMore = true;    // 是否还有更旧日志可加载
+let sysFollow = true;  // 跟随底部（新日志自动滚到底）
+let sysLoading = false;
+let sysFilter = 'all';
+const SYS_PAGE = 100;
+
+function sysBox() { return document.getElementById('system-log-list'); }
+
+// appendSyslog SSE 实时推送的新日志（seq 去重，兼容回放与实时重叠）。
+// 跟随模式下只增量追加一行，避免日志量大时每次全量重渲染。
+export function appendSyslog(e) {
+  if (!e || e.seq == null || e.seq <= sysLatest) return;
+  syslogs.push(e);
+  sysLatest = e.seq;
+  appendSyslogLine(e);
+  if (sysFollow) scrollSysBottom();
+}
+
+// appendSyslogLine 把一条日志追加到列表底部；空态/筛选不匹配时退回全量渲染。
+function appendSyslogLine(e) {
+  const box = sysBox();
+  if (!box) return;
+  if (sysFilter !== 'all' && e.level !== sysFilter) return;
+  if (!box.children.length || box.querySelector('.empty')) { renderSyslogs(); return; }
+  box.appendChild(syslogLine(e));
+}
+
+// loadSyslog 加载最新一批（默认 100 条）并滚到底部。
+async function loadSyslog() {
+  const box = sysBox();
+  if (!box) return;
+  try {
+    const data = await api('/api/system-logs?limit=' + SYS_PAGE);
+    syslogs = data.logs || [];
+    sysLatest = syslogs.length ? syslogs[syslogs.length - 1].seq : 0;
+    sysMore = !!data.has_more;
+    renderSyslogs();
+    scrollSysBottom();
+  } catch { /* 静默：SSE 仍会补齐 */ }
+}
+
+// loadOlderSyslog 滚动到顶部时加载更旧的日志（插入列表头部并保持视口位置）。
+async function loadOlderSyslog() {
+  if (sysLoading || !sysMore || !syslogs.length) return;
+  const box = sysBox();
+  sysLoading = true;
+  try {
+    const data = await api(`/api/system-logs?limit=${SYS_PAGE}&before=${syslogs[0].seq}`);
+    const older = data.logs || [];
+    if (!older.length) { sysMore = false; return; }
+    const keep = box.scrollHeight - box.scrollTop; // 距底部距离，插入后保持
+    syslogs = [...older, ...syslogs];
+    sysMore = !!data.has_more;
+    renderSyslogs();
+    box.scrollTop = box.scrollHeight - keep;
+  } catch { /* 静默 */ } finally { sysLoading = false; }
+}
+
+function scrollSysBottom() {
+  const box = sysBox();
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+// renderSyslogs 按当前等级筛选渲染。
+function renderSyslogs() {
+  const box = sysBox();
   if (!box) return;
   box.innerHTML = '';
-  if (!state.banners.length) {
-    box.appendChild(el('div', 'muted empty', '暂无系统错误/警告'));
+  const list = sysFilter === 'all' ? syslogs : syslogs.filter((l) => l.level === sysFilter);
+  if (!list.length) {
+    box.appendChild(el('div', 'muted empty', '暂无程序日志'));
     return;
   }
-  state.banners.forEach((b) => {
-    const line = el('div', 'log-line lv-' + (b.level === 'ERROR' ? 'error' : 'warn'));
-    line.append(
-      el('span', 't', fmtTime(b.time)),
-      el('span', 'lv', b.level),
-    );
-    line.appendChild(document.createTextNode(' ' + (b.msg || '') + (b.attrs ? '  ' + b.attrs : '')));
-    box.appendChild(line);
-  });
+  list.forEach((l) => box.appendChild(syslogLine(l)));
+}
+
+// syslogLine 构建一条日志行。
+function syslogLine(l) {
+  const line = el('div', 'log-line lv-' + l.level.toLowerCase());
+  line.append(
+    el('span', 't', fmtTime(l.time)),
+    el('span', 'lv', l.level),
+  );
+  line.appendChild(document.createTextNode(' ' + (l.msg || '') + (l.attrs ? '  ' + l.attrs : '')));
+  return line;
 }
 
 // createCard 创建任务卡片，返回可增量更新的元素引用。
@@ -238,14 +306,30 @@ function bindOnce() {
   document.querySelectorAll('[data-close]').forEach((b) =>
     b.addEventListener('click', () => document.getElementById(b.dataset.close).close()));
 
-  // 清空系统级错误/警告日志
+  // 清空程序日志
   document.getElementById('system-logs-clear').addEventListener('click', async () => {
+    if (!confirm('确认清空全部程序日志？')) return;
     try {
-      await api('/api/banners/clear', { method: 'POST' });
-      state.banners = [];
-      renderTasks();
-      toast('已清空错误警告日志');
+      await api('/api/system-logs', { method: 'DELETE' });
+      syslogs = [];
+      sysLatest = 0;
+      sysMore = true;
+      renderSyslogs();
+      toast('已清空程序日志', 'ok');
     } catch (err) { toast(err.message, 'err'); }
+  });
+  // 等级筛选
+  document.getElementById('syslog-filter').addEventListener('change', (e) => {
+    sysFilter = e.target.value;
+    renderSyslogs();
+    scrollSysBottom();
+  });
+  // 程序日志滚动：到底恢复跟随；滚到顶部加载更早
+  const sbox = document.getElementById('system-log-list');
+  sbox.addEventListener('scroll', () => {
+    const nearBottom = sbox.scrollHeight - sbox.scrollTop - sbox.clientHeight < 40;
+    sysFollow = nearBottom;
+    if (sbox.scrollTop < 30) loadOlderSyslog();
   });
 
   // 清空当前任务的执行历史与明细日志
@@ -406,7 +490,7 @@ async function openHistory(id) {
   list.innerHTML = '<div class="muted">加载中…</div>';
   document.getElementById('history-dialog').showModal();
   try {
-    const data = await api(`/api/tasks/${id}/runs?limit=100`);
+    const data = await api(`/api/tasks/${id}/runs?limit=200`);
     renderRuns(data.runs || []);
   } catch (err) {
     list.innerHTML = '';
@@ -414,27 +498,47 @@ async function openHistory(id) {
   }
 }
 
+// renderRuns 分批渲染执行历史（每批 RUNS_PAGE 条），避免一次竖排 200 条 DOM。
 function renderRuns(runs) {
   const list = document.getElementById('history-list');
   list.innerHTML = '';
   if (!runs.length) { list.appendChild(el('div', 'muted', '暂无执行记录')); return; }
-  runs.forEach((r) => {
-    const row = el('div', 'hist-row');
-    row.dataset.seq = r.seq;
-    const badge = el('span', 'badge ' + (stateCls[r.state] || ''), stateLabel[r.state] || r.state);
-    const trig = el('span', 'badge', (triggerLabel[r.trigger] || r.trigger) +
-      (r.direction === 'pull' ? ' · 云端' : ' · 本地'));
-    const time = el('span', 'hr-time', fmtTime(r.started_at));
-    const stats = el('span', 'hr-stats',
-      `耗时 ${fmtDuration(r.duration_ms)}` +
-      (r.counters?.uploaded ? ` · 上传 ${r.counters.uploaded}` : '') +
-      (r.counters?.downloaded ? ` · 下载 ${r.counters.downloaded}` : '') +
-      (r.counters?.strm_generated ? ` · STRM ${r.counters.strm_generated}` : '') +
-      (r.counters?.deleted ? ` · 删除 ${r.counters.deleted}` : ''));
-    row.append(badge, trig, time, stats);
-    row.addEventListener('click', () => openRunLog(r));
-    list.appendChild(row);
-  });
+  const PAGE = 6;
+  let shown = 0;
+  const more = el('button', 'btn ghost sm more-btn');
+  const show = () => {
+    runs.slice(shown, shown + PAGE).forEach((r) => {
+      const row = el('div', 'hist-row');
+      row.dataset.seq = r.seq;
+      const badge = el('span', 'badge ' + (stateCls[r.state] || ''), stateLabel[r.state] || r.state);
+      const trig = el('span', 'badge', (triggerLabel[r.trigger] || r.trigger) +
+        (r.direction === 'pull' ? ' · 云端' : ' · 本地'));
+      const time = el('span', 'hr-time', fmtTime(r.started_at));
+      const stats = el('span', 'hr-stats',
+        `耗时 ${fmtDuration(r.duration_ms)}` +
+        (r.counters?.uploaded ? ` · 上传 ${r.counters.uploaded}` : '') +
+        (r.counters?.downloaded ? ` · 下载 ${r.counters.downloaded}` : '') +
+        (r.counters?.strm_generated ? ` · STRM ${r.counters.strm_generated}` : '') +
+        (r.counters?.deleted ? ` · 删除 ${r.counters.deleted}` : ''));
+      row.append(badge, trig, time, stats);
+      row.addEventListener('click', () => {
+        // 选中标识：只保留当前行的 sel 高亮
+        list.querySelectorAll('.hist-row.sel').forEach((e) => e.classList.remove('sel'));
+        row.classList.add('sel');
+        openRunLog(r);
+      });
+      list.insertBefore(row, more);
+      shown++;
+    });
+    if (shown >= runs.length) { more.remove(); }
+    else {
+      more.textContent = `加载更多（剩 ${runs.length - shown} 条）`;
+      more.addEventListener('click', show);
+    }
+  };
+  more.addEventListener('click', show);
+  list.appendChild(more);
+  show();
 }
 
 async function openRunLog(run) {
@@ -453,18 +557,33 @@ async function openRunLog(run) {
   }
 }
 
+// renderLogs 分批渲染单次执行的明细日志（每批 LOGS_PAGE 条），单条 run 最多 1000 条时避免一次渲染堆爆。
 function renderLogs(logs) {
   const box = document.getElementById('run-log');
   box.innerHTML = '';
   if (!logs.length) { box.appendChild(el('div', 'muted', '（无明细日志）')); return; }
-  logs.forEach((l) => {
-    const line = el('div', 'log-line lv-' + l.level.toLowerCase());
-    line.append(
-      el('span', 't', fmtTime(l.time)),
-      el('span', 'lv', l.level),
-    );
-    line.appendChild(document.createTextNode(' ' + l.msg + (l.attrs ? '  ' + l.attrs : '')));
-    box.appendChild(line);
-  });
+  const PAGE = 200;
+  let shown = 0;
+  const more = el('button', 'btn ghost sm more-btn');
+  const show = () => {
+    logs.slice(shown, shown + PAGE).forEach((l) => {
+      const line = el('div', 'log-line lv-' + l.level.toLowerCase());
+      line.append(
+        el('span', 't', fmtTime(l.time)),
+        el('span', 'lv', l.level),
+      );
+      line.appendChild(document.createTextNode(' ' + l.msg + (l.attrs ? '  ' + l.attrs : '')));
+      box.insertBefore(line, more);
+      shown++;
+    });
+    if (shown >= logs.length) { more.remove(); }
+    else {
+      more.textContent = `加载更多（剩 ${logs.length - shown} 条）`;
+      more.addEventListener('click', show);
+    }
+  };
+  more.addEventListener('click', show);
+  box.appendChild(more);
+  show();
   box.scrollTop = box.scrollHeight;
 }

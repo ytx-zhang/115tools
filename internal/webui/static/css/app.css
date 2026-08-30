@@ -208,8 +208,13 @@
   }
   .card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); margin-bottom: var(--sp-4); flex-wrap: wrap; }
   .card-head h3 { display: flex; align-items: center; }
+  .syslog-ops { display: flex; align-items: center; gap: var(--sp-2); }
+  #syslog-filter {
+    padding: 6px 10px; border-radius: var(--r-sm);
+    border: 1px solid var(--border); background: var(--bg3); color: var(--text);
+    font-size: 12.5px;
+  }
   .card-title { font-weight: 600; font-size: 14px; display: flex; align-items: center; margin-bottom: var(--sp-3); }
-  #system-logs { margin-top: var(--sp-5); }
   .row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 
   .badge {
@@ -503,6 +508,41 @@
   .dlg-body fieldset:last-child { margin-bottom: 0; }
   .dlg-foot { margin: 0; padding: var(--sp-4) var(--sp-5); border-top: 1px solid var(--border); }
 
+  /* 执行历史弹窗：明细日志含长路径/长消息，默认 660px 太窄——单独放宽到 960px；
+     固定高度让内部上下分栏的比例/上限可靠解析（不再随日志内容互相拉扯）。 */
+  #history-dialog { width: min(960px, calc(100vw - 32px)); height: min(86dvh, 780px); }
+
+  /* 执行历史弹窗：dialog 自身 flex 布局（不再固定 body 高度，避免整体超高出滚动条）；
+     上下分栏——列表在上（自己滚动），日志区在下，点某条记录即可见。
+     ⚠️ display 必须限定 [open]，否则会覆盖 dialog 关闭时的 UA 隐藏规则导致关不掉。 */
+  #history-dialog[open] {
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  #history-dialog .dlg-head, #history-dialog .dlg-foot { flex: 0 0 auto; }
+  #history-dialog .dlg-body {
+    display: flex; flex-direction: column;
+    flex: 1 1 auto; min-height: 0;
+    max-height: none; /* 高度由 dialog 固定高度接管，通用 .dlg-body 的 max-height 失效 */
+    overflow: hidden;
+  }
+  #history-dialog .history-list {
+    flex: 1 1 auto; min-height: 0;
+    overflow-y: auto; overflow-x: hidden;
+  }
+  /* 日志区：高度自适应，但最多占一半，超出内部滚动——日志再多也不会把列表挤没 */
+  #history-dialog .run-log {
+    flex: 0 1 auto; min-height: 0;
+    max-height: 50%;
+    overflow-y: auto;
+  }
+  /* 列表的「加载更多」固定在列表底部可见，日志区显示压缩列表时不被裁掉 */
+  #history-dialog .history-list .more-btn {
+    position: sticky; bottom: 0;
+    background: var(--bg2);
+    z-index: 1;
+  }
+
   .history-list { display: flex; flex-direction: column; gap: var(--sp-2); }
   .hist-row {
     display: flex; align-items: center; gap: var(--sp-3);
@@ -515,20 +555,30 @@
   .hist-row:hover {
     background: var(--bg-hover);
     border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
-    transform: translateX(3px);
+    box-shadow: var(--shadow-sm);
+  }
+  /* 当前正在查看日志的那条执行记录：高亮选中 */
+  .hist-row.sel {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-color: var(--accent);
     box-shadow: var(--shadow-sm);
   }
   .hist-row .hr-time  { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .hist-row .hr-stats { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .hist-row .hr-stats { margin-left: auto; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 
   .run-log {
     margin-top: var(--sp-3);
     border: 1px solid var(--border); border-radius: var(--r-sm);
     background: light-dark(#f7f9fd, #0d1320);
     padding: var(--sp-3);
-    max-height: 300px; overflow-y: auto;
+    max-height: min(46dvh, 460px); overflow-y: auto; overflow-x: hidden;
   }
-  .log-line { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; padding: 2.5px 0; line-height: 1.6; }
+  /* 「加载更多」按钮：占满一行居中 */
+  .more-btn { width: 100%; justify-content: center; }
+  .log-line { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; padding: 5px 6px; line-height: 1.6; overflow-wrap: anywhere; border-radius: 4px; transition: background var(--t-fast); }
+  /* 相邻日志行之间画一条淡色分隔线（首行、最后一行与加载更多按钮不画） */
+  .log-line + .log-line { border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent); }
+  .log-line:hover { background: var(--bg-hover); }
   .log-line .lv { margin-right: 6px; font-weight: 700; }
   .log-line.lv-debug       { color: var(--muted); }
   .log-line.lv-info  .lv   { color: var(--accent); }
@@ -545,6 +595,27 @@
     border: 1px solid var(--border);
   }
   .log-box .empty { padding: var(--sp-2) var(--sp-1); color: var(--muted); }
+
+  /* 程序日志卡片：占满任务中心视图剩余空间，日志多时内部滚动、不溢出显示器。
+     ⚠️ 必须写在 @layer components（.log-box 同层）内：层优先级高于选择器特异性，
+     放在更早的 @layer layout 里会被 .log-box 的 max-height:260px 覆盖。 */
+  #view-tasks.view {
+    display: flex; flex-direction: column;
+    min-height: calc(100dvh - var(--sp-6) - var(--sp-7));
+  }
+  #system-logs {
+    margin-top: var(--sp-5);
+    display: flex; flex-direction: column;
+    flex: 1 1 auto; min-height: 0;
+  }
+  #system-log-list {
+    /* height:0 让高度由 flex 剩余空间决定（而非被日志内容撑高导致整页溢出），
+       再由 flex-grow 填满卡片剩余；min-height 保证任务很多时仍有可见区域。 */
+    flex: 1 1 auto;
+    height: 0; min-height: 160px;
+    overflow-y: auto; overflow-x: hidden;
+    max-height: none;
+  }
 
   #toast-box { position: fixed; bottom: var(--sp-5); right: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-2); z-index: 100; pointer-events: none; }
   .toast {
@@ -633,6 +704,7 @@
 
   dialog { width: calc(100vw - 16px); max-height: 92dvh; border-radius: var(--r); }
   .dlg-body { max-height: calc(92dvh - 120px); padding: var(--sp-4); }
+
   .dlg-head { padding: var(--sp-3) var(--sp-4); }
   .dlg-foot { padding: var(--sp-3) var(--sp-4); }
 

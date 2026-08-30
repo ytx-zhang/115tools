@@ -89,14 +89,13 @@ export function el(tag, cls, text) {
   return e;
 }
 
-// svgIcon 创建带 use 引用的 SVG 图标（href 与 xlink:href 双写，兼容旧浏览器）。
+// svgIcon 创建带 use 引用的 SVG 图标（SVG2 标准 href，现代浏览器原生支持）。
 export function svgIcon(icon, cls = 'ic') {
   const ns = 'http://www.w3.org/2000/svg';
   const s = document.createElementNS(ns, 'svg');
   s.classList.add(cls);
   const u = document.createElementNS(ns, 'use');
   u.setAttribute('href', icon);
-  u.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', icon);
   s.appendChild(u);
   return s;
 }
@@ -105,6 +104,6 @@ export function svgIcon(icon, cls = 'ic') {
 export function btnWithIcon(cls, text, icon, dataset) {
   const b = el('button', cls, text);
   b.prepend(svgIcon(icon));
-  for (const k in dataset) b.dataset[k] = dataset[k];
+  Object.assign(b.dataset, dataset);
   return b;
 }

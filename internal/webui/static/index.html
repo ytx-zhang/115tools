@@ -136,7 +136,7 @@
       <nav id="nav">
         <button class="nav-item active" data-view="tasks"><svg class="ic"><use href="#i-grid"/></svg> <span>任务中心</span></button>
         <button class="nav-item" data-view="offline"><svg class="ic"><use href="#i-download"/></svg> <span>离线下载</span></button>
-        <button class="nav-item" data-view="stash"><svg class="ic"><use href="#i-folder"/></svg> <span>本地缓存</span></button>
+        <button class="nav-item" data-view="cache"><svg class="ic"><use href="#i-folder"/></svg> <span>本地缓存</span></button>
         <button class="nav-item" data-view="settings"><svg class="ic"><use href="#i-cog"/></svg> <span>设置</span></button>
       </nav>
       <div class="sidebar-foot">
@@ -174,11 +174,20 @@
           <p class="muted">绑定一对本地目录与云端目录，即可开启自动同步</p>
           <button class="btn primary" id="empty-new"><svg class="ic"><use href="#i-plus"/></svg> 新建任务</button>
         </div>
-        <!-- 系统级错误/警告日志：单独展示，与顶部配置横幅区分 -->
+        <!-- 程序日志：无任务上下文的系统级日志（落库、等级筛选、跟随底部、向上加载更早） -->
         <div class="card" id="system-logs">
           <div class="card-head">
-            <h3><span class="hl-dot"></span>错误警告日志</h3>
-            <button class="btn sm danger" id="system-logs-clear">清空</button>
+            <h3><span class="hl-dot"></span>程序日志</h3>
+            <div class="syslog-ops">
+              <select id="syslog-filter" aria-label="日志等级筛选">
+                <option value="all">全部</option>
+                <option value="DEBUG">DEBUG</option>
+                <option value="INFO">INFO</option>
+                <option value="WARN">WARN</option>
+                <option value="ERROR">ERROR</option>
+              </select>
+              <button class="btn sm danger" id="system-logs-clear">清空</button>
+            </div>
           </div>
           <div id="system-log-list" class="log-box"></div>
         </div>
@@ -236,25 +245,25 @@
       </section>
 
       <!-- 本地缓存 -->
-      <section id="view-stash" class="view" hidden>
+      <section id="view-cache" class="view" hidden>
         <div class="view-head">
-          <h2><svg class="ic"><use href="#i-folder"/></svg>本地缓存 <small class="muted" id="stash-summary"></small></h2>
+          <h2><svg class="ic"><use href="#i-folder"/></svg>本地缓存 <small class="muted" id="cache-summary"></small></h2>
         </div>
         <div class="card">
           <div class="card-head">
             <h3><span class="hl-dot"></span>缓存列表</h3>
             <div class="row">
-              <button class="btn sm" id="stash-refresh"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
-              <button class="btn sm danger" id="stash-delete-selected" disabled>删除选中</button>
+              <button class="btn sm" id="cache-refresh"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
+              <button class="btn sm danger" id="cache-delete-selected" disabled>删除选中</button>
             </div>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
-                <tr><th style="width:40px"><input type="checkbox" id="stash-check-all"></th>
+                <tr><th style="width:40px"><input type="checkbox" id="cache-check-all"></th>
                   <th>文件名</th><th>大小</th><th>过期时间</th></tr>
               </thead>
-              <tbody id="stash-tbody"></tbody>
+              <tbody id="cache-tbody"></tbody>
             </table>
           </div>
         </div>

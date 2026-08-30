@@ -1,29 +1,29 @@
-// stash.js —— 本地缓存：列表、多选删除。
+// cache.js —— 本地缓存：列表、多选删除。
 
 import { api, el, fmtBytes, fmtTime, toast } from './api.js';
 
 let bound = false;
 
-export function initStash() {
+export function initCache() {
   if (!bound) { bindOnce(); bound = true; }
   refresh();
 }
 
 async function refresh() {
   try {
-    const data = await api('/api/stash');
+    const data = await api('/api/cache');
     renderList(data.items || []);
-    document.getElementById('stash-summary').textContent = `${data.count || 0} 项 · ${fmtBytes(data.total_size)}`;
+    document.getElementById('cache-summary').textContent = `${data.count || 0} 项 · ${fmtBytes(data.total_size)}`;
   } catch (err) {
     toast(err.message, 'err');
   }
 }
 
 function renderList(items) {
-  const tbody = document.getElementById('stash-tbody');
+  const tbody = document.getElementById('cache-tbody');
   tbody.innerHTML = '';
-  document.getElementById('stash-delete-selected').disabled = true;
-  document.getElementById('stash-check-all').checked = false;
+  document.getElementById('cache-delete-selected').disabled = true;
+  document.getElementById('cache-check-all').checked = false;
   if (!items.length) {
     const tr = el('tr');
     const td = el('td');
@@ -39,7 +39,7 @@ function renderList(items) {
     const check = el('td');
     const c = document.createElement('input');
     c.type = 'checkbox';
-    c.className = 'stash-check';
+    c.className = 'cache-check';
     c.value = it.pickcode;
     check.appendChild(c);
     const name = el('td');
@@ -57,27 +57,27 @@ function renderList(items) {
 }
 
 function selected() {
-  return [...document.querySelectorAll('.stash-check:checked')].map((c) => c.value);
+  return [...document.querySelectorAll('.cache-check:checked')].map((c) => c.value);
 }
 
 function bindOnce() {
-  document.getElementById('stash-refresh').addEventListener('click', refresh);
+  document.getElementById('cache-refresh').addEventListener('click', refresh);
 
-  document.getElementById('stash-check-all').addEventListener('change', (e) => {
-    document.querySelectorAll('.stash-check').forEach((c) => { c.checked = e.target.checked; });
-    document.getElementById('stash-delete-selected').disabled = selected().length === 0;
+  document.getElementById('cache-check-all').addEventListener('change', (e) => {
+    document.querySelectorAll('.cache-check').forEach((c) => { c.checked = e.target.checked; });
+    document.getElementById('cache-delete-selected').disabled = selected().length === 0;
   });
 
-  document.getElementById('stash-tbody').addEventListener('change', () => {
-    document.getElementById('stash-delete-selected').disabled = selected().length === 0;
+  document.getElementById('cache-tbody').addEventListener('change', () => {
+    document.getElementById('cache-delete-selected').disabled = selected().length === 0;
   });
 
-  document.getElementById('stash-delete-selected').addEventListener('click', async () => {
+  document.getElementById('cache-delete-selected').addEventListener('click', async () => {
     const codes = selected();
     if (!codes.length) return;
     if (!confirm(`确认删除选中的 ${codes.length} 项缓存？`)) return;
     try {
-      const r = await api('/api/stash/delete', { method: 'POST', body: JSON.stringify({ pickcodes: codes }) });
+      const r = await api('/api/cache/delete', { method: 'POST', body: JSON.stringify({ pickcodes: codes }) });
       toast(`已删除 ${r.deleted} 项`, 'ok');
       refresh();
     } catch (err) { toast(err.message, 'err'); }
