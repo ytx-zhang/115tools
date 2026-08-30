@@ -22,19 +22,21 @@ type Visitor struct {
 	EnterDir  func(ctx context.Context, path, fid string) (descend bool, err error)
 	VisitFile func(ctx context.Context, path, fid, pickCode string, e Entry) error
 	// SkipByCount：云端总数与索引记录数一致则跳过该目录（大库二次同步提速）。
+	// 仅适用于有索引支撑的场景——跳过意味着不检查该目录内容，无索引时不可开。
 	SkipByCount bool
 }
 
-// Walker 云端递归遍历。依赖：pan（列表）、index（计数跳过）、rules（isv 兜底判视频）。
+// Walker 云端递归遍历。依赖：pan（列表）、index（计数跳过）、paths（云端↔本地映射）、rules（isv 兜底判视频）。
 type Walker struct {
 	api   *pan.Client
 	idx   *index.Index
+	paths *TaskPaths
 	rules Rules
 }
 
 // NewWalker 构造 walker。
 func NewWalker(deps *Deps) *Walker {
-	return &Walker{api: deps.Pan, idx: deps.Index, rules: deps.Rules}
+	return &Walker{api: deps.Pan, idx: deps.Index, paths: deps.Paths, rules: deps.Rules}
 }
 
 // Walk 递归遍历云端目录树：计数跳过（可选）→ 拉子项 → 目录交 EnterDir → 文件交 VisitFile。
@@ -53,8 +55,12 @@ func (w *Walker) Walk(ctx context.Context, rootPath, rootFid string, v Visitor, 
 				journal.Warn(gctx, "GetDirInfo 失败，回退全量同步", "路径", path, "错误", err)
 			} else {
 				cloudTotal := int64(info.FileCount) + int64(info.FolderCount)
-				dbTotal := w.idx.CountRecursive(gctx, path)
+				// 索引以本地路径为键，云端路径必须先映射回本地再计数；
+				// 直接拿云端路径查，只有 LocalDir 与 CloudDir 同名时才碰巧对得上。
+				localPath := MapCloudToLocal(w.paths.LocalDir, w.paths.CloudDir, path)
+				dbTotal := w.idx.CountRecursive(gctx, localPath)
 				if dbTotal > 0 && cloudTotal == dbTotal {
+					journal.Debug(gctx, "目录条目数一致，跳过遍历", "路径", path, "条目", cloudTotal)
 					return nil
 				}
 			}

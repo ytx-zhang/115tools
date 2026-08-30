@@ -19,9 +19,10 @@ import (
 // Options 云端同步选项。
 type Options struct {
 	FetchMissing  bool // 下载云端有、本地无的文件
-	DropRedundant bool // 删除云端同名冗余文件
+	DropRedundant bool // 删除云端同名冗余文件（依赖本地索引，仅 push 连带扫描可用）
 	GenStrm       bool // 视频落地为 .strm（false = 下载原视频）
 	ArchiveToTemp bool // 全部成功后把顶层项移入云端回收目录（等价旧 STRM 生成收尾）
+	UseIndex      bool // 是否读写本地路径索引：pull 本体只落本地不落库；push 连带扫描必须落库
 }
 
 // Runner 云端→本地同步任务。
@@ -54,17 +55,20 @@ func (r *Runner) Run(ctx context.Context, c *journal.Counters) error {
 	// 仅「归档到回收目录」需要收集顶层 FID，未开启时不做无谓判断
 	topFids := make([]string, 0, 8)
 	err := r.wk.Walk(ctx, r.paths.CloudDir, r.paths.CloudFid, shared.Visitor{
-		SkipByCount: true,
+		// 计数跳过依赖索引：pull 本体不落库，必须逐目录深入（跳过就等于不检查该目录缺什么）；
+		// push 的连带扫描有完整索引，才用得上条目数一致跳过。
+		SkipByCount: r.opts.UseIndex,
 		EnterDir: func(ctx context.Context, path, fid string) (bool, error) {
 			localPath := shared.MapCloudToLocal(r.paths.LocalDir, r.paths.CloudDir, path)
 			if r.opts.ArchiveToTemp && isTopLevel(r.paths.CloudDir, path) {
 				topFids = append(topFids, fid)
 			}
-			if r.idx.GetFid(ctx, localPath) == "" {
-				if err := os.MkdirAll(localPath, 0o755); err != nil {
-					journal.Error(ctx, "创建目录失败", "路径", localPath, "错误", err)
-					return false, nil
-				}
+			// MkdirAll 幂等，无需先查索引判存在
+			if err := os.MkdirAll(localPath, 0o755); err != nil {
+				journal.Error(ctx, "创建目录失败", "路径", localPath, "错误", err)
+				return false, nil
+			}
+			if r.opts.UseIndex && r.idx.GetFid(ctx, localPath) == "" {
 				r.idx.Put(ctx, localPath, fid, index.SizeDir)
 			}
 			return true, nil
@@ -77,7 +81,12 @@ func (r *Runner) Run(ctx context.Context, c *journal.Counters) error {
 				savePath = shared.VideoToStrmPath(localPath)
 			}
 
-			dbFid := r.idx.GetFid(ctx, savePath)
+			// 本地是否已存在只看文件系统：索引里有没有记录与本地有没有文件无关
+			// （pull 本体不落库，若拿索引判定会把「云端有记录、本地未下载」的文件永久跳过）。
+			var dbFid string
+			if r.opts.UseIndex {
+				dbFid = r.idx.GetFid(ctx, savePath)
+			}
 			if _, serr := os.Stat(savePath); dbFid != "" || serr == nil {
 				if r.opts.DropRedundant && dbFid != "" && dbFid != fid {
 					if err := r.api.DeleteFile(ctx, fid, savePath); err != nil {
@@ -103,7 +112,10 @@ func (r *Runner) Run(ctx context.Context, c *journal.Counters) error {
 			} else {
 				c.Downloaded++
 			}
-			r.idx.Put(ctx, savePath, fid, size)
+			if r.opts.UseIndex {
+				// 落库供本任务 push 侧比对：否则下次本地扫描会把刚下载的文件当新增重传
+				r.idx.Put(ctx, savePath, fid, size)
+			}
 			return nil
 		},
 	}, nil)
