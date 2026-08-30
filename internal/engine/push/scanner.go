@@ -81,7 +81,7 @@ func (sc *Scanner) scanDirLocked(ctx context.Context, currentPath string, batch 
 		fullPath := filepath.Join(currentPath, name)
 
 		if !exists {
-			journal.Debug(ctx, "扫描发现本地已删", "路径", fullPath, "DB大小", dbSize)
+			journal.Info(ctx, "扫描发现本地已删", "路径", fullPath, "DB大小", dbSize)
 			sc.HandleFile(ctx, batch, fullPath, dbFid, dbSize, nil)
 			continue
 		}

@@ -264,7 +264,7 @@ func UploadHelper(ctx context.Context, c *Client, path, cid, signKey, signVal st
 	upType := ""
 	defer func() {
 		if err == nil && info != nil {
-			journal.Debug(ctx, "上传文件", "路径", path, "上传类型", upType, "耗时", time.Since(t0))
+			journal.Info(ctx, "上传文件", "路径", path, "上传类型", upType, "耗时", time.Since(t0))
 		}
 	}()
 	if err = context.Cause(ctx); err != nil {

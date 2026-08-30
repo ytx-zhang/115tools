@@ -133,7 +133,7 @@ func (c *Cache) Move(srcPath, pickCode string) (string, error) {
 	}
 	dst := filepath.Join(dstDir, filepath.Base(srcPath))
 	if err := os.Rename(srcPath, dst); err == nil {
-		journal.Debug(context.Background(), "视频移入本地缓存", "缓存路径", dst)
+		journal.Info(context.Background(), "视频移入本地缓存", "缓存路径", dst)
 		return dst, nil
 	}
 	if err := copyFile(srcPath, dst); err != nil {
@@ -142,7 +142,7 @@ func (c *Cache) Move(srcPath, pickCode string) (string, error) {
 	if rerr := os.Remove(srcPath); rerr != nil && !os.IsNotExist(rerr) {
 		journal.Warn(context.Background(), "缓存拷贝成功但删除原件失败", "路径", srcPath, "错误", rerr)
 	}
-	journal.Debug(context.Background(), "视频移入本地缓存(跨设备拷贝)", "缓存路径", dst)
+	journal.Info(context.Background(), "视频移入本地缓存(跨设备拷贝)", "缓存路径", dst)
 	return dst, nil
 }
 

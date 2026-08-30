@@ -115,7 +115,7 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 			}
 		}
 		s.storeCache(cacheKey, info.URL, info.Name, expiration)
-		journal.Debug(r.Context(), "获取新地址", "文件名", info.Name, "UA", ua,
+		journal.Info(r.Context(), "获取新地址", "文件名", info.Name, "UA", ua,
 			"缓存时长", expiration.Round(time.Second).String(), "耗时", time.Since(t0))
 		return &cacheItem{url: info.URL, name: info.Name, expireAt: time.Now().Add(expiration)}, nil
 	})

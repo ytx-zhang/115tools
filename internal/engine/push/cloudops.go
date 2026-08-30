@@ -97,7 +97,7 @@ func (co *CloudOps) CloudCleanTask(ctx context.Context, localPath string) error 
 		}
 	}
 
-	journal.Debug(ctx, "清理过时文件", "路径", localPath, "耗时", time.Since(t0))
+	journal.Info(ctx, "清理过时文件", "路径", localPath, "耗时", time.Since(t0))
 	co.vault.ClearPaths(ctx, []string{localPath})
 	return nil
 }

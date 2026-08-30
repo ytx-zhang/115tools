@@ -213,13 +213,13 @@ func removeEmpty(m Form) Form {
 	return out
 }
 
-// log 统一云端操作日志：成功 Debug（接口调用级，量大，避免刷屏）、失败 Error，附真实网络耗时。
+// log 统一云端操作日志：成功 Info（每个 115 请求一条，便于在 docker 日志观察云端动作）、失败 Error，附真实网络耗时。
 func log(ctx context.Context, action string, err error, dur time.Duration, info ...any) {
 	if err != nil {
 		journal.Error(ctx, action+"失败", slices.Concat(info, []any{"错误", err, "耗时", dur})...)
 		return
 	}
-	journal.Debug(ctx, action+"完成", slices.Concat(info, []any{"耗时", dur})...)
+	journal.Info(ctx, action+"完成", slices.Concat(info, []any{"耗时", dur})...)
 }
 
 // prettyJSON 把响应体转可读缩进文本（非 JSON 原样返回）。
