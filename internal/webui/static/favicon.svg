@@ -1,1 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0969da"/><text x="32" y="44" font-size="34" text-anchor="middle" fill="#fff">☁</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#5b8dff"/><stop offset="1" stop-color="#8b5cf6"/>
+  </linearGradient></defs>
+  <path fill="url(#lg)" opacity=".92" d="M33.5 38h-19A10.5 10.5 0 1 1 16 17.1 13.2 13.2 0 0 1 41 24.4 8.4 8.4 0 0 1 33.5 38z"/>
+  <path fill="#fff" d="M24.4 14.5l5.8 5.8h-3.6v6.2h-4.4v-6.2h-3.6z"/>
+</svg>
