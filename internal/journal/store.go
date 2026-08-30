@@ -30,17 +30,12 @@ var (
 )
 
 var (
-	schemaKey     = []byte("schema")
 	seqCounterKey = []byte("run_seq")
 	sysSeqKey     = []byte("sys_seq")
 )
 
-// schemaV2 库结构版本 v2：run 序号全局唯一。
-// v1 的 seq 取自各任务桶自己的 NextSequence，跨任务必然重复（A、B 都有 seq=1），
-// 而明细日志以 seq 为全局键 → 后结束的 run 覆盖前一个的日志，任务日志串号。
-const schemaV2 = "2"
-
 // Store 执行历史与明细日志库（独立 bbolt 文件 journal.db）。
+// run 序号由 meta 桶的全局计数器单调分配（跨任务唯一），明细日志以该 seq 为全局键。
 // 运行中的 run 的明细日志驻留内存（running map），结束时整批落盘并释放。
 type Store struct {
 	db    *bbolt.DB
@@ -52,6 +47,7 @@ type Store struct {
 // runBuffer 一次执行在运行中的内存态。
 type runBuffer struct {
 	taskID    string
+	taskName  string // Abandon 转投日志时标注归属任务
 	startedAt time.Time
 	mu        sync.Mutex
 	logs      []LogEntry
@@ -84,9 +80,6 @@ func (s *Store) init() error {
 		return nil
 	}); err != nil {
 		return fmt.Errorf("初始化历史库失败: %w", err)
-	}
-	if err := s.applySchema(); err != nil {
-		return err
 	}
 	return s.markInterrupted()
 }
@@ -134,92 +127,6 @@ func (s *Store) markInterrupted() error {
 	})
 }
 
-// applySchema 保障库结构版本：初始化全局 seq 计数器，并在首次升级到 v2 时校正历史数据。
-func (s *Store) applySchema() error {
-	return s.db.Update(func(tx *bbolt.Tx) error {
-		// 已是 v2：seq 由 nextSeq 单调维护，计数器即权威值，无需再全表扫描校正。
-		mb := tx.Bucket(metaBucket)
-		if string(mb.Get(schemaKey)) == schemaV2 {
-			return nil
-		}
-		// 升级到 v2：先把计数器抬到不低于历史最大 seq，否则新 run 会撞上 v1 遗留的重复键。
-		if err := syncSeqCounter(tx); err != nil {
-			return err
-		}
-		if err := dropAmbiguousLogs(tx); err != nil {
-			return err
-		}
-		return mb.Put(schemaKey, []byte(schemaV2))
-	})
-}
-
-// dropAmbiguousLogs 删除被多个任务的 run 共用的明细日志。
-// v1 下不同任务会有相同 seq，共用同一条 runlogs 记录（内容属于最后结束的那个 run），
-// 归属已不可判定，直接丢弃——宁可看不到，也不能把别的任务的日志显示出来。
-func dropAmbiguousLogs(tx *bbolt.Tx) error {
-	rb := tx.Bucket(runsBucket)
-	lb := tx.Bucket(runLogsBucket)
-	claims := make(map[uint64]int)
-	var dups [][]byte
-	err := rb.ForEach(func(taskK, _ []byte) error {
-		tb := rb.Bucket(taskK)
-		if tb == nil {
-			return nil
-		}
-		return tb.ForEach(func(k, _ []byte) error {
-			if len(k) != seqKeyLen {
-				return nil
-			}
-			seq := binary.BigEndian.Uint64(k)
-			claims[seq]++
-			// 只在首次发现重复时收集一次，避免多任务共用同一 seq 时重复 Delete
-			if claims[seq] == 2 {
-				dups = append(dups, append([]byte(nil), k...))
-			}
-			return nil
-		})
-	})
-	if err != nil {
-		return err
-	}
-	for _, k := range dups {
-		if err := lb.Delete(k); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// syncSeqCounter 把全局 seq 计数器抬升到不低于现有 run 的最大 seq。
-func syncSeqCounter(tx *bbolt.Tx) error {
-	rb := tx.Bucket(runsBucket)
-	mb := tx.Bucket(metaBucket)
-	var max uint64
-	if err := rb.ForEach(func(taskK, _ []byte) error {
-		tb := rb.Bucket(taskK)
-		if tb == nil {
-			return nil
-		}
-		return tb.ForEach(func(k, _ []byte) error {
-			if len(k) != seqKeyLen {
-				return nil
-			}
-			if seq := binary.BigEndian.Uint64(k); seq > max {
-				max = seq
-			}
-			return nil
-		})
-	}); err != nil {
-		return err
-	}
-	if v := mb.Get(seqCounterKey); len(v) == seqKeyLen && binary.BigEndian.Uint64(v) >= max {
-		return nil
-	}
-	var b [seqKeyLen]byte
-	binary.BigEndian.PutUint64(b[:], max)
-	return mb.Put(seqCounterKey, b[:])
-}
-
 // nextSeq 在写事务内分配一个全局唯一的 run 序号（计数器存于 meta 桶）。
 func nextSeq(tx *bbolt.Tx) (uint64, error) {
 	mb := tx.Bucket(metaBucket)
@@ -261,7 +168,7 @@ func (s *Store) Begin(r Run) (uint64, error) {
 	}
 
 	s.mu.Lock()
-	s.runs[seq] = &runBuffer{taskID: r.TaskID, startedAt: r.StartedAt}
+	s.runs[seq] = &runBuffer{taskID: r.TaskID, taskName: r.TaskName, startedAt: r.StartedAt}
 	s.mu.Unlock()
 
 	s.maybePrune()
@@ -319,6 +226,54 @@ func (s *Store) Finish(seq uint64, state State, c Counters, errMsg string) error
 		}
 		return tb.Put(seqKey(seq), out)
 	})
+}
+
+// Abandon 丢弃一次执行记录：不留终态、不落明细，但把缓冲中的日志转投系统程序日志，
+// 保证「有动作但不值得占一条执行历史」的场景（如监听直传未真正上传）仍留有痕迹。
+//
+// 缓冲释放后在途的日志会被 AppendLog 静默忽略，不会串到别的 run。
+// 注意：seq 是全局单调计数器，丢弃不回退，序号会留空档（不影响排序与归属判定）。
+func (s *Store) Abandon(seq uint64) error {
+	s.mu.Lock()
+	buf := s.runs[seq]
+	delete(s.runs, seq)
+	s.mu.Unlock()
+	if buf == nil {
+		return fmt.Errorf("执行记录不存在: %d", seq)
+	}
+
+	buf.mu.Lock()
+	logs := make([]LogEntry, len(buf.logs))
+	copy(logs, buf.logs)
+	buf.mu.Unlock()
+
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		if err := tx.Bucket(runLogsBucket).Delete(seqKey(seq)); err != nil {
+			return err
+		}
+		rb := tx.Bucket(runsBucket)
+		tb := rb.Bucket([]byte(buf.taskID))
+		if tb == nil {
+			return nil
+		}
+		return tb.Delete(seqKey(seq))
+	})
+	if err != nil {
+		return err
+	}
+
+	// 转投在删除事务之后：AppendSystemLog 自己开写事务，不可嵌套在 Update 内。
+	tag := "任务=" + buf.taskName
+	for _, e := range logs {
+		attrs := e.Attrs
+		if attrs != "" {
+			attrs += " "
+		}
+		if _, err := s.AppendSystemLog(e.Level, e.Msg, attrs+tag); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AppendLog 向运行中的 run 追加一条明细日志。

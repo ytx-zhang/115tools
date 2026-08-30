@@ -35,6 +35,8 @@ type TaskUnit struct {
 
 	residentCtx context.Context // 任务单元常驻 ctx（随任务移除才取消）
 
+	initializing atomic.Bool // 初始化中（已登记但 init 未跑完，期间不可执行）
+
 	// pull 互斥：pullDone 初始为已关闭（表示无 pull 运行）；pull 运行时替换为 open chan，结束 close。
 	pullRunning atomic.Bool
 	pullMu      sync.Mutex
@@ -74,6 +76,7 @@ func (e *Engine) newUnit(task conf.Task) *TaskUnit {
 	u.co = push.NewCloudOps(deps)
 	u.sc = push.NewScanner(deps, u.up, u.co)
 	u.watcher = push.NewWatcher(deps, u.sc, u.co, u.dirPool, func() bool { return u.pullRunning.Load() }, opts)
+	u.watcher.OnDirect(u.runWatchFile)
 
 	// 云端扫描选项按任务类型显式组装（pull 本体 vs push 的连带扫描）
 	var pullOpts pull.Options
@@ -81,7 +84,7 @@ func (e *Engine) newUnit(task conf.Task) *TaskUnit {
 		// pull 任务：以云端为准拉取，不存在冗余概念（本地无完整索引可判定「云端同名但内容不符」），恒关；
 		// 下载云端独有是云端扫描的本职，恒开（不暴露开关）。
 		pu := task.PullCfg()
-		pullOpts = pull.Options{FetchMissing: true, GenStrm: pu.ToStrm, ArchiveToTemp: pu.ArchiveToTemp}
+		pullOpts = pull.Options{FetchMissing: true, GenStrm: pu.ToStrm, ArchiveToTemp: pu.ArchiveToTemp, UseIndex: false}
 	} else {
 		// push 任务的「全量扫描后连带云端扫描」：是否下载云端独有由 FetchMissing 控制（关 = 只做冗余检查）；
 		// 冗余删除依赖本任务完整的本地索引，故仅此处可配；
@@ -91,6 +94,7 @@ func (e *Engine) newUnit(task conf.Task) *TaskUnit {
 			FetchMissing:  ap.FetchMissing,
 			GenStrm:       ap.ToStrm,
 			DropRedundant: ap.DropRedundant,
+			UseIndex:      true, // 连带扫描跑在 push 任务上：下载结果必须落库，否则下次本地扫描会重传
 		}
 	}
 	u.pull = pull.NewRunner(deps, u.wk, shared.NewStrmIO(deps), pullOpts)
@@ -99,9 +103,12 @@ func (e *Engine) newUnit(task conf.Task) *TaskUnit {
 	return u
 }
 
-// init 完成运行时初始化：建本地目录、确保/解析云端根 FID、首次建索引。
+// init 完成运行时初始化：建本地目录、确保/解析云端根 FID、首次建索引（仅 push）。
+//
+// 索引只服务于 push 方向（本地→云端的比对与冗余判定）；pull 本体以云端为准把文件落到本地，不落库。
 func (u *TaskUnit) init(ctx context.Context) error {
 	u.paths.TempFid = u.eng.tempFid
+	isPush := u.task.Kind == conf.KindPush
 
 	if err := os.MkdirAll(u.paths.LocalDir, 0o755); err != nil {
 		return fmt.Errorf("创建本地目录失败 %s: %w", u.paths.LocalDir, err)
@@ -109,21 +116,25 @@ func (u *TaskUnit) init(ctx context.Context) error {
 
 	info, err := u.eng.pan.GetDirInfo(ctx, u.paths.CloudDir)
 	if err != nil {
-		// 云端根不存在（data=[]）→ 逐级建
-		fid, ferr := u.co.EnsureRoot(ctx)
+		// 云端根不存在（data=[]）→ 逐级建（push 走会写根索引的 EnsureRoot）
+		fid, ferr := u.ensureCloudRoot(ctx, isPush)
 		if ferr != nil {
 			return ferr
 		}
 		u.paths.CloudFid = fid
-	} else {
-		u.paths.CloudFid = info.Fid
-		// 根 FID 变更 → 清空旧索引
-		if dbFid := u.eng.idx.GetFid(ctx, u.paths.LocalDir); dbFid != "" && dbFid != info.Fid {
-			journal.Info(ctx, "云端目录 FID 变更，清空索引记录", "路径", u.paths.LocalDir)
-			u.eng.idx.ClearPaths(ctx, []string{u.paths.LocalDir})
-		}
-		u.eng.idx.Put(ctx, u.paths.LocalDir, info.Fid, index.SizeDir)
+		return nil
 	}
+	u.paths.CloudFid = info.Fid
+	if !isPush {
+		return nil
+	}
+
+	// 根 FID 变更 → 清空旧索引
+	if dbFid := u.eng.idx.GetFid(ctx, u.paths.LocalDir); dbFid != "" && dbFid != info.Fid {
+		journal.Info(ctx, "云端目录 FID 变更，清空索引记录", "路径", u.paths.LocalDir)
+		u.eng.idx.ClearPaths(ctx, []string{u.paths.LocalDir})
+	}
+	u.eng.idx.Put(ctx, u.paths.LocalDir, info.Fid, index.SizeDir)
 
 	// 首次（或索引被清空后）构建云端索引
 	if u.eng.idx.CountRecursive(ctx, u.paths.LocalDir) == 0 {
@@ -135,9 +146,22 @@ func (u *TaskUnit) init(ctx context.Context) error {
 	return nil
 }
 
+// ensureCloudRoot 确保云端根存在并返回其 FID：push 走 EnsureRoot（顺带写根索引），pull 走不落库版本。
+func (u *TaskUnit) ensureCloudRoot(ctx context.Context, isPush bool) (string, error) {
+	if !isPush {
+		return shared.EnsureCloudDir(ctx, u.eng.pan, u.paths.CloudDir)
+	}
+	return u.co.EnsureRoot(ctx)
+}
+
+// buildIndexProgressStep 索引构建每隔多少条目输出一条进度日志（初始化可能持续数分钟，需有过程可见）。
+const buildIndexProgressStep = 2000
+
 // buildIndex 遍历云端树构建本地路径索引（只记 fid/size，不落地文件）。
 func (u *TaskUnit) buildIndex(ctx context.Context) error {
-	return u.wk.Walk(ctx, u.paths.CloudDir, u.paths.CloudFid, shared.Visitor{
+	var indexed atomic.Int64 // 遍历回调并发执行，进度计数需原子
+	start := time.Now()
+	err := u.wk.Walk(ctx, u.paths.CloudDir, u.paths.CloudFid, shared.Visitor{
 		EnterDir: func(_ context.Context, path, fid string) (bool, error) {
 			local := shared.MapCloudToLocal(u.paths.LocalDir, u.paths.CloudDir, path)
 			u.eng.idx.Put(ctx, local, fid, index.SizeDir)
@@ -158,17 +182,23 @@ func (u *TaskUnit) buildIndex(ctx context.Context) error {
 				}
 			}
 			u.eng.idx.Put(ctx, savePath, fid, saveSize)
+			if n := indexed.Add(1); n%buildIndexProgressStep == 0 {
+				journal.Info(ctx, "云端索引构建中", "已收录", n, "耗时", time.Since(start))
+			}
 			return nil
 		},
 	}, func(err error) {
 		journal.Error(ctx, "云端索引构建中止", "错误", err)
 	})
+	if err == nil {
+		journal.Info(ctx, "云端索引构建完成", "已收录", indexed.Load(), "耗时", time.Since(start))
+	}
+	return err
 }
 
 // start 启动常驻协程：push 消费者循环 + 监听（仅 push 任务）+ 定时（按类型走 cronLoop）。
 // ⚠️ 必须按 Kind 限定：pull 任务启 watcher + pushLoop 会把本地文件误当 push 上传到云端
-// （v1 扁平配置下「pull 任务残留 watch.enabled」就踩过这个坑；v2 由 conf 按类型清理配置段，
-// 这里保留 Kind 判定作为运行时兜底）。
+// （conf 已按类型清理配置段，pull 任务不会残留监听开关；这里保留 Kind 判定作为运行时兜底）。
 func (u *TaskUnit) start(ctx context.Context, wg *sync.WaitGroup) {
 	u.residentCtx, u.residentCancel = context.WithCancel(ctx)
 	if u.task.Kind == conf.KindPush {
@@ -214,6 +244,22 @@ func (u *TaskUnit) pushLoop(residentCtx context.Context) {
 	}
 }
 
+// keepRun 判定一次执行是否值得留在执行历史里。
+//
+// 规则：只有手动/定时触发的全量扫描保证留记录（无变化也要能确认「跑过了」）；
+// 其余（监听触发的直传与目录批次）没实际上传就不占位，日志转投系统程序日志，
+// 否则文件频繁变动时执行历史会被大量「扫描 N 上传 0」刷屏。
+func keepRun(trigger journal.Trigger, c journal.Counters) bool {
+	return c.Uploaded > 0 || trigger == journal.TriggerCron || trigger == journal.TriggerManual
+}
+
+// abandonRun 撤销一次执行记录（不占执行历史，已收集日志转投系统程序日志）。
+func (u *TaskUnit) abandonRun(residentCtx context.Context, seq uint64) {
+	if err := u.eng.journal.Abandon(seq); err != nil {
+		journal.Error(residentCtx, "撤销执行记录失败", "错误", err)
+	}
+}
+
 // runPushBatch 处理一个目录批次：等 pull 空闲 → 记 Run → ScanDir → 结 Run。
 func (u *TaskUnit) runPushBatch(residentCtx context.Context, dir string, trigger journal.Trigger) {
 	if !u.waitPullIdle(residentCtx) {
@@ -235,8 +281,8 @@ func (u *TaskUnit) runPushBatch(residentCtx context.Context, dir string, trigger
 
 	u.prog.Reset()
 	u.prog.SetRunning(true)
-	var batch sync.WaitGroup
-	u.sc.ScanDir(batchCtx, dir, &batch)
+	batch := push.NewUpBatch(true)
+	u.sc.ScanDir(batchCtx, dir, batch)
 	// ⚠️ 必须在 batchCancel() 之前判定取消：cancel(nil) 之后 Cause 恒为 context.Canceled，
 	// 会把所有正常完成的批次错标为「已取消」。
 	canceled := context.Cause(batchCtx) != nil
@@ -250,6 +296,11 @@ func (u *TaskUnit) runPushBatch(residentCtx context.Context, dir string, trigger
 		Scanned:  u.prog.Total(),
 		Uploaded: u.prog.Completed(),
 	}
+	if !keepRun(trigger, counters) {
+		u.prog.SetRunning(false)
+		u.abandonRun(residentCtx, seq)
+		return
+	}
 	// 每次执行必留一条 Info 摘要日志，保证执行历史点开可见（即使本次无文件变化）。
 	journal.Info(batchCtx, "本地同步批次完成", "目录", dir, "扫描", counters.Scanned,
 		"上传", counters.Uploaded, "状态", state)
@@ -261,6 +312,51 @@ func (u *TaskUnit) runPushBatch(residentCtx context.Context, dir string, trigger
 	// 全量扫描（cron/手动）后附带云端扫描
 	if u.task.AttachEnabled() && (trigger == journal.TriggerCron || trigger == journal.TriggerManual) {
 		u.startPull(residentCtx, trigger)
+	}
+}
+
+// runWatchFile 处理一次「监听直传」：单文件单开一条执行历史，
+// 使直传过程（建父目录/判定/上传）的日志进执行明细而非系统程序日志。
+// 与目录批次并发执行，故不计入任务进度（count=false），避免互相污染计数。
+//
+// 只有真正投递了上传的执行才留下记录：其余（本地已删、内容未变、跳过上传等）在结束时撤销，
+// 日志转投系统程序日志，避免执行历史被无动作的事件刷屏。
+func (u *TaskUnit) runWatchFile(residentCtx context.Context, fPath string) {
+	seq, err := u.eng.journal.Begin(journal.Run{
+		TaskID:    u.task.ID,
+		TaskName:  u.task.Name,
+		Direction: journal.DirPush,
+		Trigger:   journal.TriggerWatch,
+	})
+	if err != nil {
+		journal.Error(residentCtx, "写入执行记录失败", "错误", err)
+		return
+	}
+
+	batchCtx, batchCancel := context.WithCancel(u.pushBaseCtx())
+	batchCtx = journal.WithTask(batchCtx, u.task.ID, seq)
+
+	batch := push.NewUpBatch(false)
+	u.watcher.DirectFile(batchCtx, batch, fPath)
+	// ⚠️ 必须在 batchCancel() 之前判定取消：cancel(nil) 之后 Cause 恒为 context.Canceled。
+	canceled := context.Cause(batchCtx) != nil
+	batchCancel()
+
+	counters := journal.Counters{Scanned: 1, Uploaded: batch.Submitted()}
+	// 直传恒为监听触发：没上传（本地已删、内容未变、跳过上传）就不占执行历史。
+	if !keepRun(journal.TriggerWatch, counters) {
+		u.abandonRun(residentCtx, seq)
+		return
+	}
+
+	state := journal.StateSuccess
+	if canceled {
+		state = journal.StateCanceled
+	}
+	// 必留一条 Info 摘要，保证执行历史点开可见。
+	journal.Info(batchCtx, "监听直传完成", "文件", fPath, "上传", counters.Uploaded, "状态", state)
+	if err := u.eng.journal.Finish(seq, state, counters, ""); err != nil {
+		journal.Error(residentCtx, "写入执行结果失败", "错误", err)
 	}
 }
 
@@ -407,11 +503,12 @@ func (u *TaskUnit) trigger(trigger journal.Trigger) {
 // runtime 返回任务的运行时状态快照。
 func (u *TaskUnit) runtime() TaskRuntime {
 	return TaskRuntime{
-		ID:        u.task.ID,
-		Name:      u.task.Name,
-		Type:      string(u.task.Kind),
-		Running:   u.prog.Running(),
-		Completed: u.prog.Completed(),
-		Total:     u.prog.Total(),
+		ID:           u.task.ID,
+		Name:         u.task.Name,
+		Type:         string(u.task.Kind),
+		Running:      u.prog.Running(),
+		Initializing: u.initializing.Load(),
+		Completed:    u.prog.Completed(),
+		Total:        u.prog.Total(),
 	}
 }
