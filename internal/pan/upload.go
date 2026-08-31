@@ -105,9 +105,8 @@ func singleUpload(ctx context.Context, t *ossTarget, size int64, readerAt io.Rea
 // 手写分片而非 oss.Uploader：其 UploadResult 不暴露 CallbackResult（115 返回 file_id/pick_code 的唯一通道）。
 func multipartUpload(ctx context.Context, t *ossTarget, fileSize int64, readerAt io.ReaderAt) (map[string]any, error) {
 	initResult, err := t.client.InitiateMultipartUpload(ctx, &oss.InitiateMultipartUploadRequest{
-		Bucket:     &t.bucket,
-		Key:        &t.object,
-		Parameters: map[string]string{"sequential": ""},
+		Bucket: &t.bucket,
+		Key:    &t.object,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("初始化分片上传失败: %w", err)
