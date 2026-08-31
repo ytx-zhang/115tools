@@ -114,6 +114,10 @@ func (s *Server) ReportInitError(msg string) {
 // 进度与结果走程序日志 + SSE（任务卡片显示「初始化中」，失败时顶部横幅）。
 // 已有待执行的重建时直接合并返回——配置已落盘，待执行那轮会读到最新配置。
 func (s *Server) startEngineAsync() {
+	// 配置已完备：确保常驻令牌刷新守护在跑。覆盖「启动时不 Ready、之后经 UI 保存 token」的路径
+	//（该路径不绕 bootstrap，否则守护永不拉起）；StartRefreshDaemon 幂等，重复调用无副作用。
+	pan.StartRefreshDaemon(s.AppCtx, s.Conf)
+
 	s.reloadMu.Lock()
 	if s.reloadPending {
 		s.reloadMu.Unlock()

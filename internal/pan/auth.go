@@ -18,6 +18,10 @@ import (
 // refreshMu 全局串行化所有 token 刷新：请求路径与常驻守护可能并发，共享锁避免重复刷新竞态。
 var refreshMu sync.Mutex
 
+// refreshDaemonOnce 保证刷新守护只拉起一次：bootstrap 与 UI 保存配置（首次完备）都可能触发，
+// 重复调用会导致两份守护各自按到期调度、重复刷新，故用 Once 收敛。
+var refreshDaemonOnce sync.Once
+
 // refreshAhead 提前刷新窗口：距过期不足该值才刷新，刷新后按同一窗口预约下一次。
 const refreshAhead = 10 * time.Minute
 
@@ -108,8 +112,11 @@ func (c *Client) Verify(ctx context.Context, overrideRT string) (*UserInfo, erro
 }
 
 // StartRefreshDaemon 启动常驻刷新守护：按到期时间链式调度，ctx 取消时自然终止。
+// 幂等：重复调用仅首次实际拉起（见 refreshDaemonOnce），供 bootstrap 与 UI 保存配置共用。
 func StartRefreshDaemon(ctx context.Context, cfg *conf.Config) {
-	scheduleRefresh(ctx, cfg, nextRefreshDelay(cfg))
+	refreshDaemonOnce.Do(func() {
+		scheduleRefresh(ctx, cfg, nextRefreshDelay(cfg))
+	})
 }
 
 // scheduleRefresh 在 delay 后触发一次刷新，按结果链式排下一次。
