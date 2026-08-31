@@ -113,8 +113,9 @@ func (u *Uploader) upFileTask(ctx context.Context, parentFid, fPath string, file
 			return nil
 		}
 		savePath = shared.VideoToStrmPath(fPath)
-		// 旧同名 strm 在库 → 旧云端视频移入回收目录（同名视频覆盖 v3）
-		if dbFid := u.idx.GetFid(ctx, savePath); dbFid != "" {
+		// 旧同名 strm 在库：仅当新上传确实产生「不同」文件（fid 变化）才把旧云端视频移入回收目录；
+		// 同内容秒传会复用同一 fid（cloudFid == dbFid），跳过归档，避免把同一文件误移进 /Temp（同名视频覆盖 v3）。
+		if dbFid := u.idx.GetFid(ctx, savePath); dbFid != "" && dbFid != cloudFid {
 			if err := u.api.MoveFile(ctx, dbFid, u.paths.TempFid, savePath); err != nil {
 				return fmt.Errorf("[%s]: 清理旧视频失败: %w", savePath, err)
 			}
