@@ -1,6 +1,6 @@
-// cache.js —— 本地缓存：列表、多选删除。
+// cache.js —— 本地缓存（视图包，import() 按需加载）：列表、多选删除。
 
-import { api, el, fmtBytes, fmtTime, toast } from './api.js';
+import { api, el, fmtBytes, fmtTime, toast, fromTemplate, els } from './api.js';
 
 let bound = false;
 
@@ -13,66 +13,48 @@ async function refresh() {
   try {
     const data = await api('/api/cache');
     renderList(data.items || []);
-    document.getElementById('cache-summary').textContent = `${data.count || 0} 项 · ${fmtBytes(data.total_size)}`;
-  } catch (err) {
-    toast(err.message, 'err');
-  }
+    els('cache-summary').textContent = `${data.count || 0} 项 · ${fmtBytes(data.total_size)}`;
+  } catch (err) { toast(err.message, 'err'); }
 }
 
 function renderList(items) {
-  const tbody = document.getElementById('cache-tbody');
-  tbody.innerHTML = '';
-  document.getElementById('cache-delete-selected').disabled = true;
-  document.getElementById('cache-check-all').checked = false;
+  const tbody = els('cache-tbody');
+  const delBtn = els('cache-delete-selected');
+  const checkAll = els('cache-check-all');
+  delBtn.disabled = true;
+  checkAll.checked = false;
   if (!items.length) {
     const tr = el('tr');
-    const td = el('td');
+    const td = el('td', 'table-empty', '暂无缓存项');
     td.colSpan = 4;
-    td.className = 'table-empty';
-    td.textContent = '暂无缓存项';
-    tr.appendChild(td);
-    tbody.appendChild(tr);
+    tr.append(td);
+    tbody.replaceChildren(tr);
     return;
   }
-  items.forEach((it) => {
-    const tr = el('tr');
-    const check = el('td');
-    const c = document.createElement('input');
-    c.type = 'checkbox';
-    c.className = 'cache-check';
-    c.value = it.pickcode;
-    check.appendChild(c);
-    const name = el('td');
-    const nm = el('div');
-    nm.textContent = it.name;
-    const pc = el('div', 'muted');
-    pc.textContent = it.pickcode;
-    pc.style.cssText = 'font-size:11px;font-family:monospace';
-    name.append(nm, pc);
-    const size = el('td', null, fmtBytes(it.size));
-    const expire = el('td', null, fmtTime(it.expires_at));
-    tr.append(check, name, size, expire);
-    tbody.appendChild(tr);
-  });
+  tbody.replaceChildren(...items.map((it) => {
+    const tr = fromTemplate('tpl-cache-row', {
+      '.c-name': it.name,
+      '.c-pc': it.pickcode,
+      '.c-size': fmtBytes(it.size),
+      '.c-exp': fmtTime(it.expires_at),
+    });
+    tr.querySelector('.cache-check').value = it.pickcode;
+    return tr;
+  }));
 }
 
-function selected() {
-  return [...document.querySelectorAll('.cache-check:checked')].map((c) => c.value);
-}
+const selected = () => [...document.querySelectorAll('.cache-check:checked')].map((c) => c.value);
 
 function bindOnce() {
-  document.getElementById('cache-refresh').addEventListener('click', refresh);
-
-  document.getElementById('cache-check-all').addEventListener('change', (e) => {
+  els('cache-refresh').addEventListener('click', refresh);
+  els('cache-check-all').addEventListener('change', (e) => {
     document.querySelectorAll('.cache-check').forEach((c) => { c.checked = e.target.checked; });
-    document.getElementById('cache-delete-selected').disabled = selected().length === 0;
+    els('cache-delete-selected').disabled = selected().length === 0;
   });
-
-  document.getElementById('cache-tbody').addEventListener('change', () => {
-    document.getElementById('cache-delete-selected').disabled = selected().length === 0;
+  els('cache-tbody').addEventListener('change', () => {
+    els('cache-delete-selected').disabled = selected().length === 0;
   });
-
-  document.getElementById('cache-delete-selected').addEventListener('click', async () => {
+  els('cache-delete-selected').addEventListener('click', async () => {
     const codes = selected();
     if (!codes.length) return;
     if (!confirm(`确认删除选中的 ${codes.length} 项缓存？`)) return;

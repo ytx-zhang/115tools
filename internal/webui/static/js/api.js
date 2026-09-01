@@ -89,6 +89,25 @@ export function el(tag, cls, text) {
   return e;
 }
 
+// els 缓存 getElementById（页面顶层静态节点，避免每帧重复查询）。
+const _cache = new Map();
+export function els(id) {
+  let e = _cache.get(id);
+  if (!e || !e.isConnected) { e = document.getElementById(id); _cache.set(id, e); }
+  return e;
+}
+
+// fromTemplate 从 <template> 克隆一份结构，按选择器填 textContent（一律文本，天然防 XSS）。
+// 复杂属性（href / checked / width 等）由调用方克隆后自行 patch。
+export function fromTemplate(id, data = {}) {
+  const node = document.getElementById(id).content.firstElementChild.cloneNode(true);
+  for (const [sel, val] of Object.entries(data)) {
+    const target = node.querySelector(sel);
+    if (target) target.textContent = val ?? '';
+  }
+  return node;
+}
+
 // svgIcon 创建带 use 引用的 SVG 图标（SVG2 标准 href，现代浏览器原生支持）。
 export function svgIcon(icon, cls = 'ic') {
   const ns = 'http://www.w3.org/2000/svg';
@@ -98,12 +117,4 @@ export function svgIcon(icon, cls = 'ic') {
   u.setAttribute('href', icon);
   s.appendChild(u);
   return s;
-}
-
-// btnWithIcon 带 SVG 图标的按钮（cls 如 'btn sm'，text 可传 null，dataset 映射为 data-* 属性）。
-export function btnWithIcon(cls, text, icon, dataset) {
-  const b = el('button', cls, text);
-  b.prepend(svgIcon(icon));
-  Object.assign(b.dataset, dataset);
-  return b;
 }

@@ -10,6 +10,7 @@ internal/drive/testdata/
 *.exe~
 cmd/115tools/115tools
 /115tools
+/_mock
 
 # IDE
 .idea/

@@ -6,4 +6,4 @@ package version
 
 // Version 为当前版本（SemVer，https://semver.org/lang/zh-CN/）。
 // v3 架构整改（判定/执行分离 + 任务模型拍平 + 全局单队列 + 日志回归 slog）起于 0.4.0。
-var Version = "0.4.0"
+var Version = "0.4.1"

@@ -22,6 +22,7 @@ import (
 	"github.com/ytx-zhang/115tools/internal/conf"
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/engine"
+	"github.com/ytx-zhang/115tools/internal/logfeed"
 	"github.com/ytx-zhang/115tools/internal/store"
 	"github.com/ytx-zhang/115tools/internal/webui"
 )
@@ -34,7 +35,9 @@ func main() {
 	port := flag.String("port", "8080", "Web 管理面板端口")
 	flag.Parse()
 
-	setupLogging()
+	// 日志收集器：拦截 Warn/Error 级日志供 Web 面板展示（内存环形缓冲，不落库）
+	logFeed := logfeed.NewFeed(0)
+	setupLogging(logFeed)
 
 	// 1. 配置（全局设置 + 任务集合；v1 结构在此自动迁移并备份）
 	cfg, err := conf.New(filepath.Join(*dataDir, "config.json"))
@@ -88,6 +91,7 @@ func main() {
 		Pan:    api,
 		Cache:  localCache,
 		Hub:    hub,
+		Logs:   logFeed,
 	})
 
 	// 7. Web 服务先启动：初始化可能耗时数分钟（首次构建云端索引），不能挡住端口监听
@@ -132,9 +136,11 @@ func bootstrap(ctx context.Context, cfg *conf.Config, api *drive.Client, eng *en
 	return eng.EnsureRunning()
 }
 
-// setupLogging 配置 slog → stdout（docker 负责存储与轮转）。
+// setupLogging 配置 slog → stdout（docker 负责存储与轮转），并挂一层日志收集器。
 // 级别跟随环境变量 LOG_LEVEL（DEBUG/INFO/WARN/ERROR，缺省/非法回退 INFO）。
-func setupLogging() {
+// 收集门槛 = max(LOG_LEVEL, Warn)：DEBUG/INFO/WARN 环境收 Warn+，ERROR 环境只收 Error，
+// 与 stdout 实际输出一致；stdout 输出行为（Enabled 转发）完全不变。
+func setupLogging(f *logfeed.Feed) {
 	var lvl slog.Level
 	switch strings.ToUpper(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
 	case "DEBUG":
@@ -146,5 +152,10 @@ func setupLogging() {
 	default:
 		lvl = slog.LevelInfo
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})))
+	collect := slog.LevelWarn
+	if lvl > collect {
+		collect = lvl
+	}
+	base := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
+	slog.SetDefault(slog.New(logfeed.NewHandler(f, base, collect)))
 }

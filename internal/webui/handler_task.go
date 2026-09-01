@@ -129,7 +129,7 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 	}
 	ops, err := s.Engine.DryRun(r.PathValue("id"), scope)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "预演失败: %v", err)
+		writeErr(w, http.StatusInternalServerError, "预览失败: %v", err)
 		return
 	}
 

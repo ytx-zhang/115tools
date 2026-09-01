@@ -20,6 +20,7 @@ import (
 	"github.com/ytx-zhang/115tools/internal/conf"
 	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/engine"
+	"github.com/ytx-zhang/115tools/internal/logfeed"
 	"github.com/ytx-zhang/115tools/internal/relay"
 	"github.com/ytx-zhang/115tools/internal/store"
 )
@@ -36,6 +37,7 @@ type Deps struct {
 	Pan    *drive.Client
 	Cache  *cache.Cache
 	Hub    *Hub
+	Logs   *logfeed.Feed // 警告/错误日志收集器（SSE 与 /api/logs 数据源）
 }
 
 // Server 管理面板 HTTP 服务。
@@ -78,6 +80,8 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 		"GET /api/tasks/{id}/dry-run": s.handleDryRun,
 		"GET /api/activity":           s.handleActivity,
 		"DELETE /api/activity":        s.handleActivityClear,
+		"GET /api/logs":               s.handleLogs,
+		"DELETE /api/logs":            s.handleLogsClear,
 		"GET /api/fs":                 s.handleFS,
 		"GET /api/offline/tasks":      s.handleOfflineTasks,
 		"GET /api/offline/quota":      s.handleOfflineQuota,
