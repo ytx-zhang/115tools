@@ -36,6 +36,9 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusUnauthorized, "凭证验证失败: %v", err)
 			return
 		}
+		// Verify 已用该 rt 刷新并落盘 115 轮换下发的「长期 refresh_token」。
+		// 置空避免下方 Update 用表单原值（一次性/短期）覆盖回去，否则下次刷新必败。
+		req.RefreshToken = ""
 	}
 
 	if err := s.Conf.Update(req); err != nil {

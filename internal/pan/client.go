@@ -1,7 +1,7 @@
 // Package pan 是 115 开放平台（refresh_token）客户端：纯 API 封装，不校验用户输入、不掺业务。
 //
 // 划分：
-//   - client.go：Client 装配、泛型请求入口（Get/Post）、全局限流、鉴权、重试策略；
+//   - client.go：Client 装配、统一请求入口（request/Get/Post）、全局限流、鉴权、重试策略；
 //   - auth.go：访问令牌自动刷新（RefreshDaemon）与凭证验证（Verify）；
 //   - types.go：领域类型、StructOrArray 容错、SHA1 工具；
 //   - files.go：文件/目录操作（列表/下载直链/增删移改）；
@@ -36,9 +36,10 @@ type Resp[T any] struct {
 	Data    T      `json:"data"`
 }
 
-// probeResp 仅用于探测 115 业务限流响应（state=false + message 含「稍后再试」）。
+// probeResp 仅用于探测 115 业务响应（state=false 的限流 / 鉴权错误）。
 type probeResp struct {
 	State   bool   `json:"state"`
+	Code    int64  `json:"code"`
 	Message string `json:"message"`
 }
 
@@ -81,85 +82,116 @@ type Client struct {
 // NewClient 创建客户端（纯装配，无网络请求）。
 func NewClient(cfg *conf.Config) *Client { return &Client{cfg: cfg} }
 
-// Get 发送 GET 请求，解析 data 段为 T。返回 data 与真实网络耗时。
+// APIError 是 115 业务错误（HTTP 200 + state=false，或鉴权失败）。携带 code/message/HTTP 状态，
+// Error() 内含 message 文本，故上层 strings.Contains(err.Error(), "该目录名称已存在") 仍可用；
+// 需要精确判定时可用 errors.As 取出 APIError 读取 Code/HTTPStatus。
+type APIError struct {
+	Code       int64
+	Message    string
+	HTTPStatus int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	if e.Body != "" {
+		return fmt.Sprintf("[115报错] %s (code: %d, HTTP %d, 原始响应: %s)", e.Message, e.Code, e.HTTPStatus, e.Body)
+	}
+	return fmt.Sprintf("[115报错] %s (code: %d, HTTP %d)", e.Message, e.Code, e.HTTPStatus)
+}
+
+// Get 发送 GET 请求，解析 data 段为 T，返回数据、真实网络耗时与错误。
 func Get[T any](ctx context.Context, c *Client, path string, query Form, opts ...ReqOption) (T, time.Duration, error) {
-	resp, dur, err := exec[T](ctx, c, http.MethodGet, path, query, opts...)
-	return resp.Data, dur, err
+	return doRequest[T](ctx, c, http.MethodGet, path, query, opts...)
 }
 
-// Post 发送 POST 请求，解析 data 段为 T。返回 data 与真实网络耗时。
+// Post 发送 POST 请求，解析 data 段为 T，返回数据、真实网络耗时与错误。
 func Post[T any](ctx context.Context, c *Client, path string, form Form, opts ...ReqOption) (T, time.Duration, error) {
-	resp, dur, err := exec[T](ctx, c, http.MethodPost, path, form, opts...)
-	return resp.Data, dur, err
+	return doRequest[T](ctx, c, http.MethodPost, path, form, opts...)
 }
 
-// exec 统一执行请求：限流 → token 保活 → 发请求 → 解析外壳 → state=false 报错 → 解析 data。
-func exec[T any](ctx context.Context, c *Client, method, path string, params Form, opts ...ReqOption) (Resp[T], time.Duration, error) {
-	// 外壳用 Resp[jsontext.Value] 宽松解析：错误场景 data 段可能是 []，直接解析到 Resp[T] 会失败，
-	// 导致 state/code 读不到。data 段延后到 state=true 时再解析到 T。
-	var shell Resp[jsontext.Value]
-	status := http.StatusOK
-	var lastBody []byte
-	netDur := time.Duration(0)
+// doRequest 是 request 的薄封装：解析 data 段为具体类型 T。
+func doRequest[T any](ctx context.Context, c *Client, method, path string, params Form, opts ...ReqOption) (T, time.Duration, error) {
+	var zero T
+	data, dur, err := c.request(ctx, method, path, params, opts...)
+	if err != nil {
+		return zero, dur, err
+	}
+	var out T
+	if len(data) > 0 && string(data) != "null" {
+		if uerr := json.Unmarshal(data, &out); uerr != nil {
+			return zero, dur, fmt.Errorf("解析 data 段失败: %w (原始响应: %s)", uerr, prettyJSON(data))
+		}
+	}
+	return out, dur, nil
+}
+
+// request 发送一次 HTTP 请求并解析 115 响应外壳，返回 data 段原始 JSON、HTTP 状态码、网络耗时与错误。
+// 内部承担所有重试与令牌保活语义：
+//   - 业务限流（200 + state=false + 「稍后再试」）：递增退避重试，最多 maxRetries 次；
+//   - 访问令牌失效（401/403 或 115 鉴权错误）：强制刷新一次后重试，覆盖本地 ExpireAt 不准 / 115 提前吊销；
+//   - refresh_token 本身已失效：不再空刷，直接以本次响应判失败（横幅已提示用户重新授权）。
+func (c *Client) request(ctx context.Context, method, path string, params Form, opts ...ReqOption) ([]byte, time.Duration, error) {
+	refreshed := false // 已因令牌失效强制刷新并重试一次，避免 auth 错误死循环
 	for attempt := 0; ; attempt++ {
 		if err := apiLimiter.Wait(ctx); err != nil {
-			return Resp[T]{}, 0, err
+			return nil, 0, err
 		}
-		if err := refreshAccessToken(ctx, c.cfg, ""); err != nil {
-			return Resp[T]{}, 0, err
+		// 请求前保活：token 临近过期则刷新（refresh_token 失效则直接失败）。
+		if err := refreshAccessToken(ctx, c.cfg, "", false); err != nil {
+			return nil, 0, err
 		}
 		attemptStart := time.Now()
-		st, body, err := c.doOnce(ctx, method, path, params, opts...)
-		netDur = time.Since(attemptStart)
-		lastBody = body
-		if err != nil {
-			if len(body) > 0 {
-				err = fmt.Errorf("%w (原始响应: %s)", err, prettyJSON(body))
-			}
-			return Resp[T]{}, netDur, err
+		status, body, rerr := c.do(ctx, method, path, params, opts...)
+		dur := time.Since(attemptStart)
+		if rerr != nil {
+			return nil, dur, fmt.Errorf("%w (原始响应: %s)", rerr, prettyJSON(body))
 		}
-		status = st
 
-		// 115 业务限流：HTTP 200 + state=false + message 含「稍后再试」→ 递增等待重试。
-		var probe probeResp
-		if err := json.Unmarshal(body, &probe); err != nil {
-			probe = probeResp{} // json.Unmarshal 失败可能残留部分字段，解析前清零防误判
+		// 外壳用 Resp[jsontext.Value] 宽松解析：data 段可能是 []，延后到 state=true 再解析到具体类型。
+		var shell Resp[jsontext.Value]
+		if err := json.Unmarshal(body, &shell); err != nil {
+			return nil, dur, fmt.Errorf("解析响应外壳失败: %w (原始响应: %s)", err, prettyJSON(body))
 		}
+		probe := probeResp{State: shell.State, Code: shell.Code, Message: shell.Message}
+
+		// 业务限流：HTTP 200 + state=false + 「稍后再试」→ 递增等待重试。
 		if status == http.StatusOK && !probe.State && strings.Contains(probe.Message, "稍后再试") && attempt < maxRetries {
 			wait := retryWaitTime * time.Duration(attempt+1)
 			select {
 			case <-ctx.Done():
-				return Resp[T]{}, netDur, context.Cause(ctx)
+				return nil, dur, context.Cause(ctx)
 			case <-time.After(wait):
 			}
 			continue
 		}
 
-		// 重置外壳再解析（json.Unmarshal 不清零，重试场景防字段残留）。
-		shell = Resp[jsontext.Value]{}
-		if err := json.Unmarshal(body, &shell); err != nil {
-			return Resp[T]{}, netDur, fmt.Errorf("解析响应外壳失败: %w (原始响应: %s)", err, prettyJSON(body))
+		// 访问令牌失效：强制刷新并重试一次。已知 refresh_token 本身已失效则跳过重刷，直接判失败。
+		if !refreshed && attempt < maxRetries && isTokenExpired(status, probe) {
+			if refreshExpiredNotified.Load() {
+				return failResp(&shell, status, dur)
+			}
+			journal.Warn(ctx, "访问令牌可能已失效，强制刷新后重试", "HTTP", status, "消息", probe.Message)
+			if ferr := refreshAccessToken(ctx, c.cfg, "", true); ferr != nil {
+				return nil, dur, ferr
+			}
+			refreshed = true
+			continue
 		}
-		break
-	}
 
-	if !shell.State {
-		apierr := fmt.Errorf("[115报错] %s (code: %d, HTTP %d, 原始响应: %s)",
-			shell.Message, shell.Code, status, prettyJSON(lastBody))
-		return Resp[T]{}, netDur, apierr
+		if !shell.State {
+			return failResp(&shell, status, dur)
+		}
+		return shell.Data, dur, nil
 	}
-	var resp Resp[T]
-	if len(shell.Data) == 0 || string(shell.Data) == "null" {
-		return resp, netDur, nil // data 缺失（null）按空处理
-	}
-	if err := json.Unmarshal(shell.Data, &resp.Data); err != nil {
-		return Resp[T]{}, netDur, fmt.Errorf("解析 data 段失败: %w (原始响应: %s)", err, prettyJSON(shell.Data))
-	}
-	return resp, netDur, nil
 }
 
-// doOnce 单次 HTTP 请求：GET 走 query、其余走 form body，注入 Bearer，返回状态码与完整响应体。
-func (c *Client) doOnce(ctx context.Context, method, path string, params Form, opts ...ReqOption) (int, []byte, error) {
+// failResp 将 115 业务失败外壳转为 APIError（携带 code/message/HTTP 状态，供上层精确判定）。
+func failResp(shell *Resp[jsontext.Value], status int, dur time.Duration) ([]byte, time.Duration, error) {
+	return nil, dur, &APIError{Code: shell.Code, Message: shell.Message, HTTPStatus: status, Body: string(shell.Data)}
+}
+
+// do 单次 HTTP 请求：GET 走 query、其余走 form body，注入 Bearer，返回状态码与完整响应体。
+func (c *Client) do(ctx context.Context, method, path string, params Form, opts ...ReqOption) (int, []byte, error) {
 	u, err := url.Parse(apiBaseURL + path)
 	if err != nil {
 		return 0, nil, err
@@ -220,6 +252,26 @@ func log(ctx context.Context, action string, err error, dur time.Duration, info 
 		return
 	}
 	journal.Info(ctx, action+"完成", slices.Concat(info, []any{"耗时", dur})...)
+}
+
+// isTokenExpired 判断 115 响应是否因访问令牌失效而失败，用于触发强制刷新重试。
+// 精确匹配，避免把「链接过期」「文件失效」等无关错误误判为鉴权问题而白白燃烧 refresh_token：
+//   - HTTP 401/403 视为鉴权失败；
+//   - 或 115 业务响应 state=false 且 code=401，或 message 含 token/登录/授权 关键字。
+func isTokenExpired(status int, probe probeResp) bool {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return true
+	}
+	if !probe.State {
+		if probe.Code == 401 {
+			return true
+		}
+		msg := strings.ToLower(probe.Message)
+		if strings.Contains(msg, "token") || strings.Contains(msg, "登录") || strings.Contains(msg, "授权") {
+			return true
+		}
+	}
+	return false
 }
 
 // prettyJSON 把响应体转可读缩进文本（非 JSON 原样返回）。
