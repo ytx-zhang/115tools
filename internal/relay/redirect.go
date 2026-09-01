@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -17,8 +18,7 @@ import (
 	"time"
 
 	"github.com/ytx-zhang/115tools/internal/cache"
-	"github.com/ytx-zhang/115tools/internal/journal"
-	"github.com/ytx-zhang/115tools/internal/pan"
+	"github.com/ytx-zhang/115tools/internal/drive"
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
 )
@@ -28,7 +28,7 @@ const passthroughUA = "Fuck115"
 
 // Redirector 把 115 网盘的 pickcode 转成真实直链。
 type Redirector struct {
-	api        *pan.Client
+	api        *drive.Client
 	cache      sync.Map // URL 直链缓存（key=pickcode|ua）
 	localCache *cache.Cache
 	sf         singleflight.Group
@@ -54,7 +54,7 @@ var proxyClient = &http.Client{
 var originSem = semaphore.NewWeighted(2)
 
 // NewRedirector 创建直链重定向器。localCache 为透传本地缓存层（nil 时禁用本地命中）。
-func NewRedirector(api *pan.Client, localCache *cache.Cache) *Redirector {
+func NewRedirector(api *drive.Client, localCache *cache.Cache) *Redirector {
 	return &Redirector{api: api, localCache: localCache}
 }
 
@@ -89,7 +89,7 @@ func (s *Redirector) storeCache(key, url, name string, expiration time.Duration)
 func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheItem, error) {
 	cacheKey := pickCode + "|" + ua
 	if item, ok := s.loadCache(cacheKey); ok && !time.Now().After(item.expireAt) {
-		journal.Debug(r.Context(), "缓存命中", "媒体名称", item.name, "UA", ua)
+		slog.DebugContext(r.Context(), "缓存命中", "媒体名称", item.name, "UA", ua)
 		return item, nil
 	}
 
@@ -97,11 +97,11 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 		t0 := time.Now()
 		info, err := s.api.GetDownloadURL(r.Context(), pickCode, ua)
 		if err != nil {
-			journal.Error(r.Context(), "获取直链失败", "错误", err)
+			slog.ErrorContext(r.Context(), "获取直链失败", "错误", err)
 			return nil, err
 		}
 		if info == nil || info.URL == "" {
-			journal.Error(r.Context(), "获取直链失败", "错误", errEmptyURL)
+			slog.ErrorContext(r.Context(), "获取直链失败", "错误", errEmptyURL)
 			return nil, errEmptyURL
 		}
 		expiration := 30 * time.Minute
@@ -115,7 +115,7 @@ func (s *Redirector) resolveURL(r *http.Request, pickCode, ua string) (*cacheIte
 			}
 		}
 		s.storeCache(cacheKey, info.URL, info.Name, expiration)
-		journal.Info(r.Context(), "获取新地址", "文件名", info.Name, "UA", ua,
+		slog.InfoContext(r.Context(), "获取新地址", "文件名", info.Name, "UA", ua,
 			"缓存时长", expiration.Round(time.Second).String(), "耗时", time.Since(t0))
 		return &cacheItem{url: info.URL, name: info.Name, expireAt: time.Now().Add(expiration)}, nil
 	})
@@ -227,17 +227,17 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 			if r.Context().Err() != nil {
 				return
 			}
-			journal.Error(r.Context(), "回源CDN失败", "文件名", item.name, "错误", err)
+			slog.ErrorContext(r.Context(), "回源CDN失败", "文件名", item.name, "错误", err)
 			http.Error(w, "回源失败", http.StatusBadGateway)
 			return
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			lastStatus = resp.StatusCode
 			if cerr := resp.Body.Close(); cerr != nil {
-				journal.Debug(r.Context(), "关闭回源响应体失败", "错误", cerr)
+				slog.DebugContext(r.Context(), "关闭回源响应体失败", "错误", cerr)
 			}
 			if attempt < maxRetries {
-				journal.Warn(r.Context(), "回源非2xx，将重试", "文件名", item.name,
+				slog.WarnContext(r.Context(), "回源非2xx，将重试", "文件名", item.name,
 					"status", resp.StatusCode, "重试", attempt, "range", rng)
 			}
 			continue
@@ -251,24 +251,24 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 		streamStart := time.Now()
 		written, copyErr := io.Copy(w, resp.Body)
 		if cerr := resp.Body.Close(); cerr != nil {
-			journal.Debug(r.Context(), "透传后关闭回源响应体失败", "错误", cerr)
+			slog.DebugContext(r.Context(), "透传后关闭回源响应体失败", "错误", cerr)
 		}
 		if copyErr != nil {
 			if r.Context().Err() != nil {
 				return
 			}
-			journal.Info(r.Context(), "透传中断", "文件名", item.name, "错误", copyErr, "耗时", time.Since(streamStart))
+			slog.InfoContext(r.Context(), "透传中断", "文件名", item.name, "错误", copyErr, "耗时", time.Since(streamStart))
 			return
 		}
 		dur := time.Since(streamStart)
-		journal.Debug(r.Context(), "透传完成", "文件名", item.name,
+		slog.DebugContext(r.Context(), "透传完成", "文件名", item.name,
 			"大小", fmt.Sprintf("%.1fMB", float64(written)/(1<<20)),
 			"速度", fmt.Sprintf("%.1fMB/s", float64(written)/(1<<20)/dur.Seconds()),
 			"range", rng, "耗时", dur.Round(time.Millisecond))
 		return
 	}
 
-	journal.Error(r.Context(), "回源多次重试仍失败", "文件名", lastName, "status", lastStatus, "range", rng)
+	slog.ErrorContext(r.Context(), "回源多次重试仍失败", "文件名", lastName, "status", lastStatus, "range", rng)
 	http.Error(w, "回源失败", http.StatusBadGateway)
 }
 
@@ -279,13 +279,13 @@ func (s *Redirector) serveLocalFile(w http.ResponseWriter, r *http.Request, loca
 		if os.IsNotExist(err) {
 			return false
 		}
-		journal.Error(r.Context(), "打开本地缓存失败", "路径", localPath, "错误", err)
+		slog.ErrorContext(r.Context(), "打开本地缓存失败", "路径", localPath, "错误", err)
 		http.Error(w, "打开本地缓存失败", http.StatusInternalServerError)
 		return true
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil {
-			journal.Debug(r.Context(), "关闭本地缓存文件失败", "错误", cerr)
+			slog.DebugContext(r.Context(), "关闭本地缓存文件失败", "错误", cerr)
 		}
 	}()
 	fi, err := f.Stat()

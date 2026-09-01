@@ -7,7 +7,7 @@ data/
 cookie.txt
 
 # 测试样本（record/replay 抓取的真实 115 响应，含 token/直链/账户信息，勿打进镜像）
-internal/pan/testdata/
+internal/drive/testdata/
 
 # 开发期测试截图与验证脚本（Playwright 生成，非镜像所需）
 screenshots/

@@ -2,13 +2,13 @@ package webui
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/ytx-zhang/115tools/internal/journal"
-	"github.com/ytx-zhang/115tools/internal/pan"
+	"github.com/ytx-zhang/115tools/internal/drive"
 )
 
 const torrentMaxSize = 10 << 20
@@ -72,7 +72,7 @@ func (s *Server) handleOfflineAdd(w http.ResponseWriter, r *http.Request) {
 			added++
 		}
 	}
-	journal.Info(r.Context(), "添加离线任务", "提交", len(urls), "成功", added, "保存路径", savePath, "耗时", time.Since(t0))
+	slog.InfoContext(r.Context(), "添加离线任务", "提交", len(urls), "成功", added, "保存路径", savePath, "耗时", time.Since(t0))
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "results": results})
 }
 
@@ -89,7 +89,7 @@ func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if cerr := file.Close(); cerr != nil {
-			journal.Debug(r.Context(), "关闭种子文件失败", "错误", cerr)
+			slog.DebugContext(r.Context(), "关闭种子文件失败", "错误", cerr)
 		}
 	}()
 	data, err := io.ReadAll(file)
@@ -98,7 +98,7 @@ func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	savePath := normalizeSavePath(r.FormValue("save_path"), s.Conf.Settings.OfflineDir)
-	result, err := pan.AddTorrentFromData(r.Context(), s.Pan, data, hdr.Filename, savePath)
+	result, err := drive.AddTorrentFromData(r.Context(), s.Pan, data, hdr.Filename, savePath)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "添加种子任务失败: %v", err)
 		return
@@ -109,7 +109,7 @@ func (s *Server) handleOfflineTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"added":   added,
-		"results": []pan.OfflineAddResult{*result},
+		"results": []drive.OfflineAddResult{*result},
 	})
 }
 

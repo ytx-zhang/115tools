@@ -5,11 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/ytx-zhang/115tools/internal/journal"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -26,7 +26,7 @@ type sessionStore struct {
 func (s *sessionStore) create() string {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
-		journal.Error(context.Background(), "生成会话令牌失败", "错误", err)
+		slog.ErrorContext(context.Background(), "生成会话令牌失败", "错误", err)
 	}
 	token := hex.EncodeToString(buf)
 	now := time.Now()
@@ -99,7 +99,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	passOK := bcrypt.CompareHashAndPassword([]byte(passHash), []byte(req.Password)) == nil
 	if !userOK || !passOK {
 		time.Sleep(500 * time.Millisecond)
-		journal.Warn(r.Context(), "登录失败", "用户名", req.Username, "来源", clientIP(r))
+		slog.WarnContext(r.Context(), "登录失败", "用户名", req.Username, "来源", clientIP(r))
 		writeErr(w, http.StatusUnauthorized, "账号或密码错误")
 		return
 	}
@@ -108,7 +108,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Name: sessionCookie, Value: s.sessions.create(), Path: "/",
 		MaxAge: int(sessionTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode,
 	})
-	journal.Info(r.Context(), "登录成功", "用户名", req.Username, "来源", clientIP(r))
+	slog.InfoContext(r.Context(), "登录成功", "用户名", req.Username, "来源", clientIP(r))
 	writeOK(w, http.StatusOK)
 }
 

@@ -1,11 +1,11 @@
 package webui
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/ytx-zhang/115tools/internal/conf"
-	"github.com/ytx-zhang/115tools/internal/journal"
 	"github.com/ytx-zhang/115tools/internal/version"
 )
 
@@ -52,7 +52,7 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		s.Cache.SetRetention(time.Duration(cur.CacheRetentionDays) * 24 * time.Hour)
 		if cur.CacheDir != oldCacheDir {
 			if err := s.Cache.SetDir(cur.CacheDir); err != nil {
-				journal.Error(r.Context(), "更新缓存目录失败", "错误", err)
+				slog.ErrorContext(r.Context(), "更新缓存目录失败", "错误", err)
 			}
 		}
 	}

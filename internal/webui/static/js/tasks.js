@@ -1,16 +1,14 @@
-// tasks.js —— 任务中心：横幅、任务卡片、编辑弹窗、执行历史弹窗。
+// tasks.js —— 任务中心：横幅、任务卡片、新建/编辑弹窗、预演面板、最近动态。
 
-import { api, el, fmtTime, fmtBytes, fmtDuration, toast, svgIcon, btnWithIcon } from './api.js';
+import { api, el, fmtTime, fmtDuration, toast, svgIcon, btnWithIcon } from './api.js';
 import { state } from './main.js';
 
-let taskConfigs = []; // 完整任务配置（含目录/选项）
+let taskConfigs = []; // 完整任务配置（含目录/开关）
 let bound = false;
-let taskCards = new Map(); // id -> { card, badge, fill, nums, runBtn }；SSE 推送时增量更新，不重建 DOM 防跳动
+let taskCards = new Map(); // id -> { card, badge, fill, nums, runBtn, cur, meta }；SSE 推送时增量更新，不重建 DOM 防跳动
 
-const triggerLabel = { manual: '手动', cron: '定时', watch: '监听', init: '启动' };
 const stateLabel = { running: '运行中', success: '成功', canceled: '已取消', failed: '失败' };
 const stateCls = { running: 'run', success: 'ok', canceled: 'warn', failed: 'err' };
-const kindLabel = { push: '本地同步', pull: '云端同步' };
 
 // ──── 生命周期 ────
 
@@ -20,7 +18,7 @@ export function initTasks() {
     bound = true;
   }
   loadTasks();
-  loadSyslog();
+  loadActivity();
 }
 
 export function stopTasks() {}
@@ -45,7 +43,6 @@ export function renderTasks() {
 }
 
 // renderBanners 顶部横幅：仅配置状态类（配置不完整 / 初始化失败）。
-// 系统级日志走下方「程序日志」卡片（renderSyslogs），顶部不再重复显示。
 function renderBanners() {
   const box = document.getElementById('banners');
   box.innerHTML = '';
@@ -90,134 +87,57 @@ function renderGrid() {
   empty.hidden = taskConfigs.length > 0;
 }
 
-// cardState 由运行时快照推出卡片展示态：初始化中优先于运行中/空闲，此时禁止执行。
+// cardState 由运行时快照推出卡片展示态：初始化中优先于排队中/运行中/空闲，此时禁止执行。
 function cardState(rt) {
   if (rt?.initializing) return { cls: 'init', text: '初始化中', running: false, disabled: true };
   if (rt?.running) return { cls: 'run', text: '运行中', running: true, disabled: false };
+  if (rt?.queued) return { cls: 'queued', text: '排队中', running: false, disabled: true };
   return { cls: '', text: '空闲', running: false, disabled: false };
 }
 
-// updateCard 只更新卡片动态部分（状态徽章/进度/数字/运行按钮）。
+// updateCard 只更新卡片动态部分（状态徽章/进度/数字/当前文件/按钮）。
 function updateCard(e, rt) {
   const st = cardState(rt);
   const total = rt?.total || 0;
   const done = rt?.completed || 0;
   e.badge.className = ('badge ' + st.cls).trim();
   e.badge.textContent = st.text;
-  e.fill.style.width = total ? Math.min(100, done / total * 100) + '%' : '0%';
-  e.nums.textContent = `${done} / ${total}`;
+  // 三态：扫描中（running 且 total=0）→ 流动动画；执行中 → done/total 进度；空闲 → 0
+  const scanning = st.running && !total;
+  e.bar.className = 'progress' + (scanning ? ' ind' : '');
+  e.fill.style.width = scanning ? '100%' : (total ? Math.min(100, done / total * 100) + '%' : '0%');
+  e.nums.textContent = scanning ? '扫描中' : `${done} / ${total}`;
+  e.cur.textContent = scanning ? '正在扫描…' : (st.running && rt?.current ? '正在处理 ' + rt.current : '');
+  e.cur.title = e.cur.textContent;
+  // 上次执行 / 下次定时实时刷新
+  const metaTxt = [];
+  if (rt?.last_run) metaTxt.push('上次 ' + fmtTime(rt.last_run));
+  if (rt?.next_cron) metaTxt.push('下次 ' + fmtTime(rt.next_cron));
+  e.meta.textContent = metaTxt.join(' · ');
   // 按钮文本就地更新（保留 SVG 图标；不可用 textContent 赋值——会清空子节点导致 use 丢失）
-  const label = st.running ? '停止' : '执行';
+  const label = st.running ? '取消' : '执行';
   const last = e.runBtn.lastChild;
   if (last && last.nodeType === Node.TEXT_NODE) last.textContent = label;
   else e.runBtn.appendChild(document.createTextNode(label));
   e.runBtn.className = 'btn sm ' + (st.running ? 'danger' : 'primary');
-  e.runBtn.disabled = st.disabled;
   e.runBtn.dataset.action = st.running ? 'stop' : 'start';
-  const use = e.runBtn.querySelector('use');
-  use.setAttribute('href', st.running ? '#i-stop' : '#i-play');
+  e.runBtn.querySelector('use').setAttribute('href', st.running ? '#i-stop' : '#i-play');
+  // 初始化中：全部操作按钮禁用（运行时未就绪，预演/编辑/删除均无意义或存在竞态）
+  e.card.querySelectorAll('.tc-actions button').forEach((b) => { b.disabled = st.disabled; });
 }
 
-// ──── 程序日志（无任务上下文的系统级日志：落库、筛选、跟随、向上加载更早） ────
-let syslogs = [];      // 正序（旧→新），含 {seq,time,level,msg,attrs}
-let sysLatest = 0;     // 已见最大 seq（SSE 去重）
-let sysMore = true;    // 是否还有更旧日志可加载
-let sysFollow = true;  // 跟随底部（新日志自动滚到底）
-let sysLoading = false;
-let sysFilter = 'all';
-const SYS_PAGE = 100;
+// ──── 卡片 ────
 
-function sysBox() { return document.getElementById('system-log-list'); }
-
-// appendSyslog SSE 实时推送的新日志（seq 去重，兼容回放与实时重叠）。
-// 跟随模式下只增量追加一行，避免日志量大时每次全量重渲染。
-export function appendSyslog(e) {
-  if (!e || e.seq == null || e.seq <= sysLatest) return;
-  syslogs.push(e);
-  sysLatest = e.seq;
-  appendSyslogLine(e);
-  if (sysFollow) scrollSysBottom();
-}
-
-// appendSyslogLine 把一条日志追加到列表底部；空态/筛选不匹配时退回全量渲染。
-function appendSyslogLine(e) {
-  const box = sysBox();
-  if (!box) return;
-  if (sysFilter !== 'all' && e.level !== sysFilter) return;
-  if (!box.children.length || box.querySelector('.empty')) { renderSyslogs(); return; }
-  box.appendChild(syslogLine(e));
-}
-
-// loadSyslog 加载最新一批（默认 100 条）并滚到底部。
-async function loadSyslog() {
-  const box = sysBox();
-  if (!box) return;
-  try {
-    const data = await api('/api/system-logs?limit=' + SYS_PAGE);
-    syslogs = data.logs || [];
-    sysLatest = syslogs.length ? syslogs[syslogs.length - 1].seq : 0;
-    sysMore = !!data.has_more;
-    renderSyslogs();
-    scrollSysBottom();
-  } catch { /* 静默：SSE 仍会补齐 */ }
-}
-
-// loadOlderSyslog 滚动到顶部时加载更旧的日志（插入列表头部并保持视口位置）。
-async function loadOlderSyslog() {
-  if (sysLoading || !sysMore || !syslogs.length) return;
-  const box = sysBox();
-  sysLoading = true;
-  try {
-    const data = await api(`/api/system-logs?limit=${SYS_PAGE}&before=${syslogs[0].seq}`);
-    const older = data.logs || [];
-    if (!older.length) { sysMore = false; return; }
-    const keep = box.scrollHeight - box.scrollTop; // 距底部距离，插入后保持
-    syslogs = [...older, ...syslogs];
-    sysMore = !!data.has_more;
-    renderSyslogs();
-    box.scrollTop = box.scrollHeight - keep;
-  } catch { /* 静默 */ } finally { sysLoading = false; }
-}
-
-function scrollSysBottom() {
-  const box = sysBox();
-  if (box) box.scrollTop = box.scrollHeight;
-}
-
-// renderSyslogs 按当前等级筛选渲染。
-function renderSyslogs() {
-  const box = sysBox();
-  if (!box) return;
-  box.innerHTML = '';
-  const list = sysFilter === 'all' ? syslogs : syslogs.filter((l) => l.level === sysFilter);
-  if (!list.length) {
-    box.appendChild(el('div', 'muted empty', '暂无程序日志'));
-    return;
-  }
-  list.forEach((l) => box.appendChild(syslogLine(l)));
-}
-
-// syslogLine 构建一条日志行。
-function syslogLine(l) {
-  const line = el('div', 'log-line lv-' + l.level.toLowerCase());
-  line.append(
-    el('span', 't', fmtTime(l.time)),
-    el('span', 'lv', l.level),
-  );
-  line.appendChild(document.createTextNode(' ' + (l.msg || '') + (l.attrs ? '  ' + l.attrs : '')));
-  return line;
-}
-
-// createCard 创建任务卡片，返回可增量更新的元素引用。
 function createCard(t, rt) {
-  const card = el('div', 'task-card k-' + (t.kind === 'pull' ? 'pull' : 'push'));
+  const card = el('div', 'task-card');
   card.dataset.id = t.id;
 
-  // 头部：名称 + 类型徽章 + 启用开关
+  // 头部：名称 + 方向徽章 + 启用开关
   const head = el('div', 'tc-head');
   const name = el('div', 'tc-name', t.name);
   name.title = t.name;
-  const kind = el('span', 'badge ' + t.kind, kindLabel[t.kind] || t.kind);
+  const dirs = [t.upload && '上传', t.download && '下载'].filter(Boolean).join(' + ') || '未启用方向';
+  const kind = el('span', 'badge k-badge', dirs);
   const sw = el('label', 'switch');
   const chk = document.createElement('input');
   chk.type = 'checkbox';
@@ -227,41 +147,51 @@ function createCard(t, rt) {
   head.append(name, kind, sw);
 
   // 目录（SVG 图标 + 路径）
-  const dirs = el('div', 'tc-dirs');
+  const dirsEl = el('div', 'tc-dirs');
   const dirSpan = (icon, label, dir) => {
     const s = el('span');
     s.append(svgIcon(icon), document.createTextNode(`${label} ${dir || '—'}`));
     s.title = `${label} ${dir || ''}`;
     return s;
   };
-  dirs.append(dirSpan('#i-drive', '本地', t.local_dir));
-  dirs.append(dirSpan('#i-cloud', '云端', t.cloud_dir));
+  dirsEl.append(dirSpan('#i-drive', '本地', t.local_dir));
+  dirsEl.append(dirSpan('#i-cloud', '云端', t.cloud_dir));
 
-  // 状态
+  // 状态：徽章 + 进度条 + 数字 + 当前文件
   const st = cardState(rt);
   const total = rt?.total || 0;
   const done = rt?.completed || 0;
+  const scanning = st.running && !total;
   const status = el('div', 'tc-status');
   const badge = el('span', ('badge ' + st.cls).trim(), st.text);
-  const bar = el('div', 'progress');
+  const bar = el('div', 'progress' + (scanning ? ' ind' : ''));
   const fill = el('i');
-  fill.style.width = total ? Math.min(100, done / total * 100) + '%' : '0%';
+  fill.style.width = scanning ? '100%' : (total ? Math.min(100, done / total * 100) + '%' : '0%');
   bar.appendChild(fill);
-  const nums = el('span', 'tc-nums', `${done} / ${total}`);
-  status.append(badge, bar, nums);
+  const nums = el('span', 'tc-nums', scanning ? '扫描中' : `${done} / ${total}`);
+  const cur = el('div', 'tc-cur', scanning ? '正在扫描…' : '');
+  status.append(badge, bar, nums, cur);
+
+  // 元信息：上次同步 / 下次定时
+  const meta = el('div', 'tc-meta');
+  const metaTxt = [];
+  if (rt?.last_run) metaTxt.push('上次 ' + fmtTime(rt.last_run));
+  if (rt?.next_cron) metaTxt.push('下次 ' + fmtTime(rt.next_cron));
+  meta.textContent = metaTxt.join(' · ');
 
   // 操作（SVG 图标按钮）
   const actions = el('div', 'tc-actions');
   const runBtn = btnWithIcon('btn sm ' + (st.running ? 'danger' : 'primary'), st.running ? '停止' : '执行',
     st.running ? '#i-stop' : '#i-play', { action: st.running ? 'stop' : 'start', id: t.id });
-  runBtn.disabled = st.disabled; // 初始化中不可执行（单元未就绪）
-  const logBtn = btnWithIcon('btn sm', '日志', '#i-clock', { action: 'history', id: t.id });
+  const dryBtn = btnWithIcon('btn sm', '预演', '#i-info', { action: 'dryrun', id: t.id });
+  const logBtn = btnWithIcon('btn sm', '动态', '#i-clock', { action: 'history', id: t.id });
   const editBtn = btnWithIcon('btn sm', '编辑', '#i-edit', { action: 'edit', id: t.id });
   const delBtn = btnWithIcon('btn sm danger', '删除', '#i-trash', { action: 'delete', id: t.id });
-  actions.append(runBtn, logBtn, editBtn, delBtn);
+  actions.append(runBtn, dryBtn, logBtn, editBtn, delBtn);
+  if (st.disabled) actions.querySelectorAll('button').forEach((b) => { b.disabled = true; }); // 初始化中全部置灰
 
-  card.append(head, dirs, status, actions);
-  return { card, badge, fill, nums, runBtn };
+  card.append(head, dirsEl, status, meta, actions);
+  return { card, badge, fill, nums, runBtn, cur, meta, bar };
 }
 
 // ──── 事件绑定（一次性，事件委托） ────
@@ -274,6 +204,7 @@ function bindOnce() {
     if (action === 'start') { await startTask(id); }
     else if (action === 'stop') { await stopTask(id); }
     else if (action === 'history') { openHistory(id); }
+    else if (action === 'dryrun') { openDryRun(id); }
     else if (action === 'edit') { openDialog(id); }
     else if (action === 'delete') { await deleteTask(id); }
   });
@@ -292,8 +223,6 @@ function bindOnce() {
   document.getElementById('task-new').addEventListener('click', () => openDialog(null));
   document.getElementById('empty-new').addEventListener('click', () => openDialog(null));
 
-  // 任务编辑弹窗
-  const dlg = document.getElementById('task-dialog');
   const form = document.getElementById('task-form');
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -301,56 +230,83 @@ function bindOnce() {
     const t = formToTask(form, id);
     try {
       await saveTask(t);
-      dlg.close();
+      document.getElementById('task-dialog').close();
       toast('任务已保存', 'ok');
       loadTasks();
     } catch (err) { toast(err.message, 'err'); }
   });
-  // 类型切换 → 显隐方向组
-  form.elements.kind.addEventListener('change', () => updateDlgGroups(form));
-  // rescan_then_pull 勾选 → 显隐 pull 组
-  form.elements.rescan_then_pull.addEventListener('change', () => updateDlgGroups(form));
-  // 附带扫描勾选「下载文件」→ 显隐「生成 STRM 文件」
-  form.elements.attach_fetch.addEventListener('change', () => updateAttachStrm(form));
+  // 归档纯下载专用：编辑时手动勾/取消「上传」实时联动显隐
+  form.elements.upload.addEventListener('change', () => applyArchiveRule(form));
+
+  // 场景预设：点击卡片预填开关
+  document.querySelectorAll('.preset-card').forEach((b) => {
+    b.addEventListener('click', () => applyPreset(form, b.dataset.preset));
+  });
+  // 目录浏览
+  document.getElementById('browse-local').addEventListener('click', () =>
+    openFsBrowser(form.elements.local_dir));
+
   document.querySelectorAll('[data-close]').forEach((b) =>
     b.addEventListener('click', () => document.getElementById(b.dataset.close).close()));
 
-  // 清空程序日志
-  document.getElementById('system-logs-clear').addEventListener('click', async () => {
-    if (!confirm('确认清空全部程序日志？')) return;
+  // ── 最近动态 ──
+  document.getElementById('activity-refresh').addEventListener('click', loadActivity);
+  document.getElementById('activity-clear').addEventListener('click', async () => {
+    if (!confirm('确认清空全部动态记录？')) return;
     try {
-      await api('/api/system-logs', { method: 'DELETE' });
-      syslogs = [];
-      sysLatest = 0;
-      sysMore = true;
-      renderSyslogs();
-      toast('已清空程序日志', 'ok');
+      const ids = taskConfigs.map((t) => t.id);
+      await Promise.all(ids.map((id) => api(`/api/activity?task_id=${encodeURIComponent(id)}`, { method: 'DELETE' })));
+      toast('已清空动态记录', 'ok');
+      loadActivity();
     } catch (err) { toast(err.message, 'err'); }
   });
-  // 等级筛选
-  document.getElementById('syslog-filter').addEventListener('change', (e) => {
-    sysFilter = e.target.value;
-    renderSyslogs();
-    scrollSysBottom();
-  });
-  // 程序日志滚动：到底恢复跟随；滚到顶部加载更早
-  const sbox = document.getElementById('system-log-list');
-  sbox.addEventListener('scroll', () => {
-    const nearBottom = sbox.scrollHeight - sbox.scrollTop - sbox.clientHeight < 40;
-    sysFollow = nearBottom;
-    if (sbox.scrollTop < 30) loadOlderSyslog();
+  // 动态滚动到底自动加载下一页（容器滚动与页面滚动双保险，150ms 节流）
+  const bindFeedScroll = (box, getCtrl) => {
+    let timer = null;
+    const check = () => {
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        const ctrl = getCtrl();
+        if (!ctrl) return;
+        if (box.scrollHeight > box.clientHeight) {
+          if (box.scrollTop + box.clientHeight >= box.scrollHeight - 40) ctrl.loadMore();
+        } else {
+          const r = box.getBoundingClientRect();
+          if (r.bottom <= window.innerHeight + 60) ctrl.loadMore();
+        }
+      }, 150);
+    };
+    box.addEventListener('scroll', check);
+    window.addEventListener('scroll', check);
+  };
+  bindFeedScroll(document.getElementById('activity-list'), () => activityCtrl);
+  bindFeedScroll(document.getElementById('history-list'), () => historyCtrl);
+
+  // ── 任务动态弹窗 ──
+  document.getElementById('history-clear').addEventListener('click', async () => {
+    if (!curTask) return;
+    if (!confirm('确认清空该任务的全部动态记录？')) return;
+    try {
+      await api(`/api/activity?task_id=${encodeURIComponent(curTask)}`, { method: 'DELETE' });
+      toast('已清空该任务动态', 'ok');
+      openHistory(curTask);
+    } catch (err) { toast(err.message, 'err'); }
   });
 
-  // 清空当前任务的执行历史与明细日志
-  document.getElementById('history-clear').addEventListener('click', async () => {
-    if (!curRunTask) return;
-    if (!confirm('确认清空该任务的全部执行历史与日志？')) return;
+  // ── 预演弹窗 ──
+  document.getElementById('dryrun-run').addEventListener('click', async () => {
+    if (dryrunDanger > 0 && !confirm(`预演中包含 ${dryrunDanger} 个删除/归档等不可逆动作，确认执行？`)) return;
+    if (dryrunDanger === 0 && !confirm('确认立即执行该任务？')) return;
     try {
-      await api(`/api/tasks/${curRunTask}/runs`, { method: 'DELETE' });
-      toast('已清空该任务日志', 'ok');
-      openHistory(curRunTask);
+      await api(`/api/tasks/${dryrunTask}/start`, { method: 'POST' });
+      document.getElementById('dryrun-dialog').close();
+      toast('任务已启动', 'ok');
     } catch (err) { toast(err.message, 'err'); }
   });
+
+  // ── 目录浏览弹窗 ──
+  bindFsBrowser();
 }
 
 async function startTask(id) {
@@ -375,224 +331,269 @@ async function saveTask(t) {
   return api('/api/tasks', { method: 'POST', body: JSON.stringify(t) });
 }
 
-// ──── 编辑弹窗 ────
+// ──── 场景预设 ────
 
-function updateDlgGroups(form) {
-  const isPush = form.elements.kind.value === 'push';
-  const push = form.querySelector('[data-group="push"]');
-  const attach = form.querySelector('[data-group="attach"]');
-  const pull = form.querySelector('[data-group="pull"]');
-  push.hidden = !isPush;
-  // 附带云端扫描：仅 push 任务勾选「全量扫描后扫描云端」后显示（时机与间隔随全量扫描走）
-  attach.hidden = !(isPush && form.elements.rescan_then_pull.checked);
-  pull.hidden = isPush;
-  updateAttachStrm(form);
+// applyArchiveRule 归档选项纯下载专用：开启上传时隐藏并取消勾选，否则显示。
+// 与后端 normalize（upload 强制关 archive）双保险。
+function applyArchiveRule(form) {
+  const opt = document.getElementById('opt-archive');
+  if (!opt) return;
+  if (form.elements.upload.checked) {
+    opt.hidden = true;
+    form.elements.archive.checked = false;
+  } else {
+    opt.hidden = false;
+  }
 }
 
-// updateAttachStrm 未勾选「下载文件」时隐藏「生成 STRM 文件」并自动取消其勾选
-// （不下载就没有 strm 可言；隐藏状态下残留 checked 会导致保存时误提交空附带扫描）。
-function updateAttachStrm(form) {
-  const row = form.querySelector('#attach-strm-row');
-  const fetchChecked = form.elements.attach_fetch.checked;
-  if (row) row.hidden = !fetchChecked;
-  if (!fetchChecked) form.elements.attach_to_strm.checked = false;
+// applyPreset 预填开关并联动隐藏方向组：三选一，覆盖高级选项后滚动到基础信息。
+// 搬上去隐藏「云端→本地」组、拉回本地隐藏「本地→云端」组；定时组始终显示。
+function applyPreset(form, preset) {
+  document.querySelectorAll('.preset-card').forEach((b) => b.classList.toggle('sel', b.dataset.preset === preset));
+  const e = form.elements;
+  // 先全关，再按场景开
+  ['upload', 'watch', 'instant_now', 'download', 'archive', 'to_strm', 'to_strm_dl', 'to_cache', 'cron_enabled']
+    .forEach((n) => { e[n].checked = false; });
+  const common = { cron_enabled: true };
+  const presets = {
+    push: { upload: true, watch: true, instant_now: true, to_cache: true, to_strm: true, ...common },
+    pull: { download: true, archive: true, to_strm_dl: true, ...common },
+    both: { upload: true, watch: true, instant_now: true, to_cache: true, to_strm: true,
+            download: true, to_strm_dl: true, ...common },
+  };
+  Object.entries(presets[preset] || {}).forEach(([k, v]) => { e[k].checked = v; });
+  document.getElementById('adv-up').hidden = preset === 'pull';
+  document.getElementById('adv-down').hidden = preset === 'push';
+  applyArchiveRule(form); // push/both → archive 隐藏取消；pull → 显示且保持勾选
+  document.getElementById('preset-box').hidden = true;
 }
+
+// ──── 新建 / 编辑弹窗 ────
 
 function openDialog(id) {
   const form = document.getElementById('task-form');
   form.reset();
+  document.querySelectorAll('.preset-card').forEach((b) => b.classList.remove('sel'));
   document.getElementById('task-dialog-title').textContent = id ? '编辑任务' : '新建任务';
   form.dataset.id = id || '';
+  // 新建：显示场景预设并预选「搬上去」；编辑：隐藏预设，回填现有配置
+  document.getElementById('preset-box').hidden = !!id;
   if (id) {
+    // 编辑回填前恢复全部方向组可见（form.reset 不清 hidden）
+    document.getElementById('adv-up').hidden = false;
+    document.getElementById('adv-down').hidden = false;
     const t = taskConfigs.find((x) => x.id === id);
     if (t) taskToForm(form, t);
+    applyArchiveRule(form); // 旧配置异常组合（upload+archive）回填后自动取消并隐藏
+  } else {
+    applyPreset(form, 'push');
+    document.getElementById('preset-box').hidden = false;
   }
-  updateDlgGroups(form);
   document.getElementById('task-dialog').showModal();
 }
 
 function taskToForm(form, t) {
   const e = form.elements;
   e.name.value = t.name || '';
-  e.kind.value = t.kind || 'push';
+  e.enabled.checked = !!t.enabled;
   e.local_dir.value = t.local_dir || '';
   e.cloud_dir.value = t.cloud_dir || '';
-  e.enabled.checked = !!t.enabled;
-  // 方向配置按类型分组：push 段（含可选的 after_pull 连带云端扫描）/ pull 段
-  const push = t.push || {};
-  const watch = push.watch || {};
-  const rescan = push.rescan || {};
-  const attach = push.after_pull || {};
-  const pull = t.pull || {};
-  const cron = pull.cron || {};
-  e.watch_enabled.checked = !!watch.enabled;
-  e.debounce_minutes.value = watch.quiet_minutes ?? 10;
-  e.strm_now.checked = !!watch.strm_now;
-  e.video_now.checked = !!watch.video_now;
-  e.rescan_enabled.checked = !!rescan.enabled;
-  e.rescan_interval_hours.value = rescan.interval_hours ?? 12;
-  e.rescan_then_pull.checked = !!push.after_pull;
-  e.to_strm.checked = !!push.to_strm;
-  e.to_cache.checked = !!push.to_cache;
-  // 附带云端扫描组（仅 push 任务 + 勾选「全量扫描后扫描云端」时展示）
-  e.attach_fetch.checked = !!attach.fetch_missing;
-  e.attach_to_strm.checked = !!attach.to_strm;
-  e.drop_redundant.checked = !!attach.drop_redundant;
-  // 云端方向组（仅 pull 任务展示）
-  e.pull_cron_enabled.checked = !!cron.enabled;
-  e.pull_cron_interval_hours.value = cron.interval_hours ?? 12;
-  e.pull_to_strm.checked = !!pull.to_strm;
-  e.archive_to_temp.checked = !!pull.archive_to_temp;
+  e.upload.checked = !!t.upload;
+  e.watch.checked = !!t.watch;
+  e.quiet_minutes.value = t.quiet_minutes ?? 10;
+  e.instant_now.checked = !!t.instant_now;
+  e.download.checked = !!t.download;
+  e.to_strm_dl.checked = !!t.to_strm_dl;
+  e.archive.checked = !!t.archive;
+  e.to_strm.checked = !!t.to_strm;
+  e.to_cache.checked = !!t.to_cache;
+  e.cron_enabled.checked = !!t.cron?.enabled;
+  e.cron_interval_hours.value = t.cron?.interval_hours ?? 12;
 }
 
-// formToTask 只组装与当前类型匹配的那一段方向配置：
-// 下载云端独有是云端扫描的本职（恒开，不暴露开关）；冗余删除只有 push 的连带扫描可配。
 function formToTask(form, id) {
   const e = form.elements;
   const num = (v) => Math.max(0, parseInt(v, 10) || 0);
-  const t = {
+  return {
     id,
     name: e.name.value.trim(),
-    kind: e.kind.value,
     enabled: e.enabled.checked,
     local_dir: e.local_dir.value.trim(),
     cloud_dir: e.cloud_dir.value.trim(),
+    upload: e.upload.checked,
+    watch: e.watch.checked,
+    quiet_minutes: num(e.quiet_minutes.value),
+    instant_now: e.instant_now.checked,
+    download: e.download.checked,
+    to_strm_dl: e.to_strm_dl.checked,
+    archive: e.archive.checked,
+    to_strm: e.to_strm.checked,
+    to_cache: e.to_cache.checked,
+    cron: { enabled: e.cron_enabled.checked, interval_hours: num(e.cron_interval_hours.value) },
   };
-  if (t.kind === 'push') {
-    t.push = {
-      watch: { enabled: e.watch_enabled.checked, quiet_minutes: num(e.debounce_minutes.value), strm_now: e.strm_now.checked, video_now: e.video_now.checked },
-      rescan: { enabled: e.rescan_enabled.checked, interval_hours: num(e.rescan_interval_hours.value) },
-      to_strm: e.to_strm.checked,
-      to_cache: e.to_cache.checked,
-    };
-    if (e.rescan_then_pull.checked) {
-      const after = {
-        fetch_missing: e.attach_fetch.checked,
-        to_strm: e.attach_to_strm.checked,
-        drop_redundant: e.drop_redundant.checked,
-      };
-      // 三个子选项都没勾时附带扫描无事可做，自动去掉「全量扫描后扫描云端」（不提交 after_pull）
-      if (after.fetch_missing || after.to_strm || after.drop_redundant) {
-        t.push.after_pull = after;
-      }
-    }
-  } else {
-    t.pull = {
-      cron: { enabled: e.pull_cron_enabled.checked, interval_hours: num(e.pull_cron_interval_hours.value) },
-      to_strm: e.pull_to_strm.checked,
-      archive_to_temp: e.archive_to_temp.checked,
-    };
-  }
-  return t;
 }
 
-// ──── 执行历史弹窗 ────
+// ──── 目录浏览 ────
 
-let curRunTask = null;
+let fsTarget = null;
+let fsCurrent = '/';
 
-async function openHistory(id) {
-  curRunTask = id;
-  const t = taskConfigs.find((x) => x.id === id);
-  document.getElementById('history-dialog-title').textContent = (t?.name || id) + ' · 执行历史';
-  document.getElementById('run-log').hidden = true;
-  const list = document.getElementById('history-list');
-  list.innerHTML = '<div class="muted">加载中…</div>';
-  document.getElementById('history-dialog').showModal();
+function bindFsBrowser() {
+  document.getElementById('fs-up').addEventListener('click', () => loadFs(fsCurrent === '/' ? '/' : fsCurrent.replace(/\/[^/]*$/, '') || '/'));
+  document.getElementById('fs-pick').addEventListener('click', () => {
+    if (fsTarget) fsTarget.value = fsCurrent;
+    document.getElementById('fs-dialog').close();
+  });
+}
+
+function openFsBrowser(input) {
+  fsTarget = input;
+  document.getElementById('fs-dialog').showModal();
+  loadFs(input.value || '/');
+}
+
+async function loadFs(path) {
+  const box = document.getElementById('fs-list');
   try {
-    const data = await api(`/api/tasks/${id}/runs?limit=200`);
-    renderRuns(data.runs || []);
-  } catch (err) {
-    list.innerHTML = '';
-    list.appendChild(el('div', 'muted', '加载失败：' + err.message));
-  }
-}
-
-// renderRuns 分批渲染执行历史（每批 RUNS_PAGE 条），避免一次竖排 200 条 DOM。
-function renderRuns(runs) {
-  const list = document.getElementById('history-list');
-  list.innerHTML = '';
-  if (!runs.length) { list.appendChild(el('div', 'muted', '暂无执行记录')); return; }
-  const PAGE = 6;
-  let shown = 0;
-  const more = el('button', 'btn ghost sm more-btn');
-  const show = () => {
-    runs.slice(shown, shown + PAGE).forEach((r) => {
-      const row = el('div', 'hist-row');
-      row.dataset.seq = r.seq;
-      const badge = el('span', 'badge ' + (stateCls[r.state] || ''), stateLabel[r.state] || r.state);
-      const trig = el('span', 'badge', (triggerLabel[r.trigger] || r.trigger) +
-        (r.direction === 'pull' ? ' · 云端' : ' · 本地'));
-      const time = el('span', 'hr-time', fmtTime(r.started_at));
-      const stats = el('span', 'hr-stats',
-        `耗时 ${fmtDuration(r.duration_ms)}` +
-        (r.counters?.uploaded ? ` · 上传 ${r.counters.uploaded}` : '') +
-        (r.counters?.downloaded ? ` · 下载 ${r.counters.downloaded}` : '') +
-        (r.counters?.strm_generated ? ` · STRM ${r.counters.strm_generated}` : '') +
-        (r.counters?.deleted ? ` · 删除 ${r.counters.deleted}` : ''));
-      row.append(badge, trig, time, stats);
-      row.addEventListener('click', () => {
-        // 选中标识：只保留当前行的 sel 高亮
-        list.querySelectorAll('.hist-row.sel').forEach((e) => e.classList.remove('sel'));
-        row.classList.add('sel');
-        openRunLog(r);
-      });
-      list.insertBefore(row, more);
-      shown++;
+    const data = await api('/api/fs?path=' + encodeURIComponent(path));
+    fsCurrent = data.path;
+    document.getElementById('fs-path').textContent = data.path;
+    document.getElementById('fs-up').disabled = !data.parent;
+    box.innerHTML = '';
+    if (!data.dirs.length) {
+      box.appendChild(el('div', 'muted empty', '没有子目录'));
+      return;
+    }
+    data.dirs.forEach((d) => {
+      const row = el('button', 'fs-row', d.name + '/');
+      row.addEventListener('click', () => loadFs((fsCurrent === '/' ? '' : fsCurrent) + '/' + d.name));
+      box.appendChild(row);
     });
-    if (shown >= runs.length) { more.remove(); }
-    else {
-      more.textContent = `加载更多（剩 ${runs.length - shown} 条）`;
-      more.addEventListener('click', show);
-    }
-  };
-  more.addEventListener('click', show);
-  list.appendChild(more);
-  show();
-}
-
-async function openRunLog(run) {
-  const box = document.getElementById('run-log');
-  box.hidden = false;
-  box.innerHTML = '<div class="muted">加载日志…</div>';
-  if (run.error) {
-    box.appendChild(el('div', 'log-line lv-error', '⚠ ' + run.error));
-  }
-  try {
-    const data = await api(`/api/tasks/${curRunTask}/runs/${run.seq}/logs`);
-    renderLogs(data.logs || []);
   } catch (err) {
     box.innerHTML = '';
     box.appendChild(el('div', 'muted', '加载失败：' + err.message));
   }
 }
 
-// renderLogs 分批渲染单次执行的明细日志（每批 LOGS_PAGE 条），单条 run 最多 1000 条时避免一次渲染堆爆。
-function renderLogs(logs) {
-  const box = document.getElementById('run-log');
-  box.innerHTML = '';
-  if (!logs.length) { box.appendChild(el('div', 'muted', '（无明细日志）')); return; }
-  const PAGE = 200;
-  let shown = 0;
-  const more = el('button', 'btn ghost sm more-btn');
-  const show = () => {
-    logs.slice(shown, shown + PAGE).forEach((l) => {
-      const line = el('div', 'log-line lv-' + l.level.toLowerCase());
-      line.append(
-        el('span', 't', fmtTime(l.time)),
-        el('span', 'lv', l.level),
-      );
-      line.appendChild(document.createTextNode(' ' + l.msg + (l.attrs ? '  ' + l.attrs : '')));
-      box.insertBefore(line, more);
-      shown++;
+// ──── 预演 ────
+
+let dryrunTask = null;
+let dryrunDanger = 0;
+
+async function openDryRun(id) {
+  dryrunTask = id;
+  const t = taskConfigs.find((x) => x.id === id);
+  document.getElementById('dryrun-title').textContent = (t?.name || id) + ' · 预演';
+  const list = document.getElementById('dryrun-list');
+  const groups = document.getElementById('dryrun-groups');
+  groups.innerHTML = '';
+  list.innerHTML = '<div class="muted">计算中…</div>';
+  document.getElementById('dryrun-dialog').showModal();
+  try {
+    const data = await api(`/api/tasks/${id}/dry-run`);
+    dryrunDanger = data.danger || 0;
+    groups.innerHTML = '';
+    (data.groups || []).forEach((g) => {
+      const chip = el('span', 'op-chip' + (g.danger ? ' danger' : ''), `${g.label} ${g.count}`);
+      groups.appendChild(chip);
     });
-    if (shown >= logs.length) { more.remove(); }
-    else {
-      more.textContent = `加载更多（剩 ${logs.length - shown} 条）`;
-      more.addEventListener('click', show);
-    }
+    if (!groups.children.length) groups.appendChild(el('span', 'muted', '无事可做'));
+    renderDryOps(list, data.ops || []);
+  } catch (err) {
+    list.innerHTML = '';
+    list.appendChild(el('div', 'muted', '预演失败：' + err.message));
+  }
+}
+
+function renderDryOps(box, ops) {
+  box.innerHTML = '';
+  if (!ops.length) {
+    box.appendChild(el('div', 'muted empty', '没有需要执行的动作，两边已经一致'));
+    return;
+  }
+  ops.forEach((op) => {
+    const line = el('div', 'log-line' + (op.danger ? ' lv-error' : ''));
+    line.append(
+      el('span', 'lv', op.label),
+    );
+    const p = el('span', 't', op.path);
+    line.appendChild(p);
+    if (op.reason) line.appendChild(el('span', 'muted', '  ' + op.reason));
+    box.appendChild(line);
+  });
+}
+
+// ──── 最近动态 ────
+
+let curTask = null;
+
+function activityRow(ev) {
+  const row = el('div', 'hist-row' + (ev.state === 'failed' ? ' fail' : ''));
+  const badge = el('span', 'badge ' + (stateCls[ev.state] || ''), stateLabel[ev.state] || ev.state);
+  const trig = el('span', 'badge', (ev.scope === 'download' ? '云端' : '本地') + ' · ' +
+    ({ manual: '手动', cron: '定时', watch: '监听', init: '启动' }[ev.trigger] || ev.trigger));
+  const time = el('span', 'hr-time', fmtTime(ev.time));
+  const s = ev.stats || {};
+  const parts = [`耗时 ${fmtDuration(ev.duration_ms)}`];
+  if (s.uploaded) parts.push(`上传 ${s.uploaded}`);
+  if (s.downloaded) parts.push(`下载 ${s.downloaded}`);
+  if (s.strm_generated) parts.push(`STRM ${s.strm_generated}`);
+  if (s.deleted) parts.push(`清理 ${s.deleted}`);
+  if (s.failed) parts.push(`失败 ${s.failed}`);
+  if (s.dirs && s.dirs.length) parts.push('涉及 ' + s.dirs.join('、'));
+  const stats = el('span', 'hr-stats', parts.join(' · '));
+  row.append(badge, trig, time, stats);
+  if (ev.error) {
+    const errLine = el('div', 'log-line lv-error', '⚠ ' + ev.error);
+    row.appendChild(errLine);
+  }
+  return row;
+}
+
+// 动态分页控制器：滚动到底自动加载下一页（每页 50，返回不足 50 判无更多）。
+let activityCtrl = null; // 任务中心最近动态
+let historyCtrl = null;  // 任务动态弹窗
+
+function createActivityFeed(list, taskID) {
+  let loaded = 0, hasMore = true, loading = false, pending = null;
+  return {
+    async loadMore() {
+      if (loading || !hasMore) return;
+      loading = true;
+      if (loaded > 0) { pending = el('div', 'muted', '加载中…'); list.appendChild(pending); }
+      try {
+        const q = taskID ? `task_id=${encodeURIComponent(taskID)}&` : '';
+        const data = await api(`/api/activity?${q}offset=${loaded}&limit=50`);
+        const events = data.events || [];
+        events.forEach((ev) => list.appendChild(activityRow(ev)));
+        loaded += events.length;
+        hasMore = events.length >= 50;
+        if (loaded === 0 && !events.length) list.appendChild(el('div', 'muted empty', '暂无动态记录'));
+      } catch {
+        if (loaded === 0) list.appendChild(el('div', 'muted', '加载失败'));
+        hasMore = false;
+      } finally {
+        if (pending) { pending.remove(); pending = null; }
+        loading = false;
+      }
+    },
   };
-  more.addEventListener('click', show);
-  box.appendChild(more);
-  show();
-  box.scrollTop = box.scrollHeight;
+}
+
+function loadActivity() {
+  const list = document.getElementById('activity-list');
+  list.innerHTML = '';
+  activityCtrl = createActivityFeed(list, '');
+  activityCtrl.loadMore();
+}
+
+async function openHistory(id) {
+  curTask = id;
+  const t = taskConfigs.find((x) => x.id === id);
+  document.getElementById('history-dialog-title').textContent = (t?.name || id) + ' · 执行动态';
+  const list = document.getElementById('history-list');
+  list.innerHTML = '';
+  historyCtrl = createActivityFeed(list, id);
+  historyCtrl.loadMore();
+  document.getElementById('history-dialog').showModal();
 }

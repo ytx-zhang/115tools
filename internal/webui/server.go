@@ -10,6 +10,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,11 +18,10 @@ import (
 
 	"github.com/ytx-zhang/115tools/internal/cache"
 	"github.com/ytx-zhang/115tools/internal/conf"
+	"github.com/ytx-zhang/115tools/internal/drive"
 	"github.com/ytx-zhang/115tools/internal/engine"
-	"github.com/ytx-zhang/115tools/internal/index"
-	"github.com/ytx-zhang/115tools/internal/journal"
-	"github.com/ytx-zhang/115tools/internal/pan"
 	"github.com/ytx-zhang/115tools/internal/relay"
+	"github.com/ytx-zhang/115tools/internal/store"
 )
 
 //go:embed all:static
@@ -29,14 +29,13 @@ var staticFS embed.FS
 
 // Deps 组合根注入的依赖。
 type Deps struct {
-	AppCtx  context.Context
-	Conf    *conf.Config
-	Engine  *engine.Engine
-	Journal *journal.Store
-	Pan     *pan.Client
-	Cache   *cache.Cache
-	Index   *index.Index
-	Hub     *Hub
+	AppCtx context.Context
+	Conf   *conf.Config
+	Engine *engine.Engine
+	Store  *store.Store
+	Pan    *drive.Client
+	Cache  *cache.Cache
+	Hub    *Hub
 }
 
 // Server 管理面板 HTTP 服务。
@@ -65,30 +64,29 @@ func Register(mux *http.ServeMux, d Deps) *Server {
 
 	// 受保护接口
 	protected := map[string]http.HandlerFunc{
-		"POST /api/logout":                    s.handleLogout,
-		"GET /api/overview":                   s.handleOverview,
-		"GET /api/events":                     s.handleEvents,
-		"GET /api/settings":                   s.handleGetSettings,
-		"PUT /api/settings":                   s.handleSaveSettings,
-		"GET /api/tasks":                      s.handleListTasks,
-		"POST /api/tasks":                     s.handleCreateTask,
-		"PUT /api/tasks/{id}":                 s.handleUpdateTask,
-		"DELETE /api/tasks/{id}":              s.handleDeleteTask,
-		"POST /api/tasks/{id}/start":          s.handleStartTask,
-		"POST /api/tasks/{id}/stop":           s.handleStopTask,
-		"GET /api/tasks/{id}/runs":            s.handleTaskRuns,
-		"DELETE /api/tasks/{id}/runs":         s.handleClearTaskRuns,
-		"GET /api/tasks/{id}/runs/{seq}/logs": s.handleTaskRunLogs,
-		"GET /api/system-logs":                s.handleSystemLogs,
-		"DELETE /api/system-logs":             s.handleClearSystemLogs,
-		"GET /api/offline/tasks":              s.handleOfflineTasks,
-		"GET /api/offline/quota":              s.handleOfflineQuota,
-		"POST /api/offline/add":               s.handleOfflineAdd,
-		"POST /api/offline/torrent":           s.handleOfflineTorrent,
-		"POST /api/offline/delete":            s.handleOfflineDelete,
-		"POST /api/offline/clear":             s.handleOfflineClear,
-		"GET /api/cache":                      s.handleCacheList,
-		"POST /api/cache/delete":              s.handleCacheDelete,
+		"POST /api/logout":            s.handleLogout,
+		"GET /api/overview":           s.handleOverview,
+		"GET /api/events":             s.handleEvents,
+		"GET /api/settings":           s.handleGetSettings,
+		"PUT /api/settings":           s.handleSaveSettings,
+		"GET /api/tasks":              s.handleListTasks,
+		"POST /api/tasks":             s.handleCreateTask,
+		"PUT /api/tasks/{id}":         s.handleUpdateTask,
+		"DELETE /api/tasks/{id}":      s.handleDeleteTask,
+		"POST /api/tasks/{id}/start":  s.handleStartTask,
+		"POST /api/tasks/{id}/stop":   s.handleStopTask,
+		"GET /api/tasks/{id}/dry-run": s.handleDryRun,
+		"GET /api/activity":           s.handleActivity,
+		"DELETE /api/activity":        s.handleActivityClear,
+		"GET /api/fs":                 s.handleFS,
+		"GET /api/offline/tasks":      s.handleOfflineTasks,
+		"GET /api/offline/quota":      s.handleOfflineQuota,
+		"POST /api/offline/add":       s.handleOfflineAdd,
+		"POST /api/offline/torrent":   s.handleOfflineTorrent,
+		"POST /api/offline/delete":    s.handleOfflineDelete,
+		"POST /api/offline/clear":     s.handleOfflineClear,
+		"GET /api/cache":              s.handleCacheList,
+		"POST /api/cache/delete":      s.handleCacheDelete,
 	}
 	for pattern, h := range protected {
 		mux.Handle(pattern, s.protect(h))
@@ -102,21 +100,20 @@ func (s *Server) SetInitError(msg string) { s.initErr.Store(&msg) }
 // ReportInitError 上报初始化/重建失败：落横幅文案 + 进程序日志 + 广播（前端顶部立即显示）。
 func (s *Server) ReportInitError(msg string) {
 	s.SetInitError(msg)
-	journal.Error(s.AppCtx, msg)
+	slog.ErrorContext(s.AppCtx, msg)
 	if s.Hub != nil {
 		s.Hub.Publish()
 	}
 }
 
-// startEngineAsync 后台启动引擎并重建任务单元（保存配置后调用，不阻塞 HTTP 请求）。
+// startEngineAsync 后台启动引擎并重建任务运行时（保存配置后调用，不阻塞 HTTP 请求）。
 //
 // 引擎初始化/重建可能耗时数分钟（首次构建云端索引），挂在保存请求上会让页面卡死；
 // 进度与结果走程序日志 + SSE（任务卡片显示「初始化中」，失败时顶部横幅）。
 // 已有待执行的重建时直接合并返回——配置已落盘，待执行那轮会读到最新配置。
 func (s *Server) startEngineAsync() {
-	// 配置已完备：确保常驻令牌刷新守护在跑。覆盖「启动时不 Ready、之后经 UI 保存 token」的路径
-	//（该路径不绕 bootstrap，否则守护永不拉起）；StartRefreshDaemon 幂等，重复调用无副作用。
-	pan.StartRefreshDaemon(s.AppCtx, s.Conf)
+	// 令牌刷新是请求路径上的懒刷新（见 drive/auth.go），无需常驻守护。
+	// UI 保存新 token 时由 handleSaveSettings 的 Verify(overrideRT) 强制刷新立即生效。
 
 	s.reloadMu.Lock()
 	if s.reloadPending {
@@ -153,12 +150,12 @@ func (s *Server) getInitError() string {
 func (s *Server) registerStatic(mux *http.ServeMux) {
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
-		journal.Error(context.Background(), "静态资源目录缺失", "错误", err)
+		slog.ErrorContext(context.Background(), "静态资源目录缺失", "错误", err)
 		return
 	}
 	indexData, err := fs.ReadFile(sub, "index.html")
 	if err != nil {
-		journal.Error(context.Background(), "读取 index.html 失败", "错误", err)
+		slog.ErrorContext(context.Background(), "读取 index.html 失败", "错误", err)
 		indexData = []byte("<h1>index.html missing</h1>")
 	}
 
@@ -190,7 +187,7 @@ func (s *Server) registerStatic(mux *http.ServeMux) {
 			return
 		}
 		if _, err := w.Write(indexData); err != nil {
-			journal.Warn(r.Context(), "写入首页响应失败", "错误", err)
+			slog.WarnContext(r.Context(), "写入首页响应失败", "错误", err)
 		}
 	})
 	mux.Handle("GET /{$}", indexHandler)
@@ -213,7 +210,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
 	if err := json.MarshalWrite(w, v); err != nil {
-		journal.Warn(context.Background(), "写入JSON响应失败", "状态码", code, "错误", err)
+		slog.WarnContext(context.Background(), "写入JSON响应失败", "状态码", code, "错误", err)
 	}
 }
 

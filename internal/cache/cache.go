@@ -7,14 +7,13 @@ package cache
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/ytx-zhang/115tools/internal/journal"
 )
 
 // SweepInterval 清理扫描周期（默认 1 小时）。
@@ -134,16 +133,16 @@ func (c *Cache) Move(srcPath, pickCode string) (string, error) {
 	}
 	dst := filepath.Join(dstDir, filepath.Base(srcPath))
 	if err := os.Rename(srcPath, dst); err == nil {
-		journal.Info(context.Background(), "视频移入本地缓存", "缓存路径", dst)
+		slog.InfoContext(context.Background(), "视频移入本地缓存", "缓存路径", dst)
 		return dst, nil
 	}
 	if err := copyFile(srcPath, dst); err != nil {
 		return "", err
 	}
 	if rerr := os.Remove(srcPath); rerr != nil && !os.IsNotExist(rerr) {
-		journal.Warn(context.Background(), "缓存拷贝成功但删除原件失败", "路径", srcPath, "错误", rerr)
+		slog.WarnContext(context.Background(), "缓存拷贝成功但删除原件失败", "路径", srcPath, "错误", rerr)
 	}
-	journal.Info(context.Background(), "视频移入本地缓存(跨设备拷贝)", "缓存路径", dst)
+	slog.InfoContext(context.Background(), "视频移入本地缓存(跨设备拷贝)", "缓存路径", dst)
 	return dst, nil
 }
 
@@ -159,7 +158,7 @@ func (c *Cache) Delete(pickCodes []string) int {
 			continue
 		}
 		if err := os.RemoveAll(dir); err != nil {
-			journal.Warn(context.Background(), "手动删除缓存失败", "pickcode", pc, "错误", err)
+			slog.WarnContext(context.Background(), "手动删除缓存失败", "pickcode", pc, "错误", err)
 			continue
 		}
 		deleted++
@@ -171,7 +170,7 @@ func (c *Cache) Delete(pickCodes []string) int {
 func (c *Cache) StartCleaner(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	journal.Info(ctx, "本地缓存清理协程启动", "缓存路径", c.cacheDir(), "保留期", c.retentionLocked().Round(time.Minute).String())
+	slog.InfoContext(ctx, "本地缓存清理协程启动", "缓存路径", c.cacheDir(), "保留期", c.retentionLocked().Round(time.Minute).String())
 	c.sweep()
 	for {
 		select {
@@ -198,7 +197,7 @@ func (c *Cache) sweep() {
 		pcDir := filepath.Join(dir, e.Name())
 		if !e.IsDir() {
 			if rerr := os.Remove(pcDir); rerr != nil && !os.IsNotExist(rerr) {
-				journal.Debug(context.Background(), "清理缓存散落文件失败", "路径", pcDir, "错误", rerr)
+				slog.DebugContext(context.Background(), "清理缓存散落文件失败", "路径", pcDir, "错误", rerr)
 			}
 			continue
 		}
@@ -208,7 +207,7 @@ func (c *Cache) sweep() {
 		}
 		if info.ModTime().Before(cutoff) {
 			if rerr := os.RemoveAll(pcDir); rerr != nil && !os.IsNotExist(rerr) {
-				journal.Warn(context.Background(), "清理过期缓存目录失败", "路径", pcDir, "错误", rerr)
+				slog.WarnContext(context.Background(), "清理过期缓存目录失败", "路径", pcDir, "错误", rerr)
 			}
 		}
 	}
@@ -221,7 +220,7 @@ func copyFile(src, dst string) error {
 	}
 	defer func() {
 		if cerr := in.Close(); cerr != nil {
-			journal.Debug(context.Background(), "关闭源文件失败", "错误", cerr)
+			slog.DebugContext(context.Background(), "关闭源文件失败", "错误", cerr)
 		}
 	}()
 	out, err := os.Create(dst)
@@ -230,12 +229,12 @@ func copyFile(src, dst string) error {
 	}
 	defer func() {
 		if cerr := out.Close(); cerr != nil {
-			journal.Debug(context.Background(), "关闭目标文件失败", "错误", cerr)
+			slog.DebugContext(context.Background(), "关闭目标文件失败", "错误", cerr)
 		}
 	}()
 	if _, err := io.Copy(out, in); err != nil {
 		if rerr := os.Remove(dst); rerr != nil && !os.IsNotExist(rerr) {
-			journal.Debug(context.Background(), "清理拷贝失败残留失败", "路径", dst, "错误", rerr)
+			slog.DebugContext(context.Background(), "清理拷贝失败残留失败", "路径", dst, "错误", rerr)
 		}
 		return err
 	}

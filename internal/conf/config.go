@@ -64,6 +64,7 @@ type Config struct {
 }
 
 // configFile 是配置文件的 JSON 序列化模型（与内存态分离，避免序列化互斥锁）。
+// 结构固定为三层（settings / tasks / token），无版本号概念——配置文件从第一天起就是这个形状。
 type configFile struct {
 	Settings Settings  `json:"settings"`
 	Tasks    []Task    `json:"tasks"`
@@ -74,32 +75,28 @@ type configFile struct {
 func New(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// 新建实例尚未被任何 goroutine 持有，无需加锁
-			cfg := &Config{path: path}
-			if serr := cfg.persistLocked(); serr != nil {
-				return nil, fmt.Errorf("创建配置文件失败: %w", serr)
-			}
-			return cfg, nil
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("读取配置文件失败: %w", err)
 		}
-		return nil, fmt.Errorf("读取配置文件失败: %w", err)
+		// 新建实例尚未被任何 goroutine 持有，无需加锁
+		cfg := &Config{path: path}
+		if serr := cfg.persistLocked(); serr != nil {
+			return nil, fmt.Errorf("创建配置文件失败: %w", serr)
+		}
+		return cfg, nil
 	}
 
 	var f configFile
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
-	cfg := &Config{
-		Settings: f.Settings,
-		Tasks:    f.Tasks,
-		path:     path,
-		token:    f.Token,
-	}
+	cfg := &Config{path: path}
+	cfg.Settings, cfg.Tasks, cfg.token = f.Settings, f.Tasks, f.Token
 	cfg.normalizeLocked()
 	return cfg, nil
 }
 
-// normalizeLocked 归一化默认值（调用方需持有写锁）：视频扩展名、缓存保留期、任务内的去抖/定时间隔。
+// normalizeLocked 归一化默认值（调用方需持有写锁）：视频扩展名、缓存保留期、任务的无效组合清理。
 func (c *Config) normalizeLocked() {
 	if len(c.Settings.VideoExts) == 0 {
 		c.Settings.VideoExts = slices.Clone(DefaultVideoExts)
@@ -114,7 +111,11 @@ func (c *Config) normalizeLocked() {
 
 // persistLocked 序列化并写盘（调用方需持有写锁）。JSON 用缩进便于人工排查。
 func (c *Config) persistLocked() error {
-	raw, err := json.Marshal(configFile{Settings: c.Settings, Tasks: c.Tasks, Token: c.token})
+	raw, err := json.Marshal(configFile{
+		Settings: c.Settings,
+		Tasks:    c.Tasks,
+		Token:    c.token,
+	})
 	if err != nil {
 		return fmt.Errorf("序列化失败: %w", err)
 	}
@@ -239,6 +240,20 @@ func (c *Config) ListTasks() []Task {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return slices.Clone(c.Tasks)
+}
+
+// VideoExts 返回视频扩展名白名单（副本）。
+func (c *Config) VideoExts() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return slices.Clone(c.Settings.VideoExts)
+}
+
+// UploadExclude 返回上传排除名单（副本）。
+func (c *Config) UploadExclude() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return slices.Clone(c.Settings.UploadExclude)
 }
 
 func (c *Config) indexOfLocked(id string) int {

@@ -6,153 +6,144 @@ import (
 	"testing"
 )
 
-// sampleTask 返回一个字段合法的任务（方向配置段由调用方按需设置）。
-func sampleTask(kind TaskKind) Task {
-	return Task{ID: "t_1", Name: "任务", Kind: kind, Enabled: true, LocalDir: "/本地", CloudDir: "/云端"}
+// sampleTask 返回一个方向齐全的合法任务。
+func sampleTask() Task {
+	return Task{ID: "t_1", Name: "任务", Enabled: true, LocalDir: "/本地", CloudDir: "/云端",
+		Upload: true, Download: true}
 }
 
-func TestNormalizeFillsSegmentByKind(t *testing.T) {
-	push := sampleTask(KindPush)
-	push.normalize()
-	if push.Push == nil {
-		t.Fatal("push 任务未补齐 push 配置段")
+func TestNormalizeClearsWatchWhenUploadOff(t *testing.T) {
+	tk := sampleTask()
+	tk.Upload = false
+	tk.Watch = true
+	tk.InstantNow = true
+	tk.QuietMinutes = 5
+	tk.normalize()
+	if tk.Watch {
+		t.Fatal("未开上传时监听应失效")
 	}
-	if got := push.Push.Watch.QuietMinutes; got != defaultQuietMinutes {
+	if tk.InstantNow {
+		t.Fatal("未开上传时监听细化开关应失效")
+	}
+	if tk.QuietMinutes != 5 {
+		t.Fatalf("不应改动用户填的静默时间: %d", tk.QuietMinutes)
+	}
+}
+
+func TestNormalizeClearsArchiveWhenUploadOn(t *testing.T) {
+	tk := sampleTask()
+	tk.Archive = true
+	tk.normalize()
+	if tk.Archive {
+		t.Fatal("开启上传时归档应被强制关闭（纯下载专用）")
+	}
+
+	// 纯下载（未开上传）时归档保留
+	tk2 := sampleTask()
+	tk2.Upload = false
+	tk2.Archive = true
+	tk2.normalize()
+	if !tk2.Archive {
+		t.Fatal("纯下载任务归档应保留")
+	}
+}
+
+func TestDefaultsFilledOnRead(t *testing.T) {
+	var empty Task
+	if got := empty.QuietWindow(); got != defaultQuietMinutes {
 		t.Fatalf("静默时间默认值 = %d, 期望 %d", got, defaultQuietMinutes)
 	}
-	if got := push.Push.Rescan.IntervalHours; got != defaultCronHours {
-		t.Fatalf("全量扫描间隔默认值 = %d, 期望 %d", got, defaultCronHours)
-	}
-
-	pull := sampleTask(KindPull)
-	pull.normalize()
-	if pull.Pull == nil {
-		t.Fatal("pull 任务未补齐 pull 配置段")
-	}
-	if got := pull.Pull.Cron.IntervalHours; got != defaultCronHours {
-		t.Fatalf("同步间隔默认值 = %d, 期望 %d", got, defaultCronHours)
+	if got := empty.CronInterval(); got != defaultCronHours {
+		t.Fatalf("定时间隔默认值 = %d, 期望 %d", got, defaultCronHours)
 	}
 }
 
-// TestNormalizeDropsOtherSegment 改类型时，另一段配置必须清掉（不落盘、不残留生效）。
-func TestNormalizeDropsOtherSegment(t *testing.T) {
-	push := sampleTask(KindPush)
-	push.Push = &PushOpts{ToStrm: true}
-	push.Pull = &PullOpts{ToStrm: true}
-	push.Kind = KindPull
-	push.normalize()
-	if push.Push != nil {
-		t.Fatal("改为 pull 后仍残留 push 配置段")
-	}
-	if push.Pull == nil {
-		t.Fatal("改为 pull 后未补齐 pull 配置段")
+func TestValidateRequiresADirection(t *testing.T) {
+	tk := sampleTask()
+	tk.Upload, tk.Download, tk.Archive = false, false, false
+	if err := tk.Validate(); err == nil || !strings.Contains(err.Error(), "至少") {
+		t.Fatalf("两个方向都不开应报错，实得 %v", err)
 	}
 
-	pull := sampleTask(KindPull)
-	pull.Pull = &PullOpts{ArchiveToTemp: true}
-	pull.Push = &PushOpts{ToCache: true}
-	pull.Kind = KindPush
-	pull.normalize()
-	if pull.Pull != nil {
-		t.Fatal("改为 push 后仍残留 pull 配置段")
-	}
-	if !pull.Push.ToCache {
-		t.Fatal("push 段内容丢失")
+	// 只开归档也合法（归档属于下载作用域）
+	tk.Archive = true
+	if err := tk.Validate(); err != nil {
+		t.Fatalf("只开归档应合法: %v", err)
 	}
 }
 
-// TestNormalizeDropsEmptyAfterPull 附带扫描「无事可做」时自动去掉（AfterPull=nil）。
-// 有效动作 = 下载（FetchMissing）或删冗余（DropRedundant）；to_strm 只是下载的子选项，
-// 不下载就不生成 strm，单独勾选不算有效动作（正是「取消下载后残留 strm 勾选」的场景）。
-func TestNormalizeDropsEmptyAfterPull(t *testing.T) {
-	cleared := []struct {
-		name string
-		ap   *AttachOpts
-	}{
-		{"全空", &AttachOpts{}},
-		{"只勾strm", &AttachOpts{ToStrm: true}},
-		{"取消下载但strm残留", &AttachOpts{FetchMissing: false, ToStrm: true}},
+func TestValidateRequiresAbsPaths(t *testing.T) {
+	tk := sampleTask()
+	tk.LocalDir = "相对路径"
+	if err := tk.Validate(); err == nil || !strings.Contains(err.Error(), "绝对路径") {
+		t.Fatalf("应拒绝相对路径，实得 %v", err)
 	}
-	for _, c := range cleared {
-		p := sampleTask(KindPush)
-		p.Push = &PushOpts{AfterPull: c.ap}
-		p.normalize()
-		if p.AttachEnabled() {
-			t.Fatalf("%s 的附带扫描应被自动去掉，实得 %+v", c.name, p.Push.AfterPull)
-		}
-	}
-
-	kept := []struct {
-		name string
-		ap   *AttachOpts
-	}{
-		{"fetch", &AttachOpts{FetchMissing: true}},
-		{"drop", &AttachOpts{DropRedundant: true}},
-		{"fetch+strm", &AttachOpts{FetchMissing: true, ToStrm: true}},
-	}
-	for _, c := range kept {
-		p := sampleTask(KindPush)
-		p.Push = &PushOpts{AfterPull: c.ap}
-		p.normalize()
-		if !p.AttachEnabled() {
-			t.Fatalf("%s 的附带扫描不应被去掉", c.name)
-		}
+	tk.LocalDir = "/本地"
+	tk.CloudDir = "media"
+	if err := tk.Validate(); err == nil || !strings.Contains(err.Error(), "/ 开头") {
+		t.Fatalf("应拒绝不带斜杠的云端路径，实得 %v", err)
 	}
 }
 
-func TestValidateRequiresMatchingSegment(t *testing.T) {
-	push := sampleTask(KindPush)
-	if err := push.Validate(); err == nil || !strings.Contains(err.Error(), "push 配置段") {
-		t.Fatalf("push 任务缺配置段应报错，实得 %v", err)
-	}
-	pull := sampleTask(KindPull)
-	if err := pull.Validate(); err == nil || !strings.Contains(err.Error(), "pull 配置段") {
-		t.Fatalf("pull 任务缺配置段应报错，实得 %v", err)
-	}
-	ok := sampleTask(KindPush)
-	ok.Push = &PushOpts{}
-	if err := ok.Validate(); err != nil {
-		t.Fatalf("合法任务被拒: %v", err)
+func TestValidateRejectsEmptyName(t *testing.T) {
+	tk := sampleTask()
+	tk.Name = "  "
+	if err := tk.Validate(); err == nil || !strings.Contains(err.Error(), "任务名") {
+		t.Fatalf("应拒绝空任务名，实得 %v", err)
 	}
 }
 
-func TestPushCfgPullCfgSafeOnNil(t *testing.T) {
-	var empty Task
-	if empty.PushCfg().ToStrm || empty.PullCfg().ToStrm || empty.AttachCfg().DropRedundant || empty.AttachEnabled() {
-		t.Fatal("空任务的方向配置应为零值")
+func TestValidateOverlaps(t *testing.T) {
+	tk := sampleTask()
+	tk2 := sampleTask()
+	tk2.Name = "任务二"
+	tk2.LocalDir = "/本地/子"
+	if err := validateTasks([]Task{tk, tk2}); err == nil || !strings.Contains(err.Error(), "重叠") {
+		t.Fatalf("嵌套目录应报冲突，实得 %v", err)
 	}
-	push := sampleTask(KindPush)
-	push.Push = &PushOpts{ToStrm: true, AfterPull: &AttachOpts{ToStrm: true, DropRedundant: true}}
-	if !push.PushCfg().ToStrm || !push.AttachEnabled() || !push.AttachCfg().DropRedundant {
-		t.Fatal("push 任务配置读取异常")
+
+	tk2.LocalDir = "/本地2"
+	tk2.CloudDir = "/云端/子"
+	if err := validateTasks([]Task{tk, tk2}); err == nil || !strings.Contains(err.Error(), "重叠") {
+		t.Fatalf("云端目录嵌套也应报冲突，实得 %v", err)
 	}
-	// 连带扫描未启用时读取应为零值而不是连带段的残留
-	noAttach := sampleTask(KindPush)
-	noAttach.Push = &PushOpts{}
-	if noAttach.AttachEnabled() || noAttach.AttachCfg().ToStrm {
-		t.Fatal("未启用连带扫描时 AttachCfg 应为零值")
+
+	tk2.CloudDir = "/云端2"
+	if err := validateTasks([]Task{tk, tk2}); err != nil {
+		t.Fatalf("不重叠的目录应通过: %v", err)
 	}
 }
 
-// TestAddTaskNormalizesSegment 新增任务时后端补齐配置段（前端只提交公共字段也能保存）。
-func TestAddTaskNormalizesSegment(t *testing.T) {
-	cfg, err := New(filepath.Join(t.TempDir(), "config.json"))
+func TestAddTaskNormalizesAndPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg, err := New(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := sampleTask(KindPull)
-	task.ID = ""
-	if err := cfg.AddTask(task); err != nil {
+	tk := sampleTask()
+	tk.ID = ""
+	tk.Watch = true
+	if err := cfg.AddTask(tk); err != nil {
 		t.Fatalf("新增任务失败: %v", err)
 	}
 	stored, ok := cfg.GetTask(cfg.ListTasks()[0].ID)
 	if !ok {
 		t.Fatal("任务未落库")
 	}
-	if stored.Pull == nil || stored.Pull.Cron.IntervalHours != defaultCronHours {
-		t.Fatalf("新增任务未归一化: %+v", stored)
+	if !stored.Watch || !stored.Upload {
+		t.Fatalf("新增任务未落库开关: %+v", stored)
 	}
-	if stored.Push != nil {
-		t.Fatal("pull 任务不应有 push 段")
+
+	// 落盘后重读，应能完整还原（配置无版本号概念，三层结构 round-trip）
+	cfg2, err := New(path)
+	if err != nil {
+		t.Fatalf("重读失败: %v", err)
+	}
+	re, ok := cfg2.GetTask(stored.ID)
+	if !ok {
+		t.Fatal("重读后任务丢失")
+	}
+	if re.Name != stored.Name || re.LocalDir != stored.LocalDir || !re.Watch || !re.Upload {
+		t.Fatalf("重读后任务字段不一致: %+v", re)
 	}
 }

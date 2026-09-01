@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/ytx-zhang/115tools/internal/engine"
-	"github.com/ytx-zhang/115tools/internal/journal"
 )
 
 // overview 是推送前端的完整状态快照。
@@ -15,13 +14,6 @@ type overview struct {
 	Missing     []string             `json:"missing,omitempty"`
 	InitError   string               `json:"init_error,omitempty"`
 	Tasks       []engine.TaskRuntime `json:"tasks"`
-}
-
-// event 是 SSE 推送的帧（type 区分 overview / syslog）。
-type event struct {
-	Type     string            `json:"type"`
-	Overview *overview         `json:"overview,omitempty"`
-	Log      *journal.LogEntry `json:"log,omitempty"`
 }
 
 // handleOverview 返回当前状态快照（非 SSE，供初次加载兜底）。
@@ -74,7 +66,9 @@ func (s *sseWriter) writeData(payload string) bool { return s.writeChunk("data: 
 
 func (s *sseWriter) comment(msg string) bool { return s.writeChunk(":", msg) }
 
-// handleEvents SSE 状态流：连接即回放 overview + 最近横幅，之后状态变更/新横幅实时推送。
+// handleEvents SSE 状态流：连接即回放 overview，之后状态变更实时推送。
+//
+// 程序日志不在此推送——日志已回归 docker logs；面板里的「最近动态」由 /api/activity 提供按需拉取。
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	sw, ok := sseConnect(w)
 	if !ok {
@@ -84,29 +78,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	hubCh, unsubHub := s.Hub.Subscribe()
 	defer unsubHub()
-	sysCh, unsubSys := journal.SubscribeSystemLog()
-	defer unsubSys()
 
-	send := func(e event) bool {
-		data, err := json.Marshal(e)
-		if err != nil {
-			return true
-		}
-		return sw.writeData(string(data))
-	}
-
-	// 回放：overview + 最近 100 条系统程序日志
-	if !send(event{Type: "overview", Overview: s.overviewRef()}) {
-		return
-	}
-	logs, _, err := s.Journal.ListSystemLogs(100, 0)
+	data, err := json.Marshal(s.overviewRef())
 	if err != nil {
 		return
 	}
-	for _, l := range logs {
-		if !send(event{Type: "syslog", Log: &l}) {
-			return
-		}
+	if !sw.writeData(string(data)) {
+		return
 	}
 
 	hb := time.NewTicker(15 * time.Second)
@@ -122,11 +100,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-hubCh:
-			if !send(event{Type: "overview", Overview: s.overviewRef()}) {
-				return
+			data, err := json.Marshal(s.overviewRef())
+			if err != nil {
+				continue
 			}
-		case l := <-sysCh:
-			if !send(event{Type: "syslog", Log: &l}) {
+			if !sw.writeData(string(data)) {
 				return
 			}
 		}

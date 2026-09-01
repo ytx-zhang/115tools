@@ -1,12 +1,12 @@
 // Package conf 负责配置的加载、校验、持久化与热更新。
 //
-// 配置分为三层：
+// 配置分三层：
 //   - Settings：全局设置（strm 直链前缀、云端回收目录、透传缓存目录等），对所有任务生效；
-//   - Task：同步任务，分 push（本地→云端）与 pull（云端→本地）两类，各自绑定一对目录，
-//     方向开关按类型分组存放（push 段 / pull 段，另一段为 nil 且不落盘）；
+//   - Task：同步任务，绑定一对「本地目录 ↔ 云端目录」，用一组平铺开关描述要做什么。
+//     不再区分 push / pull 两种互斥类型——上传和下载只是两个可以任意组合的开关；
 //   - Token：115 访问/刷新令牌（敏感字段，运行时轮换，独立成段持久化）。
 //
-// 本文件定义任务模型与目录重叠校验；config.go 定义全局段与文件读写；settings.go 定义 Web 传输 DTO。
+// 本文件定义任务模型与目录重叠校验；config.go 定义全局段与文件读写。
 package conf
 
 import (
@@ -17,134 +17,87 @@ import (
 	"strings"
 )
 
-// TaskKind 任务方向：push = 本地 → 云端；pull = 云端 → 本地。
-type TaskKind string
+// Task 一个同步任务：一对目录映射 + 一组平铺开关。
+//
+// 开关分三组，互不排斥（上传与下载可以同时开，就是双向镜像）：
+//   - 本地 → 云端：Upload 总开关，Watch / InstantNow 是它的细化；ToStrm 上传后替换为
+//     .strm、ToCache 原件移入本地缓存；
+//   - 云端 → 本地：Download 下载缺失、Archive 归档顶层项、ToStrmDl 下载落地为 .strm；
+//   - 定时：Cron 同时驱动两个方向（各按上面的开关决定跑不跑）。
+//
+// 冗余副本清理无配置项：双向（上传+下载同时开）任务由引擎自动开启。
+type Task struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Enabled  bool   `json:"enabled"`
+	LocalDir string `json:"local_dir"` // 本地绝对路径
+	CloudDir string `json:"cloud_dir"` // 115 云端绝对路径（以 / 开头）
 
-const (
-	// KindPush 本地同步到云端（可附带定时全量 + 全量后连带云端扫描）。
-	KindPush TaskKind = "push"
-	// KindPull 云端同步到本地。
-	KindPull TaskKind = "pull"
-)
+	// 本地 → 云端
+	Upload bool `json:"upload"` // 上传本地新增/变更到云端
+	Watch  bool `json:"watch"`  // 文件事件监听（依赖 Upload）
+	// QuietMinutes 监听静默时间（分钟）；<=0 回退默认 10
+	QuietMinutes int `json:"quiet_minutes"`
+	// InstantNow 视频或 .strm 文件事件立即同步（绕过静默窗口）；其余文件仍按静默防抖合批
+	InstantNow bool `json:"instant_now"`
+	ToStrm     bool `json:"to_strm"`  // 上传后本地替换为 .strm（关 = 保留实体视频）
+	ToCache    bool `json:"to_cache"` // 上传后原件移入本地透传缓存（关 = 删除原件）
 
-// Valid 判断任务方向是否合法。
-func (k TaskKind) Valid() bool { return k == KindPush || k == KindPull }
+	// 云端 → 本地
+	Download bool `json:"download"`
+	// Archive 完成后把云端顶层项移入回收目录——纯下载（未开上传）任务专用，开启上传时 normalize 强制关闭
+	Archive  bool `json:"archive"`
+	ToStrmDl bool `json:"to_strm_dl"` // 下载落地为 .strm（关 = 下载实体视频）
 
-// WatchOpts 文件事件监听配置（仅 push 任务）。
-type WatchOpts struct {
-	Enabled      bool `json:"enabled"`       // 是否启用 inotify 文件事件监听
-	QuietMinutes int  `json:"quiet_minutes"` // 监听静默时间（分钟）；<=0 回退默认 10
-	StrmNow      bool `json:"strm_now"`      // .strm 文件事件立即同步（绕过静默窗口）
-	VideoNow     bool `json:"video_now"`     // 视频文件事件立即同步（绕过静默窗口）
+	Cron CronOpts `json:"cron"`
 }
 
-// CronOpts 定时任务配置。push 任务用其驱动定时全量扫描；pull 任务用其驱动定时同步。
+// CronOpts 定时任务配置。
 type CronOpts struct {
 	Enabled       bool `json:"enabled"`        // 是否启用定时
 	IntervalHours int  `json:"interval_hours"` // 间隔（小时）；<=0 回退默认 12
 }
 
-// PushOpts 本地同步（push）方向配置。
-type PushOpts struct {
-	Watch   WatchOpts `json:"watch"`    // 文件事件监听
-	Rescan  CronOpts  `json:"rescan"`   // 定时全量扫描
-	ToStrm  bool      `json:"to_strm"`  // 视频上传后本地替换为 .strm（关 = 保留原视频，纯云端备份）
-	ToCache bool      `json:"to_cache"` // 上传后原视频移入透传缓存（关 = 删除原视频）
+// UploadEnabled 是否启用「本地 → 云端」（含监听细化开关）。
+func (t Task) UploadEnabled() bool { return t.Upload }
 
-	// AfterPull 全量扫描后连带一次云端扫描（nil = 不连带）。
-	// 时机与触发方式随全量扫描走（手动/定时），故不单独设定时。
-	AfterPull *AttachOpts `json:"after_pull,omitempty"`
-}
+// DownloadEnabled 是否启用「云端 → 本地」（下载缺失、归档任一开启即算）。
+func (t Task) DownloadEnabled() bool { return t.Download || t.Archive }
 
-// AttachOpts push 任务「全量扫描后连带云端扫描」的子配置。
-// 附带扫描是可选的辅助动作：是否下载云端独有文件由 FetchMissing 控制（关 = 只做冗余检查）；
-// 「云端冗余删除」只在有完整本地索引时才有意义，故仅 push 任务可配（pull 任务恒关，引擎层归一）。
-type AttachOpts struct {
-	FetchMissing  bool `json:"fetch_missing"`  // 下载云端独有文件（关 = 不下载，只做冗余检查）
-	ToStrm        bool `json:"to_strm"`        // 视频落地为 .strm（关 = 下载原视频；仅在 FetchMissing 时生效）
-	DropRedundant bool `json:"drop_redundant"` // 删除云端同名冗余文件
-}
+// WatchEnabled 是否启用文件事件监听（未开上传时监听没有意义）。
+func (t Task) WatchEnabled() bool { return t.Upload && t.Watch }
 
-// PullOpts 云端同步（pull）方向配置。
-type PullOpts struct {
-	Cron          CronOpts `json:"cron"`            // 定时同步
-	ToStrm        bool     `json:"to_strm"`         // 视频落地为 .strm（关 = 下载原视频）
-	ArchiveToTemp bool     `json:"archive_to_temp"` // 全部成功后把顶层项移入云端回收目录
-}
-
-// Task 单个同步任务。方向配置按 Kind 分组，另一段恒为 nil 且不会落盘：
-//   - push：Push（含可选的 AfterPull 连带云端扫描）；
-//   - pull：Pull。
-//
-// 两类任务共用 LocalDir/CloudDir 这一对目录映射与 Enabled 开关。
-// 读取方向配置统一走 PushCfg/PullCfg/AttachCfg，避免调用方到处判 nil。
-type Task struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Kind     TaskKind `json:"kind"`
-	Enabled  bool     `json:"enabled"`
-	LocalDir string   `json:"local_dir"` // 本地绝对路径
-	CloudDir string   `json:"cloud_dir"` // 115 云端绝对路径（以 / 开头）
-
-	Push *PushOpts `json:"push,omitempty"`
-	Pull *PullOpts `json:"pull,omitempty"`
-}
-
-// PushCfg 返回本地同步配置；非 push 任务或未配置时返回零值。
-func (t Task) PushCfg() PushOpts {
-	if t.Push == nil {
-		return PushOpts{}
+// QuietWindow 返回监听静默窗口（已填默认值）。
+func (t Task) QuietWindow() int {
+	if t.QuietMinutes <= 0 {
+		return defaultQuietMinutes
 	}
-	return *t.Push
+	return t.QuietMinutes
 }
 
-// PullCfg 返回云端同步配置；非 pull 任务或未配置时返回零值。
-func (t Task) PullCfg() PullOpts {
-	if t.Pull == nil {
-		return PullOpts{}
+// CronInterval 返回定时间隔小时数（已填默认值）。
+func (t Task) CronInterval() int {
+	if t.Cron.IntervalHours <= 0 {
+		return defaultCronHours
 	}
-	return *t.Pull
+	return t.Cron.IntervalHours
 }
 
-// AttachCfg 返回 push 任务「全量扫描后连带云端扫描」的配置；未启用返回零值。
-func (t Task) AttachCfg() AttachOpts {
-	if t.Push == nil || t.Push.AfterPull == nil {
-		return AttachOpts{}
-	}
-	return *t.Push.AfterPull
-}
-
-// AttachEnabled 是否启用了「全量扫描后连带云端扫描」（仅 push 任务）。
-func (t Task) AttachEnabled() bool { return t.Push != nil && t.Push.AfterPull != nil }
-
-// normalize 按 Kind 规范化配置段：补齐缺失段、清理不适用段、填默认值。Kind 非法时原样返回。
+// normalize 清理无效组合并夹住非法取值：未开上传时，监听及其细化开关一并失效。
+// 默认值不在这里落库（由 QuietWindow / CronInterval 在读取时填），避免配置里出现
+// 「显式写着 10 但其实用户没填」的假值。
 func (t *Task) normalize() {
-	switch t.Kind {
-	case KindPush:
-		if t.Push == nil {
-			t.Push = &PushOpts{}
-		}
-		t.Pull = nil
-		if t.Push.Watch.QuietMinutes <= 0 {
-			t.Push.Watch.QuietMinutes = defaultQuietMinutes
-		}
-		if t.Push.Rescan.IntervalHours <= 0 {
-			t.Push.Rescan.IntervalHours = defaultCronHours
-		}
-		// 附带云端扫描「无事可做」时自动去掉「全量扫描后扫描云端」（AfterPull=nil，不落盘、不触发连带扫描）。
-		// 有效动作 = 下载云端独有（FetchMissing）或删冗余（DropRedundant）；
-		// to_strm 只是下载的子选项（引擎里不下载就不会生成 strm），单独勾选不算有效动作。
-		if ap := t.Push.AfterPull; ap != nil && !ap.FetchMissing && !ap.DropRedundant {
-			t.Push.AfterPull = nil
-		}
-	case KindPull:
-		if t.Pull == nil {
-			t.Pull = &PullOpts{}
-		}
-		t.Push = nil
-		if t.Pull.Cron.IntervalHours <= 0 {
-			t.Pull.Cron.IntervalHours = defaultCronHours
-		}
+	if t.Upload {
+		// 归档是纯下载专用：开启上传（双向/纯上传）时强制关闭，避免把云端顶层项归档走
+		t.Archive = false
+	} else {
+		t.Watch, t.InstantNow = false, false
+	}
+	if t.QuietMinutes < 0 {
+		t.QuietMinutes = 0
+	}
+	if t.Cron.IntervalHours < 0 {
+		t.Cron.IntervalHours = 0
 	}
 }
 
@@ -165,25 +118,18 @@ func (t *Task) Validate() error {
 	if strings.TrimSpace(t.Name) == "" {
 		return fmt.Errorf("任务名不能为空")
 	}
-	if !t.Kind.Valid() {
-		return fmt.Errorf("未知任务类型: %s", t.Kind)
-	}
 	if !filepath.IsAbs(t.LocalDir) {
 		return fmt.Errorf("本地目录必须是绝对路径: %s", t.LocalDir)
 	}
 	if !strings.HasPrefix(t.CloudDir, "/") {
 		return fmt.Errorf("云端目录必须以 / 开头: %s", t.CloudDir)
 	}
-	// 方向配置段必须与其类型匹配（缺段由 normalize 补齐，走到这里仍缺即为非法）。
-	switch t.Kind {
-	case KindPush:
-		if t.Push == nil {
-			return fmt.Errorf("本地同步任务缺少 push 配置段")
-		}
-	case KindPull:
-		if t.Pull == nil {
-			return fmt.Errorf("云端同步任务缺少 pull 配置段")
-		}
+	if !t.Enabled {
+		return nil
+	}
+	// 启用的任务至少要有一个方向，否则挂在那里什么都不做
+	if !t.UploadEnabled() && !t.DownloadEnabled() {
+		return fmt.Errorf("任务至少要开启「上传」或「下载」其中一个方向")
 	}
 	return nil
 }
@@ -199,7 +145,7 @@ func overlapClean(a, b string, sep byte) bool {
 }
 
 // CleanCloudPath 规范化云端路径：去除尾斜杠（保留根 "/"）。
-// 导出供 engine/shared 等路径映射复用（云端路径统一以 / 分隔，与本地文件系统无关）。
+// 导出供 sync 等路径映射复用（云端路径统一以 / 分隔，与本地文件系统无关）。
 func CleanCloudPath(p string) string {
 	p = strings.TrimRight(p, "/")
 	if p == "" {

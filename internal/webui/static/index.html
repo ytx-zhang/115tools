@@ -174,22 +174,16 @@
           <p class="muted">绑定一对本地目录与云端目录，即可开启自动同步</p>
           <button class="btn primary" id="empty-new"><svg class="ic"><use href="#i-plus"/></svg> 新建任务</button>
         </div>
-        <!-- 程序日志：无任务上下文的系统级日志（落库、等级筛选、跟随底部、向上加载更早） -->
-        <div class="card" id="system-logs">
+        <!-- 最近动态：只记「值得看的事件」（执行起止 / 计数 / 错误），明细日志在 docker logs -->
+        <div class="card" id="activity-card">
           <div class="card-head">
-            <h3><span class="hl-dot"></span>程序日志</h3>
-            <div class="syslog-ops">
-              <select id="syslog-filter" aria-label="日志等级筛选">
-                <option value="all">全部</option>
-                <option value="DEBUG">DEBUG</option>
-                <option value="INFO">INFO</option>
-                <option value="WARN">WARN</option>
-                <option value="ERROR">ERROR</option>
-              </select>
-              <button class="btn sm danger" id="system-logs-clear">清空</button>
+            <h3><span class="hl-dot"></span>最近动态</h3>
+            <div class="row">
+              <button class="btn sm" id="activity-refresh"><svg class="ic"><use href="#i-refresh"/></svg> 刷新</button>
+              <button class="btn sm danger" id="activity-clear">清空</button>
             </div>
           </div>
-          <div id="system-log-list" class="log-box"></div>
+          <div id="activity-list" class="history-list"></div>
         </div>
       </section>
 
@@ -347,7 +341,7 @@
     </main>
   </div>
 
-  <!-- 任务编辑弹窗 -->
+  <!-- 任务编辑弹窗：场景预设三选一 → 预填开关 → 高级选项默认展开 -->
   <dialog id="task-dialog">
     <form method="dialog" id="task-form">
       <div class="dlg-head">
@@ -355,85 +349,90 @@
         <button type="button" class="btn ghost icon-only" data-close="task-dialog"><svg class="ic"><use href="#i-x"/></svg></button>
       </div>
       <div class="dlg-body">
+        <!-- 场景预设（仅新建时显示）：选一张卡片自动预填下方开关 -->
+        <fieldset id="preset-box">
+          <legend><span class="hl-dot"></span>我要做什么</legend>
+          <div class="preset-grid">
+            <button type="button" class="preset-card" data-preset="push">
+              <svg class="ic big"><use href="#i-cloudup"/></svg>
+              <b>把媒体库搬到 115</b>
+              <small>本地视频上传，换成本地 .strm</small>
+            </button>
+            <button type="button" class="preset-card" data-preset="pull">
+              <svg class="ic big"><use href="#i-download"/></svg>
+              <b>把 115 的片拉回本地</b>
+              <small>云端新增落地为 .strm，然后归档</small>
+            </button>
+            <button type="button" class="preset-card" data-preset="both">
+              <svg class="ic big"><use href="#i-grid"/></svg>
+              <b>双向镜像</b>
+              <small>上传 + 下载都开，保持两边一致</small>
+            </button>
+          </div>
+        </fieldset>
+
         <fieldset>
           <legend><span class="hl-dot"></span>基础信息</legend>
           <div class="form-grid">
             <label>任务名<input name="name" required placeholder="如：媒体库"></label>
-            <label>类型
-              <select name="kind">
-                <option value="push">本地同步（本地 → 云端）</option>
-                <option value="pull">云端同步（云端 → 本地）</option>
-              </select>
-            </label>
+            <label class="chk"><input type="checkbox" name="enabled" checked> 启用任务</label>
             <label class="col-2">本地目录
-              <small class="muted">本地文件系统绝对路径</small>
-              <input name="local_dir" placeholder="/媒体库" required>
+              <small class="muted">容器内绝对路径</small>
+              <span class="path-row">
+                <input name="local_dir" placeholder="/媒体库" required>
+                <button type="button" class="btn sm" id="browse-local"><svg class="ic"><use href="#i-folder"/></svg> 浏览</button>
+              </span>
             </label>
             <label class="col-2">云端目录
               <small class="muted">115 网盘绝对路径，以 / 开头</small>
               <input name="cloud_dir" placeholder="/媒体库" required>
             </label>
-            <label class="chk col-2"><input type="checkbox" name="enabled" checked> 启用任务</label>
           </div>
         </fieldset>
 
-        <fieldset data-group="push">
-          <legend><span class="hl-dot"></span>本地方向（本地 → 云端）</legend>
-          <div class="form-grid">
-            <label class="chk"><input type="checkbox" name="watch_enabled" checked> 文件事件监听</label>
-            <label>监听静默时间
-              <small class="muted">分钟；0=默认10</small>
-              <input name="debounce_minutes" type="number" min="0" value="10">
-            </label>
-            <label class="chk"><input type="checkbox" name="strm_now"> .strm 立即同步</label>
-            <label class="chk"><input type="checkbox" name="video_now" checked> 视频立即同步</label>
-            <label class="chk"><input type="checkbox" name="rescan_enabled" checked> 定时全量扫描</label>
-            <label>扫描间隔
-              <small class="muted">小时；0=默认12</small>
-              <input name="rescan_interval_hours" type="number" min="0" value="12">
-            </label>
-            <label class="chk col-2"><input type="checkbox" name="rescan_then_pull"> 全量扫描后扫描云端</label>
-            <label class="chk"><input type="checkbox" name="to_strm" checked> 生成 STRM 文件
-              <small class="muted">关=保留原视频（纯云端备份）</small>
-            </label>
-            <label class="chk"><input type="checkbox" name="to_cache" checked> 上传后移入 cache 目录
-              <small class="muted">关=删除原视频</small>
-            </label>
+        <details class="adv" open>
+          <summary>高级选项</summary>
+          <div class="adv-group" id="adv-up">
+            <div class="adv-title">本地 → 云端</div>
+            <div class="form-grid">
+              <label class="chk"><input type="checkbox" name="upload" checked> 上传本地新增/变更到云端</label>
+              <label class="chk"><input type="checkbox" name="watch" checked> 文件事件监听</label>
+              <label>监听静默时间
+                <small class="muted">分钟；0=默认10</small>
+                <input name="quiet_minutes" type="number" min="0" value="10">
+              </label>
+              <label class="chk"><input type="checkbox" name="instant_now" checked> 视频/STRM 文件立即同步
+                <small class="muted">视频与 .strm 事件绕过静默窗口</small>
+              </label>
+              <label class="chk"><input type="checkbox" name="to_strm" checked> 上传后落地为 STRM
+                <small class="muted">关=上传后本地保留实体视频</small>
+              </label>
+              <label class="chk"><input type="checkbox" name="to_cache" checked> 上传后原件移入缓存
+                <small class="muted">关=删除原视频</small>
+              </label>
+            </div>
           </div>
-        </fieldset>
-
-        <!-- 附带云端扫描：仅 push 任务勾选「全量扫描后扫描云端」时显示；触发时机与间隔随上方全量扫描走 -->
-        <fieldset data-group="attach" hidden>
-          <legend><span class="hl-dot"></span>附带云端扫描（随全量扫描执行）</legend>
-          <div class="form-grid">
-            <label class="chk"><input type="checkbox" name="attach_fetch" checked> 下载云端独有文件
-              <small class="muted">关=只做冗余检查，不下载</small>
-            </label>
-            <label class="chk" id="attach-strm-row"><input type="checkbox" name="attach_to_strm" checked> 生成 STRM 文件
-              <small class="muted">关=下载原视频</small>
-            </label>
-            <label class="chk"><input type="checkbox" name="drop_redundant"> 冗余文件删除
-              <small class="muted">本地已有记录但云端同名文件不一致时，删除云端多余副本</small>
-            </label>
+          <div class="adv-group" id="adv-down">
+            <div class="adv-title">云端 → 本地</div>
+            <div class="form-grid">
+              <label class="chk"><input type="checkbox" name="download"> 下载云端缺失文件</label>
+              <label class="chk"><input type="checkbox" name="to_strm_dl"> 下载落地为 STRM
+                <small class="muted">关=下载实体视频</small>
+              </label>
+              <label class="chk" id="opt-archive"><input type="checkbox" name="archive"> 完成后归档到回收目录</label>
+            </div>
           </div>
-        </fieldset>
-
-        <fieldset data-group="pull" hidden>
-          <legend><span class="hl-dot"></span>云端方向（云端 → 本地）</legend>
-          <div class="form-grid">
-            <label class="chk"><input type="checkbox" name="pull_cron_enabled"> 定时同步</label>
-            <label>同步间隔
-              <small class="muted">小时；0=默认12</small>
-              <input name="pull_cron_interval_hours" type="number" min="0" value="12">
-            </label>
-            <label class="chk"><input type="checkbox" name="pull_to_strm" checked> 生成 STRM 文件
-              <small class="muted">关=下载原视频</small>
-            </label>
-            <label class="chk"><input type="checkbox" name="archive_to_temp"> 同步后移动到 temp 目录
-              <small class="muted">完成后把云端顶层项移入回收目录</small>
-            </label>
+          <div class="adv-group" id="adv-cron">
+            <div class="adv-title">定时执行</div>
+            <div class="form-grid">
+              <label class="chk"><input type="checkbox" name="cron_enabled" checked> 定时执行</label>
+              <label>执行间隔
+                <small class="muted">小时；0=默认12</small>
+                <input name="cron_interval_hours" type="number" min="0" value="12">
+              </label>
+            </div>
           </div>
-        </fieldset>
+        </details>
       </div>
       <div class="form-actions dlg-foot">
         <button type="button" class="btn ghost" data-close="task-dialog">取消</button>
@@ -442,19 +441,53 @@
     </form>
   </dialog>
 
-  <!-- 执行历史弹窗 -->
+  <!-- 预演弹窗：只算计划不执行，危险动作红色标记 -->
+  <dialog id="dryrun-dialog">
+    <div class="dlg-head">
+      <h3 id="dryrun-title">预演</h3>
+      <button type="button" class="btn ghost icon-only" data-close="dryrun-dialog"><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="dlg-body">
+      <div id="dryrun-groups" class="row wrap"></div>
+      <div id="dryrun-list" class="log-box"></div>
+    </div>
+    <div class="form-actions dlg-foot">
+      <button type="button" class="btn ghost" data-close="dryrun-dialog">关闭</button>
+      <button type="button" class="btn primary" id="dryrun-run">确认执行</button>
+    </div>
+  </dialog>
+
+  <!-- 任务动态弹窗 -->
   <dialog id="history-dialog">
     <div class="dlg-head">
-      <h3 id="history-dialog-title">执行历史</h3>
+      <h3 id="history-dialog-title">执行动态</h3>
       <button type="button" class="btn ghost icon-only" data-close="history-dialog"><svg class="ic"><use href="#i-x"/></svg></button>
     </div>
     <div class="dlg-body">
       <div id="history-list" class="history-list"></div>
-      <div id="run-log" class="run-log" hidden></div>
     </div>
     <div class="form-actions dlg-foot">
-      <button type="button" class="btn sm danger" id="history-clear">清空该任务日志</button>
+      <button type="button" class="btn sm danger" id="history-clear">清空该任务动态</button>
       <button type="button" class="btn primary" data-close="history-dialog">关闭</button>
+    </div>
+  </dialog>
+
+  <!-- 目录浏览弹窗 -->
+  <dialog id="fs-dialog">
+    <div class="dlg-head">
+      <h3>选择目录</h3>
+      <button type="button" class="btn ghost icon-only" data-close="fs-dialog"><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="dlg-body">
+      <div class="row between">
+        <code id="fs-path" class="muted">/</code>
+        <button type="button" class="btn sm" id="fs-up"><svg class="ic"><use href="#i-refresh"/></svg> 上一级</button>
+      </div>
+      <div id="fs-list" class="fs-list"></div>
+    </div>
+    <div class="form-actions dlg-foot">
+      <button type="button" class="btn ghost" data-close="fs-dialog">取消</button>
+      <button type="button" class="btn primary" id="fs-pick">选择当前目录</button>
     </div>
   </dialog>
 

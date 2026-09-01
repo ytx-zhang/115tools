@@ -1,7 +1,7 @@
 // main.js —— 应用入口：登录、视图切换（hash 记忆）、全局 SSE 状态流。
 
 import { api, connectSSE } from './api.js';
-import { initTasks, stopTasks, renderTasks, appendSyslog } from './tasks.js';
+import { initTasks, stopTasks, renderTasks } from './tasks.js';
 import { initOffline } from './offline.js';
 import { initCache } from './cache.js';
 import { initSettings } from './settings.js';
@@ -102,12 +102,12 @@ function applyOverview(o) {
   renderTasks();
 }
 
-// 全局 SSE 状态流：overview（配置就绪/任务状态）+ syslog（系统程序日志实时推送）
+// 全局 SSE 状态流：只推 overview（配置就绪 / 任务状态）。程序日志已回归 docker logs。
 function startEvents() {
   closeEvents = connectSSE('/api/events', {
     onMessage: (en) => {
-      if (en.type === 'overview' && en.overview) applyOverview(en.overview);
-      else if (en.type === 'syslog' && en.log) appendSyslog(en.log);
+      // 后端 handleEvents 直接推送 overview 结构（无 type 包装），直接消费
+      if (en && Array.isArray(en.tasks)) applyOverview(en);
     },
   });
 }

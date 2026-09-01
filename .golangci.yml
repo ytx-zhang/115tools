@@ -1,7 +1,11 @@
-# golangci-lint v2 配置（兼容 Go 1.26）。
-# 启用 Go 主流静态检查：gofmt / govet / staticcheck / errcheck / unused / ineffassign / misspell / revive。
-# 原则：零豁免。所有 lint 问题都通过修复代码解决，不在配置中扩大排除范围。
-# 注意：v2 中 formatters 为顶层键，不能嵌套在 linters 下。
+# golangci-lint v2 配置。
+# 原则：标准默认集（gofmt / govet / staticcheck / errcheck / unused / ineffassign / misspell / revive）。
+#
+# 与 v2 时代的「零豁免」不同，本次放开两处纯粹为凑 lint 而伤害可读性的写法：
+#   1. 允许 //nolint —— `defer f.Close()` 这种关闭失败无补救动作的调用，
+#      写 5 行 defer 闭包 + 日志不如一行 nolint 诚实；
+#   2. errcheck 对 io.Closer.Close / os.Remove 放行——清理型调用的错误没有可采取的行动。
+# 其余问题仍然修代码，不扩大排除范围。
 version: "2"
 
 linters:
@@ -9,6 +13,13 @@ linters:
   settings:
     misspell:
       locale: US
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*http.Response).Body.Close
+        - os.Remove
+        - os.RemoveAll
 
 formatters:
   enable:
