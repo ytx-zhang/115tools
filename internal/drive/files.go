@@ -87,22 +87,23 @@ type downURL struct {
 	URL string `json:"url"`
 }
 
-// CreateFolder 在云端目录 pid 下创建子目录 name，返回新目录 FID；同名已存在则复用现有 FID。
-func (c *Client) CreateFolder(ctx context.Context, pid, name, path string) (string, error) {
+// CreateFolder 在云端目录 pid 下创建子目录 name，返回新建/已复用目录的信息（含 FID 与直属计数）；
+// 同名已存在则查询并复用现有目录信息（仅成功路径，失败照常上抛）。
+func (c *Client) CreateFolder(ctx context.Context, pid, name, path string) (*DirInfo, error) {
 	res, dur, err := Post[struct {
 		FileID string `json:"file_id"`
 	}](ctx, c, "/open/folder/add", Form{"pid": pid, "file_name": name})
 	if err == nil {
 		logCall(ctx, "云端创建目录", nil, dur, "路径", path)
-		return res.FileID, nil
+		return &DirInfo{Fid: res.FileID}, nil
 	}
 	if strings.Contains(err.Error(), "该目录名称已存在") {
 		if info, gErr := c.GetDirInfo(ctx, path); gErr == nil && info != nil {
-			return info.Fid, nil
+			return info, nil
 		}
 	}
 	logCall(ctx, "云端创建目录", err, dur, "路径", path)
-	return "", err
+	return nil, err
 }
 
 // MoveFile 把云端文件/目录移动到目标目录 cid（fid 支持逗号分隔批量）。

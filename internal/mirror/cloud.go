@@ -10,10 +10,11 @@ import (
 	"github.com/ytx-zhang/115tools/internal/store"
 )
 
-// EnsureCloudDir 确保云端绝对路径存在，返回末级目录信息（含 FID 与直属计数）。
+// EnsureCloudDir 逐级确保云端绝对路径存在（每级 CreateFolder，同名自动复用），
+// 返回末级目录信息（含 FID 与直属计数，供 ScanCloud 复用根目录、避免重复 GetDirInfo）。
 //
-// 每层「先查后建」：GetDirInfo 命中即复用（含计数），未命中才 CreateFolder。
-// 由此根目录只被查询一次，且结果回传给 ScanCloud 复用，避免下载路径对根重复发 GetDirInfo。
+// 复用 CreateFolder 的「同名已存在→GetDirInfo 回退」即可拿到目录信息：根目录只被查询一次
+//（已存在时 GetDirInfo 命中、新建时根本不查），且目录尚未存在时不会打出失败的查询错误日志。
 func EnsureCloudDir(ctx context.Context, api *drive.Client, path string) (*drive.DirInfo, error) {
 	parentFid := "0"
 	cur := ""
@@ -23,17 +24,12 @@ func EnsureCloudDir(ctx context.Context, api *drive.Client, path string) (*drive
 			continue
 		}
 		cur += "/" + seg
-		if info, err := api.GetDirInfo(ctx, cur); err == nil && info != nil {
-			parentFid = info.Fid
-			last = info
-			continue
-		}
-		fid, err := api.CreateFolder(ctx, parentFid, seg, cur)
+		info, err := api.CreateFolder(ctx, parentFid, seg, cur)
 		if err != nil {
 			return nil, fmt.Errorf("创建云端目录 %s 失败: %w", cur, err)
 		}
-		last = &drive.DirInfo{Fid: fid}
-		parentFid = fid
+		last = info
+		parentFid = info.Fid
 	}
 	if last == nil {
 		return &drive.DirInfo{Fid: "0"}, nil
@@ -65,12 +61,12 @@ func EnsureLocalDir(ctx context.Context, api *drive.Client, idx *store.Store, pa
 			parentFid = fid
 			continue
 		}
-		fid, err := api.CreateFolder(ctx, parentFid, seg, curCloud)
+		info, err := api.CreateFolder(ctx, parentFid, seg, curCloud)
 		if err != nil {
 			return "", fmt.Errorf("创建云端目录 %s 失败: %w", curCloud, err)
 		}
-		parentFid = fid
-		idx.Put(ctx, curLocal, store.Record{Fid: fid, Kind: store.KindDir})
+		parentFid = info.Fid
+		idx.Put(ctx, curLocal, store.Record{Fid: info.Fid, Kind: store.KindDir})
 	}
 	return parentFid, nil
 }
