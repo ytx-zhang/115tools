@@ -28,7 +28,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLogsClear DELETE /api/logs：清空内存缓冲（seq 单调递增不复位），返回 204。
-func (s *Server) handleLogsClear(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleLogsClear(w http.ResponseWriter, _ *http.Request) {
 	s.Logs.Clear()
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -7,7 +7,7 @@ import (
 )
 
 // handleCacheList 返回全部缓存条目 + 汇总。
-func (s *Server) handleCacheList(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleCacheList(w http.ResponseWriter, _ *http.Request) {
 	var items []cache.Item
 	total := int64(0)
 	if s.Cache != nil {

@@ -10,12 +10,12 @@ import (
 )
 
 // handleVersion 版本探针（公开）。
-func handleVersion(w http.ResponseWriter, r *http.Request) {
+func handleVersion(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"version": version.Version})
 }
 
 // handleGetSettings 返回全局设置快照。
-func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.Conf.Snapshot())
 }
 

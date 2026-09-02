@@ -33,7 +33,7 @@ type logsMsg struct {
 }
 
 // handleOverview 返回当前状态快照（非 SSE，供初次加载兜底）。
-func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.overviewRef())
 }
 

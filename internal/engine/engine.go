@@ -364,7 +364,7 @@ func (e *Engine) execute(ctx context.Context, job Job, task conf.Task, prog *Pro
 	case store.ScopeUpload:
 		return e.runUpload(ctx, job, task, prog)
 	case store.ScopeDownload:
-		return e.runDownload(ctx, job, task, prog)
+		return e.runDownload(ctx, task, prog)
 	default:
 		return store.Stats{}, fmt.Errorf("未知作用域: %v", job.Scope)
 	}
@@ -414,7 +414,10 @@ func (e *Engine) runUpload(ctx context.Context, job Job, task conf.Task, prog *P
 }
 
 // runDownload 云端 → 本地：扫本地目录数 → ScanCloud（数量一致跳过）→ PlanCloud → Apply。
-func (e *Engine) runDownload(ctx context.Context, job Job, task conf.Task, prog *Progress) (store.Stats, error) {
+//
+// 不需要 job：下载方向始终以任务配置的云端根（paths.CloudDir）为起点全量比对，
+// 不存在「按监听目录/单文件缩小范围」的语义（watch 事件只投上传作用域，见 runner.dispatch）。
+func (e *Engine) runDownload(ctx context.Context, task conf.Task, prog *Progress) (store.Stats, error) {
 	var stats store.Stats
 	rules := rulesOf(e.conf)
 	paths := e.paths(task)

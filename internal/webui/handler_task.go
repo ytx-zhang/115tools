@@ -12,7 +12,7 @@ import (
 )
 
 // handleListTasks 返回任务列表（配置 + 运行时状态合并）。
-func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListTasks(w http.ResponseWriter, _ *http.Request) {
 	tasks := s.Conf.ListTasks()
 	runtime := make(map[string]engine.TaskRuntime, len(tasks))
 	for _, rt := range s.Engine.Status() {

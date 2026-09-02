@@ -1,4 +1,4 @@
-// Package pan 是 115 开放平台（refresh_token）客户端：纯 API 封装，不校验用户输入、不掺业务。
+// Package drive 是 115 开放平台（refresh_token）客户端：纯 API 封装，不校验用户输入、不掺业务。
 //
 // 划分：
 //   - client.go：Client 装配、统一请求入口（request/Get/Post）、全局限流、鉴权、重试策略；

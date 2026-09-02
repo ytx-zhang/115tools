@@ -187,7 +187,7 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 
 	if s.localCache != nil {
 		if localPath, ok := s.localCache.LocalPath(pickCode); ok {
-			if served := s.serveLocalFile(w, r, localPath, pickCode); served {
+			if served := s.serveLocalFile(w, r, localPath); served {
 				return
 			}
 		}
@@ -273,7 +273,7 @@ func (s *Redirector) serveProxy(w http.ResponseWriter, r *http.Request, pickCode
 }
 
 // serveLocalFile 透传命中本地缓存：用 http.ServeContent 流式回传（支持 Range/206）。
-func (s *Redirector) serveLocalFile(w http.ResponseWriter, r *http.Request, localPath, pickCode string) bool {
+func (s *Redirector) serveLocalFile(w http.ResponseWriter, r *http.Request, localPath string) bool {
 	f, err := os.Open(localPath)
 	if err != nil {
 		if os.IsNotExist(err) {

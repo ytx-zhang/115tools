@@ -82,7 +82,7 @@ func (a *Applier) applyOne(ctx context.Context, op Op, cfg LocalCfg, stats *stor
 	case OpDrop:
 		err = a.drop(ctx, op, stats)
 	case OpNormalize:
-		err = a.normalize(ctx, op)
+		err = a.normalize(op)
 	default:
 		return
 	}
@@ -214,7 +214,8 @@ func (a *Applier) adopt(ctx context.Context, op Op, stats *store.Stats) error {
 }
 
 // normalize 修正本地 .strm 的直链格式（pickcode 未变，只是链接格式过时）。
-func (a *Applier) normalize(ctx context.Context, op Op) error {
+// 纯本地文件读写、无取消语义，故不需要 ctx。
+func (a *Applier) normalize(op Op) error {
 	pc := ParseStrmFile(op.Path)
 	if pc == "" {
 		return nil
