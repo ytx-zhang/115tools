@@ -29,11 +29,15 @@ type Job struct {
 }
 
 // dedupKey 去重键：同一任务同一作用域同一目标，排队中只保留一份。
+//
+// 必须包含 Scope：双向任务一次 trigger 会按 scopes() 连投 upload、download 两个 job，
+// 二者 TaskID/Dir/File 完全相同，若漏掉 Scope 则后投的会被先投的去重合并掉，
+// 导致整个下载方向静默消失（不查云端、不比对数量）。
 func (j Job) dedupKey() string {
 	if j.File != "" {
-		return j.TaskID + "|file|" + j.File
+		return j.TaskID + "|file|" + string(j.Scope) + "|" + j.File
 	}
-	return j.TaskID + "|dir|" + j.Dir
+	return j.TaskID + "|dir|" + string(j.Scope) + "|" + j.Dir
 }
 
 // Queue 全局单消费者工作队列。
