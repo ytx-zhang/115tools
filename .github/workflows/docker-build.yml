@@ -48,10 +48,13 @@ jobs:
         id: tags
         run: |
           BASE="ghcr.io/${{ github.repository }}"
-          if [ "${{ github.event_name }}" = "push" ]; then
+          # 被 workflow_call 调用时 github 上下文沿用调用方：event_name 仍是 push，
+          # GITHUB_REF_NAME 是调用方推送的分支名（main）。若直接取它，#v 对 "main" 无效，
+          # 会打出 :main 标签而丢失版本标签（release 流程走的就是这条路径）。
+          # 故优先取 inputs.version（仅 workflow_call / workflow_dispatch 有值），为空才回落到 tag 推送。
+          VER="${{ inputs.version }}"
+          if [ -z "$VER" ] && [ "${{ github.event_name }}" = "push" ]; then
             VER="${GITHUB_REF_NAME#v}"
-          else
-            VER="${{ inputs.version }}"
           fi
           if [ -n "$VER" ]; then
             echo "tags=${BASE}:${VER},${BASE}:latest" >> "$GITHUB_OUTPUT"
