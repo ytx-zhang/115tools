@@ -22,7 +22,10 @@ import (
 // 非 nil 时，若某云端目录的递归条目数（GetDirInfo count）与对应本地目录一致，视为已同步，
 // 跳过该目录的列表拉取与递归——大库二次同步的提速手段，纯本地 I/O 判定，不读索引。
 // 代价：目录内「等量替换」的变更会被跳过，属已知取舍。
-func ScanCloud(ctx context.Context, api *drive.Client, paths Paths, localCount map[string]int64) (CloudTree, error) {
+//
+// root 为已预先获取的根目录信息（EnsureCloudDir 或预演的 GetDirInfo 结果）；非 nil 时，
+// 根目录那次「数量一致跳过」判定直接复用它，不再对根重复发 GetDirInfo——与 EnsureCloudDir 查重的去重。
+func ScanCloud(ctx context.Context, api *drive.Client, paths Paths, localCount map[string]int64, root *drive.DirInfo) (CloudTree, error) {
 	tree := CloudTree{RootPath: CleanCloudPath(paths.CloudDir), RootFid: paths.CloudFid}
 
 	var (
@@ -36,8 +39,14 @@ func ScanCloud(ctx context.Context, api *drive.Client, paths Paths, localCount m
 		}
 		if localCount != nil {
 			localPath := MapCloudToLocal(paths.LocalDir, paths.CloudDir, path)
-			if info, err := api.GetDirInfo(ctx, path); err == nil && info != nil &&
-				info.FileCount+info.FolderCount == localCount[localPath] {
+			// 根目录：复用调用方已查到的 root，避免重复 GetDirInfo；其余目录照常查询
+			var info *drive.DirInfo
+			if fid == tree.RootFid && root != nil {
+				info = root
+			} else {
+				info, _ = api.GetDirInfo(ctx, path)
+			}
+			if info != nil && info.FileCount+info.FolderCount == localCount[localPath] {
 				return nil // 本地云端数量一致 → 已同步，跳过该目录的遍历
 			}
 		}
@@ -134,7 +143,7 @@ func LocalTreeCount(ctx context.Context, localRoot string, rules Rules, excludeD
 // 关闭则按实体文件记 —— 与 PlanLocal 的键换算规则保持一致，否则会出现「云端已索引、
 // 本地却被当新增重传」的错位。
 func BuildIndex(ctx context.Context, api *drive.Client, st *store.Store, paths Paths, rules Rules, toStrm bool) error {
-	tree, err := ScanCloud(ctx, api, paths, nil) // 初始化必须全量遍历
+	tree, err := ScanCloud(ctx, api, paths, nil, nil) // 初始化必须全量遍历
 	if err != nil {
 		return err
 	}

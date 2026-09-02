@@ -199,10 +199,11 @@ func (e *Engine) initTask(ctx context.Context, task conf.Task) error {
 	if err := os.MkdirAll(paths.LocalDir, 0o755); err != nil {
 		return fmt.Errorf("创建本地目录失败 %s: %w", paths.LocalDir, err)
 	}
-	fid, err := mirror.EnsureCloudDir(ctx, e.api, paths.CloudDir)
+	rootInfo, err := mirror.EnsureCloudDir(ctx, e.api, paths.CloudDir)
 	if err != nil {
 		return err
 	}
+	fid := rootInfo.Fid
 	paths.CloudFid = fid
 
 	// 根 FID 变更 → 清空旧索引（云端目录被整体移动 / 删除重建过）
@@ -228,11 +229,11 @@ func (e *Engine) resolveTempFid(ctx context.Context) error {
 	temp := e.conf.Settings.TempDir
 	info, err := e.api.GetDirInfo(ctx, temp)
 	if err != nil {
-		fid, ferr := mirror.EnsureCloudDir(ctx, e.api, temp)
+		rootInfo, ferr := mirror.EnsureCloudDir(ctx, e.api, temp)
 		if ferr != nil {
 			return ferr
 		}
-		e.setTempFid(fid)
+		e.setTempFid(rootInfo.Fid)
 		return nil
 	}
 	e.setTempFid(info.Fid)
@@ -421,17 +422,17 @@ func (e *Engine) runDownload(ctx context.Context, task conf.Task, prog *Progress
 	var stats store.Stats
 	rules := rulesOf(e.conf)
 	paths := e.paths(task)
-	fid, err := mirror.EnsureCloudDir(ctx, e.api, paths.CloudDir)
+	rootInfo, err := mirror.EnsureCloudDir(ctx, e.api, paths.CloudDir)
 	if err != nil {
 		return stats, err
 	}
-	paths.CloudFid = fid
+	paths.CloudFid = rootInfo.Fid
 
 	localCount, err := mirror.LocalTreeCount(ctx, paths.LocalDir, rules, e.cacheDir)
 	if err != nil {
 		return stats, err
 	}
-	tree, err := mirror.ScanCloud(ctx, e.api, paths, localCount)
+	tree, err := mirror.ScanCloud(ctx, e.api, paths, localCount, rootInfo)
 	if err != nil {
 		return stats, err
 	}
@@ -479,7 +480,7 @@ func (e *Engine) DryRun(id string, scope store.Scope) ([]mirror.Op, error) {
 	if err != nil {
 		return nil, err
 	}
-	tree, err := mirror.ScanCloud(e.appCtx, e.api, paths, localCount)
+	tree, err := mirror.ScanCloud(e.appCtx, e.api, paths, localCount, info)
 	if err != nil {
 		return nil, err
 	}

@@ -10,22 +10,35 @@ import (
 	"github.com/ytx-zhang/115tools/internal/store"
 )
 
-// EnsureCloudDir 逐级确保云端绝对路径存在（每级 CreateFolder，同名自动复用），返回末级 FID。
-func EnsureCloudDir(ctx context.Context, api *drive.Client, path string) (string, error) {
+// EnsureCloudDir 确保云端绝对路径存在，返回末级目录信息（含 FID 与直属计数）。
+//
+// 每层「先查后建」：GetDirInfo 命中即复用（含计数），未命中才 CreateFolder。
+// 由此根目录只被查询一次，且结果回传给 ScanCloud 复用，避免下载路径对根重复发 GetDirInfo。
+func EnsureCloudDir(ctx context.Context, api *drive.Client, path string) (*drive.DirInfo, error) {
 	parentFid := "0"
 	cur := ""
+	var last *drive.DirInfo
 	for seg := range strings.SplitSeq(strings.Trim(path, "/"), "/") {
 		if seg == "" {
 			continue
 		}
 		cur += "/" + seg
+		if info, err := api.GetDirInfo(ctx, cur); err == nil && info != nil {
+			parentFid = info.Fid
+			last = info
+			continue
+		}
 		fid, err := api.CreateFolder(ctx, parentFid, seg, cur)
 		if err != nil {
-			return "", fmt.Errorf("创建云端目录 %s 失败: %w", cur, err)
+			return nil, fmt.Errorf("创建云端目录 %s 失败: %w", cur, err)
 		}
+		last = &drive.DirInfo{Fid: fid}
 		parentFid = fid
 	}
-	return parentFid, nil
+	if last == nil {
+		return &drive.DirInfo{Fid: "0"}, nil
+	}
+	return last, nil
 }
 
 // EnsureLocalDir 确保本地子目录对应的云端目录存在并写索引，返回其 FID。
