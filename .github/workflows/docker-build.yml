@@ -68,13 +68,13 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.tags }}
 
-      - name: 清理无标签旧版本
+      - name: 清理无标签旧版本（仅删除一天前、且仍无 tag 的，避免误删刚推送的镜像）
         run: |
           PACKAGE="${{ env.IMAGE_NAME }}"
           OWNER="${PACKAGE%%/*}"
           REPO="${PACKAGE##*/}"
           gh api "users/${OWNER}/packages/container/${REPO}/versions" --paginate \
-            --jq '.[] | select(.metadata.container.tags | length == 0) | .id' \
+            --jq '.[] | select(((.metadata.container.tags // []) | length) == 0) | select(((.created_at // "1970-01-01T00:00:00Z" | sub("\\.[0-9]+Z$"; "Z")) | fromdateiso8601) < (now - 86400)) | .id' \
             | while read -r version_id; do
               echo "删除旧版本: $version_id"
               gh api "users/${OWNER}/packages/container/${REPO}/versions/${version_id}" \
