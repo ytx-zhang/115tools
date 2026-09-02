@@ -298,7 +298,7 @@ function renderDryOps(box, ops) {
   box.replaceChildren();
   if (!ops.length) { box.append(el('div', 'muted', '没有需要执行的动作，两边已经一致')); return; }
   box.replaceChildren(...ops.map((op) => {
-    const n = fromTemplate('tpl-line', { '.lv': op.label, '.t': op.path });
+    const n = fromTemplate('tpl-line', { '.lv': op.label, '.msg': op.path });
     if (op.danger) n.className = 'log-line lv-error';
     if (op.reason) n.querySelector('.attrs').textContent = ' ' + op.reason;
     return n;

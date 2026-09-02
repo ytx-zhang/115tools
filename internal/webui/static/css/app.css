@@ -176,11 +176,12 @@ textarea { resize: vertical; font-family: inherit; }
   .err { width: 100%; margin-top: 4px; }
 }
 .log-line {
-  display: flex; align-items: baseline; gap: 8px; padding: 5px 6px; border-radius: 4px;
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; padding: 5px 6px; border-radius: 4px;
   font-size: 12px; overflow-wrap: anywhere;
   &:hover { background: var(--bg3); }
   .lv { font-weight: 700; flex: none; }
   .t { color: var(--muted); flex: none; font-variant-numeric: tabular-nums; }
+  .msg, .attrs { min-width: 0; }
   .attrs { color: var(--muted); }
   &.lv-warn { color: var(--warn); }
   &.lv-error { color: var(--err); }
