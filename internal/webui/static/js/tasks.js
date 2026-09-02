@@ -309,7 +309,7 @@ function renderDryOps(box, ops) {
 
 const LOG_CAP = 300;          // 与后端缓冲幅度一致
 let logEntries = [];          // 最新在前
-let logUnread = 0;            // 未读计数（打开弹窗清零）
+let logUnread = 0;            // 角标未读数 = 缓冲内全部条目（用户不清空就一直显示）
 let logSynced = false;        // 仅首次进入任务中心补拉一次全量
 
 function dlgOpen() { const d = els('log-dialog'); return d && d.open; }
@@ -321,18 +321,19 @@ export function handleLogs(p) {
   else if (logs.length) {
     logEntries = logs.concat(logEntries);
     if (logEntries.length > LOG_CAP) logEntries.length = LOG_CAP;
-    if (!dlgOpen()) logUnread += logs.length;
   }
+  logUnread = logEntries.length;   // 全部条目都算，不清空不走
   if (dlgOpen()) renderLogList(); else updateLogAlert();
 }
 
-// 补拉全量（仅「首进非任务中心页」漏收场景）；未读仍 0（历史日志不打扰）。
+// 补拉全量（仅「首进非任务中心页」漏收场景）。
 async function syncLogs() {
   if (logSynced) return;
   logSynced = true;
   try {
     const { logs } = await api('/api/logs');
     logEntries = logs ?? [];
+    logUnread = logEntries.length;
     dlgOpen() ? renderLogList() : updateLogAlert();
   } catch {}
 }
@@ -364,8 +365,6 @@ function logRow(e) {
 }
 
 function openLogDialog() {
-  logUnread = 0;
-  updateLogAlert();
   renderLogList();
   els('log-dialog').showModal();
 }
