@@ -54,6 +54,22 @@ func TestFeedSinceStale(t *testing.T) {
 	}
 }
 
+// TestFeedSinceFromZero 锁死「缓冲未回绕（start==0）+ seq==0」场景：这正是线上
+// 进程刚启动、SSE 首帧 lastLogSeq=0 时推送第一条 Warn/Error 的路径。
+// 旧写法 for s := next-1; s >= lo; s-- 中 s 为 uint64，减到 0 后自减会下溢成
+// MaxUint64，"s >= lo" 恒成立 → 无限追加、内存暴涨 OOM 且全程持锁卡死进程。
+// （TestFeedSinceStale 用的是已回绕的 feed，start=2，覆盖不到这条路径。）
+func TestFeedSinceFromZero(t *testing.T) {
+	f := NewFeed(10)
+	for i := 0; i < 3; i++ {
+		f.Add(Entry{Msg: fmt.Sprintf("m%d", i)})
+	}
+	got := f.Since(0)
+	if len(got) != 3 || got[0].Msg != "m2" || got[2].Msg != "m0" {
+		t.Fatalf("Since(0) = %+v, want [m2 m1 m0]", got)
+	}
+}
+
 func TestFeedClear(t *testing.T) {
 	f := NewFeed(5)
 	for i := 0; i < 3; i++ {

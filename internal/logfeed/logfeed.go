@@ -39,12 +39,13 @@ type Feed struct {
 	subs  map[chan struct{}]struct{}
 }
 
-// NewFeed 创建容量为 cap 的环形缓冲；cap<=0 使用默认 300。
-func NewFeed(cap int) *Feed {
-	if cap <= 0 {
-		cap = defaultCap
+// NewFeed 创建容量为 capacity 的环形缓冲；capacity<=0 使用默认 300。
+// 参数名不用 cap，避免遮蔽内建函数 cap。
+func NewFeed(capacity int) *Feed {
+	if capacity <= 0 {
+		capacity = defaultCap
 	}
-	return &Feed{buf: make([]Entry, cap), cap: cap}
+	return &Feed{buf: make([]Entry, capacity), cap: capacity}
 }
 
 // Add 环形追加一条日志（seq 由内部分配）并广播「有新日志」信号。
@@ -108,7 +109,12 @@ func (f *Feed) Since(seq uint64) []Entry {
 		lo = seq + 1
 	}
 	out := make([]Entry, 0, int(f.next-lo))
-	for s := f.next - 1; s >= lo; s-- {
+	// 倒序遍历（seq 从 next-1 递减到 lo）：s 是 uint64，必须先自减再判边界。
+	// 若写成 for s := f.next-1; s >= lo; s--，当 lo==0 时 s 减到 0 后再自减会下溢成
+	// MaxUint64，"s >= lo" 对无符号数恒成立 → 无限追加、内存暴涨直至 OOM；
+	// 且循环全程持 f.mu，之后所有日志调用都会阻塞在 Add 上（表现为整进程卡死）。
+	for s := f.next; s > lo; {
+		s--
 		out = append(out, f.buf[s%uint64(f.cap)])
 	}
 	return out
