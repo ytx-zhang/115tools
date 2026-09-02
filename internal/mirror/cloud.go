@@ -10,11 +10,11 @@ import (
 	"github.com/ytx-zhang/115tools/internal/store"
 )
 
-// EnsureCloudDir 逐级确保云端绝对路径存在（每级 CreateFolder，同名自动复用），
-// 返回末级目录信息（含 FID 与直属计数，供 ScanCloud 复用根目录、避免重复 GetDirInfo）。
+// EnsureCloudDir 逐级确保云端绝对路径存在，返回末级目录信息（含 FID 与直属计数）。
 //
-// 复用 CreateFolder 的「同名已存在→GetDirInfo 回退」即可拿到目录信息：根目录只被查询一次
-//（已存在时 GetDirInfo 命中、新建时根本不查），且目录尚未存在时不会打出失败的查询错误日志。
+// 每层「先查询，查不到（报错）再新建」：GetDirInfo 命中即复用（含计数），根目录只查这一次；
+// 仅当目录确实不存在（首次运行）时才会先打一条「查询失败」错误日志再建——属一次性、可接受。
+// 得到的 root 信息回传给 ScanCloud 复用，避免下载路径对根重复发 GetDirInfo。
 func EnsureCloudDir(ctx context.Context, api *drive.Client, path string) (*drive.DirInfo, error) {
 	parentFid := "0"
 	cur := ""
@@ -24,6 +24,11 @@ func EnsureCloudDir(ctx context.Context, api *drive.Client, path string) (*drive
 			continue
 		}
 		cur += "/" + seg
+		if info, err := api.GetDirInfo(ctx, cur); err == nil && info != nil {
+			parentFid = info.Fid
+			last = info
+			continue
+		}
 		info, err := api.CreateFolder(ctx, parentFid, seg, cur)
 		if err != nil {
 			return nil, fmt.Errorf("创建云端目录 %s 失败: %w", cur, err)
