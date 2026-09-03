@@ -313,7 +313,7 @@ func UploadHelper(ctx context.Context, c *Client, path, cid, signKey, signVal st
 			signKey, signVal = init.SignKey, FileSHA1Partial(path, start, end)
 		default:
 			var up string
-			info, up, err = uploadByOSS(ctx, c, path, fileSize, init)
+			info, up, err = uploadByOSS(ctx, c, path, fileSize, init, fileSha1)
 			upType = up
 			return info, err
 		}
@@ -321,11 +321,16 @@ func UploadHelper(ctx context.Context, c *Client, path, cid, signKey, signVal st
 	return nil, fmt.Errorf("秒传重试次数耗尽")
 }
 
-func uploadByOSS(ctx context.Context, c *Client, path string, fileSize int64, init *UploadInitInfo) (*UploadFileInfo, string, error) {
+func uploadByOSS(ctx context.Context, c *Client, path string, fileSize int64, init *UploadInitInfo, fileSha1 string) (*UploadFileInfo, string, error) {
 	token, err := c.getUploadToken(ctx, path)
 	if err != nil {
 		return nil, "", err
 	}
+	// 115 的 OSS 回调体含 ${sha1} 占位符：普通(PutObject)上传时阿里云 OSS 会自动计算并回填文件整体 SHA1，
+	// 但分片(Multipart)上传时 OSS 不会计算整体 SHA1，导致 115 服务端回调校验失败（"校验文件失败，请重新上传"）。
+	// 手动把 ${sha1} 替换为本地已算好的完整文件 SHA1（即 init 时提交的 fileid，115 校验比对的目标值）。
+	init.Callback.Callback = strings.ReplaceAll(init.Callback.Callback, "${sha1}", fileSha1)
+	init.Callback.CallbackVar = strings.ReplaceAll(init.Callback.CallbackVar, "${sha1}", fileSha1)
 	initData := OssInitData{Bucket: init.Bucket, Object: init.Object, Callback: init.Callback}
 	f, err := os.Open(path)
 	if err != nil {
